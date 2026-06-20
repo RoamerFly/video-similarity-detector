@@ -394,7 +394,7 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
         }
 
     Get-ChildItem -LiteralPath $PythonDir -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
+        Where-Object { $_.Extension -in @(".pyc", ".pyo", ".lib", ".exp", ".pdb") } |
         ForEach-Object {
             Assert-ChildPath $PythonDir $_.FullName
             Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
@@ -439,15 +439,13 @@ function Test-BundledPythonEnv([string]$PythonExe, [bool]$RequireCuda = $false) 
     $cudaRequiredLiteral = if ($RequireCuda) { "True" } else { "False" }
     $probe = @"
 import importlib.util
-missing = [name for name in ["numpy", "torch", "transformers", "PIL", "cv2", "decord", "faiss", "imagehash", "tqdm", "imageio_ffmpeg"] if importlib.util.find_spec(name) is None]
+missing = [name for name in ["numpy", "torch", "transformers", "PIL", "cv2", "decord", "faiss", "imagehash", "tqdm"] if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing modules: " + ", ".join(missing))
 import torch
-import imageio_ffmpeg
 print("Torch:", torch.__version__)
 print("Torch CUDA:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
-print("FFmpeg:", imageio_ffmpeg.get_ffmpeg_exe())
 if $cudaRequiredLiteral and not torch.version.cuda:
     raise SystemExit("CUDA is required for this GPU package, but this torch build has no CUDA runtime")
 print("Bundled Python env OK")

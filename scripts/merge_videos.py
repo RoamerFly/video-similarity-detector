@@ -55,8 +55,8 @@ def resolve_ffmpeg(project_root: Path) -> str:
     if candidate:
         return candidate
     raise RuntimeError(
-        "未找到 FFmpeg。请重新构建带 imageio-ffmpeg 的运行环境，"
-        "或把 ffmpeg 放到 exe 同级 tools 目录。"
+        "未找到 FFmpeg。请重新构建带独立 FFmpeg 的运行环境，"
+        "或把 ffmpeg 放到应用 env 或 tools 目录。"
     )
 
 

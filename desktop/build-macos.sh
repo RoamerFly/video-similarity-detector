@@ -174,15 +174,13 @@ verify_python_env() {
   echo "  - Verifying bundled Python dependencies"
   "$python" - <<'PY'
 import importlib.util
-missing = [name for name in ["numpy", "torch", "transformers", "PIL", "cv2", "decord", "faiss", "imagehash", "tqdm", "imageio_ffmpeg"] if importlib.util.find_spec(name) is None]
+missing = [name for name in ["numpy", "torch", "transformers", "PIL", "cv2", "decord", "faiss", "imagehash", "tqdm"] if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing modules: " + ", ".join(missing))
 import torch
-import imageio_ffmpeg
 print("Torch:", torch.__version__)
 print("Torch CUDA:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
-print("FFmpeg:", imageio_ffmpeg.get_ffmpeg_exe())
 print("Bundled Python env OK")
 PY
 }
