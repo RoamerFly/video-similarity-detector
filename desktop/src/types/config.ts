@@ -1,0 +1,212 @@
+export type ResizeMode = 'center_crop' | 'letterbox'
+export type DeviceMode = 'cpu' | 'cuda' | 'auto'
+export type PortraitRotation = 'left_90' | 'right_90'
+export type AnalysisMode = 'video_similarity' | 'duplicate_file'
+export type EditableAnalysisPresetId = 'ultra_fast' | 'fast' | 'normal' | 'precise' | 'perfect'
+export type AnalysisPresetId = EditableAnalysisPresetId | 'duplicate_file'
+export type CloseBehavior = 'ask' | 'tray' | 'exit'
+
+export interface SettingsSnapshot {
+  pythonPath: string
+  projectRoot: string
+  videoDir: string
+  cacheDir: string
+  reportDir: string
+  defaultSkipThreshold: number
+  defaultMatchThreshold: number
+  defaultWindowSize: number
+  defaultTopK: number
+  defaultCandidateLimit: number
+  defaultMaxGapSec: number
+  defaultFrameStep: number
+  defaultMinSegmentDuration: number
+  defaultMinSegmentMatches: number
+  defaultOffsetTolerance: number
+  defaultCropBlackBorders: boolean
+  defaultResizeMode: ResizeMode
+  defaultInputSize: number
+  defaultPortraitRotation: PortraitRotation
+  defaultForce: boolean
+  defaultDevice: DeviceMode
+  checkEnvOnStartup: boolean
+  openMaximized: boolean
+  closeBehavior: CloseBehavior
+  analysisMode: AnalysisMode
+  selectedAnalysisPreset: AnalysisPresetId
+  customAnalysisPresets: Record<EditableAnalysisPresetId, AnalysisPresetConfig>
+}
+
+export interface AnalysisConfig {
+  videoDir: string
+  outputDir: string
+  skipThreshold: number
+  matchThreshold: number
+  windowSize: number
+  topK: number
+  candidateLimit: number
+  maxGapSec: number
+  frameStep: number
+  minSegmentDuration: number
+  minSegmentMatches: number
+  offsetTolerance: number
+  cropBlackBorders: boolean
+  resizeMode: ResizeMode
+  inputSize: number
+  portraitRotation: PortraitRotation
+  force: boolean
+  mode: AnalysisMode
+}
+
+export type AnalysisPresetConfig = Pick<
+  SettingsSnapshot,
+  | 'analysisMode'
+  | 'defaultSkipThreshold'
+  | 'defaultMatchThreshold'
+  | 'defaultWindowSize'
+  | 'defaultTopK'
+  | 'defaultCandidateLimit'
+  | 'defaultMaxGapSec'
+  | 'defaultFrameStep'
+  | 'defaultMinSegmentDuration'
+  | 'defaultMinSegmentMatches'
+  | 'defaultOffsetTolerance'
+  | 'defaultCropBlackBorders'
+  | 'defaultResizeMode'
+  | 'defaultInputSize'
+  | 'defaultPortraitRotation'
+  | 'defaultForce'
+  | 'defaultDevice'
+>
+
+const normalAnalysisPreset: AnalysisPresetConfig = {
+  analysisMode: 'video_similarity',
+  defaultSkipThreshold: 0.82,
+  defaultMatchThreshold: 0.64,
+  defaultWindowSize: 60,
+  defaultTopK: 5,
+  defaultCandidateLimit: 20,
+  defaultMaxGapSec: 18,
+  defaultFrameStep: 6,
+  defaultMinSegmentDuration: 5,
+  defaultMinSegmentMatches: 3,
+  defaultOffsetTolerance: 3,
+  defaultCropBlackBorders: true,
+  defaultResizeMode: 'center_crop',
+  defaultInputSize: 224,
+  defaultPortraitRotation: 'right_90',
+  defaultForce: false,
+  defaultDevice: 'auto',
+}
+
+export const analysisPresets: Record<AnalysisPresetId, AnalysisPresetConfig> = {
+  ultra_fast: {
+    ...normalAnalysisPreset,
+    defaultSkipThreshold: 0.6,
+    defaultMatchThreshold: 0.58,
+    defaultWindowSize: 180,
+    defaultTopK: 1,
+    defaultCandidateLimit: 6,
+    defaultMaxGapSec: 45,
+    defaultFrameStep: 30,
+    defaultMinSegmentDuration: 12,
+    defaultMinSegmentMatches: 2,
+    defaultOffsetTolerance: 8,
+    defaultInputSize: 128,
+  },
+  fast: {
+    ...normalAnalysisPreset,
+    defaultSkipThreshold: 0.7,
+    defaultMatchThreshold: 0.6,
+    defaultWindowSize: 120,
+    defaultTopK: 2,
+    defaultCandidateLimit: 10,
+    defaultMaxGapSec: 30,
+    defaultFrameStep: 16,
+    defaultMinSegmentDuration: 8,
+    defaultMinSegmentMatches: 2,
+    defaultOffsetTolerance: 5,
+    defaultInputSize: 160,
+  },
+  normal: normalAnalysisPreset,
+  precise: {
+    ...normalAnalysisPreset,
+    defaultSkipThreshold: 0.92,
+    defaultMatchThreshold: 0.68,
+    defaultWindowSize: 30,
+    defaultTopK: 10,
+    defaultCandidateLimit: 40,
+    defaultMaxGapSec: 8,
+    defaultFrameStep: 3,
+    defaultMinSegmentDuration: 3,
+    defaultMinSegmentMatches: 3,
+    defaultOffsetTolerance: 2,
+    defaultInputSize: 256,
+  },
+  perfect: {
+    ...normalAnalysisPreset,
+    defaultSkipThreshold: 0.98,
+    defaultMatchThreshold: 0.72,
+    defaultWindowSize: 15,
+    defaultTopK: 24,
+    defaultCandidateLimit: 0,
+    defaultMaxGapSec: 3,
+    defaultFrameStep: 1,
+    defaultMinSegmentDuration: 2,
+    defaultMinSegmentMatches: 2,
+    defaultOffsetTolerance: 1,
+    defaultInputSize: 384,
+  },
+  duplicate_file: {
+    ...normalAnalysisPreset,
+    analysisMode: 'duplicate_file',
+  },
+}
+
+export function cloneEditableAnalysisPresets(
+  source: Partial<Record<EditableAnalysisPresetId, AnalysisPresetConfig>> = analysisPresets,
+): Record<EditableAnalysisPresetId, AnalysisPresetConfig> {
+  return {
+    ultra_fast: { ...analysisPresets.ultra_fast, ...source.ultra_fast },
+    fast: { ...analysisPresets.fast, ...source.fast },
+    normal: { ...analysisPresets.normal, ...source.normal },
+    precise: { ...analysisPresets.precise, ...source.precise },
+    perfect: { ...analysisPresets.perfect, ...source.perfect },
+  }
+}
+
+export const defaultSettings: SettingsSnapshot = {
+  pythonPath: 'python',
+  projectRoot: '',
+  videoDir: '',
+  cacheDir: 'data',
+  reportDir: 'data/reports',
+  ...normalAnalysisPreset,
+  checkEnvOnStartup: true,
+  openMaximized: true,
+  closeBehavior: 'ask',
+  selectedAnalysisPreset: 'normal',
+  customAnalysisPresets: cloneEditableAnalysisPresets(),
+}
+
+export function analysisConfigFromSettings(settings: SettingsSnapshot): AnalysisConfig {
+  return {
+    videoDir: settings.videoDir,
+    outputDir: settings.reportDir,
+    skipThreshold: settings.defaultSkipThreshold,
+    matchThreshold: settings.defaultMatchThreshold,
+    windowSize: settings.defaultWindowSize,
+    topK: settings.defaultTopK,
+    candidateLimit: settings.defaultCandidateLimit,
+    maxGapSec: settings.defaultMaxGapSec,
+    frameStep: settings.defaultFrameStep,
+    minSegmentDuration: settings.defaultMinSegmentDuration,
+    minSegmentMatches: settings.defaultMinSegmentMatches,
+    offsetTolerance: settings.defaultOffsetTolerance,
+    cropBlackBorders: settings.defaultCropBlackBorders,
+    resizeMode: settings.defaultResizeMode,
+    inputSize: settings.defaultInputSize,
+    portraitRotation: settings.defaultPortraitRotation,
+    force: settings.defaultForce,
+    mode: settings.analysisMode,
+  }
+}

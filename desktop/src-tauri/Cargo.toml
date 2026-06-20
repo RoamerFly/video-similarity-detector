@@ -1,0 +1,25 @@
+[package]
+name = "video-similarity-desktop"
+version = "0.1.0"
+description = "Video Similarity Analysis Desktop Application"
+authors = ["developer"]
+license = "MIT"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-single-instance = "2"
+
+[features]
+# this feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE
+custom-protocol = ["tauri/custom-protocol"]

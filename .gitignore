@@ -1,0 +1,12 @@
+/.idea
+/.claude
+/.pytest_cache
+/data
+/embeddings
+/videos
+
+__pycache__/
+*.py[cod]
+
+video_meta.txt
+faiss_video_index.bin

@@ -1,0 +1,12 @@
+# Runtime-only dependencies for the packaged desktop app.
+# Keep this list lean: dev/test/server-only packages stay in the repo-level requirements.txt.
+numpy
+torch
+transformers
+pillow
+opencv-python-headless
+decord
+faiss-cpu
+imagehash
+tqdm
+imageio-ffmpeg

@@ -1,0 +1,11 @@
+numpy
+torch
+transformers
+pillow
+opencv-python
+decord
+faiss-cpu
+imagehash
+flask
+tqdm
+pytest
