@@ -377,7 +377,6 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
         "Lib\idlelib",
         "Lib\ensurepip",
         "Lib\site-packages\torch\include",
-        "Lib\site-packages\torch\testing",
         "share\doc"
     )
 
@@ -390,7 +389,7 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
     }
 
     Get-ChildItem -LiteralPath $PythonDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq "__pycache__" } |
+        Where-Object { $_.Name -in @("__pycache__", "test", "tests") } |
         ForEach-Object {
             Assert-ChildPath $PythonDir $_.FullName
             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
