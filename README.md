@@ -1,4 +1,4 @@
-# Video Similarity & Containment Detector
+# 视频相似度检测 Video Similarity detector
 
 [![Downloads](https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&logo=github&color=blue)](https://github.com/RoamerFly/video-similarity-detector/releases)
 
