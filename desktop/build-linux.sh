@@ -254,6 +254,7 @@ copy_runtime_tree() {
   cp "$REQUIREMENTS" "$DIST_DIR/requirements.txt"
   cp "$RUNTIME_REQUIREMENTS" "$DIST_DIR/requirements-runtime.txt"
   cp -R "$ENV_DIR" "$DIST_DIR/env"
+  chmod +x "$DIST_DIR/env/ffmpeg" "$DIST_DIR/env/ffprobe"
 }
 
 copy_linux_artifact() {
@@ -274,6 +275,8 @@ export USE_TF=0
 export TRANSFORMERS_NO_TF=1
 export TF_CPP_MIN_LOG_LEVEL=2
 export PYTHONNOUSERSITE=1
+export VIDEO_SIM_FFMPEG="$PWD/env/ffmpeg"
+export PATH="$PWD/env:$PATH"
 ./video-similarity-desktop
 EOF
   chmod +x "$DIST_DIR/run-video-similarity.sh"
@@ -286,6 +289,7 @@ Video Similarity - Linux portable package
 Output structure:
 - video-similarity-desktop: executable app.
 - env/python/: bundled runtime and dependencies.
+- env/ffmpeg and env/ffprobe: bundled standalone media tools.
 - data/: analysis data, cache and reports.
 - scripts/ and video_sim/: analysis engine copied next to the executable.
 
@@ -299,6 +303,8 @@ EOF
 assert_portable_package() {
   [[ -x "$DIST_DIR/video-similarity-desktop" ]] || { echo "[ERROR] Missing executable"; exit 1; }
   [[ -d "$DIST_DIR/env/python" ]] || { echo "[ERROR] Missing env/python"; exit 1; }
+  [[ -x "$DIST_DIR/env/ffmpeg" ]] || { echo "[ERROR] Missing env/ffmpeg"; exit 1; }
+  [[ -x "$DIST_DIR/env/ffprobe" ]] || { echo "[ERROR] Missing env/ffprobe"; exit 1; }
   [[ -d "$DIST_DIR/data/reports" ]] || { echo "[ERROR] Missing data/reports"; exit 1; }
   [[ -f "$DIST_DIR/scripts/batch_compare.py" ]] || { echo "[ERROR] Missing scripts/batch_compare.py"; exit 1; }
   [[ -f "$DIST_DIR/scripts/merge_videos.py" ]] || { echo "[ERROR] Missing scripts/merge_videos.py"; exit 1; }
@@ -308,6 +314,8 @@ assert_portable_package() {
 
   local dist_python="$DIST_DIR/env/python/bin/python"
   [[ -x "$dist_python" ]] || dist_python="$DIST_DIR/env/python/bin/python3"
+  "$DIST_DIR/env/ffmpeg" -version >/dev/null
+  "$DIST_DIR/env/ffprobe" -version >/dev/null
   verify_python_env "$dist_python"
   "$dist_python" -m py_compile \
     "$DIST_DIR/scripts/batch_compare.py" \
@@ -330,6 +338,12 @@ echo "Env dir      : $ENV_DIR"
 echo "Runtime reqs : $RUNTIME_REQUIREMENTS"
 
 cd "$DESKTOP_DIR"
+
+if [[ ! -x "$ENV_DIR/ffmpeg" || ! -x "$ENV_DIR/ffprobe" ]]; then
+  step "[0/9] Downloading standalone FFmpeg runtime..."
+  chmod +x "$REPO_ROOT/scripts/prepare-ffmpeg-runtime.sh"
+  "$REPO_ROOT/scripts/prepare-ffmpeg-runtime.sh" linux-x64
+fi
 
 step "[1/9] Checking build tools..."
 load_build_tool_paths

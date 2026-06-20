@@ -357,6 +357,10 @@ struct RunBatchCompareConfig {
 #[serde(rename_all = "camelCase")]
 struct MergeVideoItem {
     path: String,
+    #[serde(default)]
+    start_time: f64,
+    #[serde(default)]
+    track_index: u32,
     trim_start: Option<f64>,
     trim_end: Option<f64>,
     #[serde(default)]
@@ -373,6 +377,16 @@ struct MergeVideoItem {
     crop_width: u32,
     #[serde(default)]
     crop_height: u32,
+    #[serde(default)]
+    layout_custom: bool,
+    #[serde(default)]
+    layout_x: f64,
+    #[serde(default)]
+    layout_y: f64,
+    #[serde(default = "default_layout_size")]
+    layout_width: f64,
+    #[serde(default = "default_layout_size")]
+    layout_height: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,14 +409,30 @@ struct VideoMergeConfig {
     width: u32,
     height: u32,
     fit_mode: String,
+    #[serde(default = "default_canvas_background")]
+    canvas_background: String,
     split_mode: String,
     split_value: f64,
     fps: u32,
     crf: u32,
     encoder_preset: String,
     include_audio: bool,
+    #[serde(default = "default_true")]
+    snap_to_videos: bool,
     project_root: Option<String>,
     python_path: Option<String>,
+}
+
+fn default_canvas_background() -> String {
+    "black".to_string()
+}
+
+fn default_layout_size() -> f64 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Default)]
@@ -961,6 +991,8 @@ fn run_video_merge(
         .iter()
         .map(|item| MergeVideoItem {
             path: path_to_string(resolve_user_path(&root, &item.path)),
+            start_time: item.start_time,
+            track_index: item.track_index,
             trim_start: item.trim_start,
             trim_end: item.trim_end,
             muted: item.muted,
@@ -970,6 +1002,11 @@ fn run_video_merge(
             crop_y: item.crop_y,
             crop_width: item.crop_width,
             crop_height: item.crop_height,
+            layout_custom: item.layout_custom,
+            layout_x: item.layout_x,
+            layout_y: item.layout_y,
+            layout_width: item.layout_width,
+            layout_height: item.layout_height,
         })
         .collect();
     for item in &normalized_config.inputs {

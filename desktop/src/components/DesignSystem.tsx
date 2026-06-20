@@ -1,6 +1,7 @@
 import type {
   ButtonHTMLAttributes,
   CSSProperties,
+  HTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
   SelectHTMLAttributes,
@@ -21,15 +22,14 @@ const toneClass: Record<Tone, string> = {
   red: 'tone-red',
 }
 
-interface GlassPanelProps {
+interface GlassPanelProps extends HTMLAttributes<HTMLElement> {
   children: ReactNode
-  className?: string
   active?: boolean
 }
 
-export function GlassPanel({ children, className, active = false }: GlassPanelProps) {
+export function GlassPanel({ children, className, active = false, ...props }: GlassPanelProps) {
   return (
-    <section className={cn('glass-panel', active && 'is-active', className)}>
+    <section className={cn('glass-panel', active && 'is-active', className)} {...props}>
       {children}
     </section>
   )

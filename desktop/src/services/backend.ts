@@ -32,6 +32,8 @@ export interface VideoMetadata {
 
 export interface VideoMergeItem {
   path: string
+  startTime: number
+  trackIndex: number
   trimStart?: number
   trimEnd?: number
   muted?: boolean
@@ -41,6 +43,11 @@ export interface VideoMergeItem {
   cropY?: number
   cropWidth?: number
   cropHeight?: number
+  layoutCustom?: boolean
+  layoutX?: number
+  layoutY?: number
+  layoutWidth?: number
+  layoutHeight?: number
 }
 
 export interface VideoMergeAudioItem {
@@ -58,12 +65,14 @@ export interface VideoMergeConfig {
   width: number
   height: number
   fitMode: 'contain' | 'cover' | 'stretch'
+  canvasBackground: 'black' | 'white'
   splitMode: 'none' | 'duration' | 'count'
   splitValue: number
   fps: number
   crf: number
   encoderPreset: string
   includeAudio: boolean
+  snapToVideos: boolean
   projectRoot?: string
   pythonPath?: string
 }

@@ -27,9 +27,13 @@ Video_Similarity-v<版本>-macos-arm64-installer.dmg
 Video_Similarity-v<版本>-macos-arm64-portable.zip
 Video_Similarity-v<版本>-macos-x64-installer.dmg
 Video_Similarity-v<版本>-macos-x64-portable.zip
-Video_Similarity-v<版本>-windows-x64-installer.exe
-Video_Similarity-v<版本>-windows-x64-portable.zip
+Video_Similarity-v<版本>-windows-x64-cpu-installer.exe
+Video_Similarity-v<版本>-windows-x64-cpu-portable.zip
+Video_Similarity-v<版本>-windows-x64-gpu-installer.exe
+Video_Similarity-v<版本>-windows-x64-gpu-portable.zip
 ```
+
+安装包和便携包都内置 Python 运行环境、FFmpeg 与 FFprobe，下载后无需另行安装这些依赖。Windows GPU 版内置 CUDA 版 PyTorch，适合具有兼容 NVIDIA 显卡和驱动的设备；其他用户请选择 CPU 版。
 
 ## 功能
 
@@ -40,26 +44,26 @@ Video_Similarity-v<版本>-windows-x64-portable.zip
 - 断点恢复：取消或中断后可复用已完成的视频缓存和视频对结果。
 - 结果管理：排序、筛选、分页、多选删除记录或源视频文件。
 - 人工复核：并排播放视频，查看 A 到 B、B 到 A 的相似帧和算法视角。
-- 时间线编辑：拆分、排序、裁剪视频片段，导入或提取音频并混音导出。
+- 多轨时间线编辑：拆分、旋转、裁剪和跨轨拖放片段，支持多视频组合布局、音频混响与撤销重做。
 - 结构化报告：生成 JSON、CSV 和 HTML 报告。
-- CPU/GPU 构建：Windows 支持 CPU 便携版和 CUDA GPU 便携版。
+- CPU/GPU 构建：Windows 同时发布 CPU 与 CUDA GPU 的安装包和便携包。
 - 单实例和系统托盘：避免重复启动，可配置关闭时退出或最小化到托盘。
 
 ## 界面预览
 
-以下 PNG 为界面预览占位符，可在发布正式版本时替换为真实应用截图。
+以下图片来自当前桌面应用的真实界面。
 
 | 分析任务 | 结果总览 |
 | --- | --- |
-| ![Analyze page placeholder](docs/screenshots/analyze.png) | ![Results page placeholder](docs/screenshots/results.png) |
+| ![分析任务界面](docs/screenshots/analyze.png) | ![结果总览界面](docs/screenshots/results.png) |
 
 | 对比视图 | 合并视频 |
 | --- | --- |
-| ![Compare page placeholder](docs/screenshots/compare.png) | ![Merge editor placeholder](docs/screenshots/merge.png) |
+| ![对比视图界面](docs/screenshots/compare.png) | ![多轨合并编辑器](docs/screenshots/merge.png) |
 
 | 设置 |
 | --- |
-| ![Settings page placeholder](docs/screenshots/settings.png) |
+| ![设置界面](docs/screenshots/settings.png) |
 
 ## 工作原理
 
@@ -107,7 +111,7 @@ CPU 版：
 ```text
 desktop/dist_windows/
 ├─ video-similarity-desktop.exe
-├─ env/
+├─ env/                         # Python、FFmpeg、FFprobe
 └─ data/
 ```
 
@@ -116,13 +120,13 @@ GPU 版：
 ```text
 desktop/dist_windows_gpu/
 ├─ video-similarity-desktop.exe
-├─ env/
+├─ env/                         # CUDA PyTorch、FFmpeg、FFprobe
 └─ data/
 ```
 
 直接运行 `video-similarity-desktop.exe`。GPU 版需要兼容的 NVIDIA 显卡和驱动，程序会在设置页显示 CUDA 检测结果。
 
-不要单独移动 EXE。`env/` 是内置运行环境，`data/` 用于缓存、断点和报告。
+不要单独移动 EXE。`env/` 是完整内置运行环境，包含 Python、FFmpeg 与 FFprobe；`data/` 用于缓存、断点和报告。
 
 ### 从源码运行
 
@@ -174,11 +178,13 @@ npm run tauri:dev
 
 - 播放预览和全局播放头定位。
 - 在播放头位置拆分视频片段。
-- 拖动视频片段调整拼接顺序。
-- 调整片段入点和出点。
+- 新建和删除多条视频线、音频线，长按片段可跨轨移动。
+- 多个视频重叠时可使用自动、宫格、左右、上下布局，也可在播放窗口自由拖放和整体缩放。
+- 调整片段入点、出点、旋转和单片段裁剪。
 - 提取视频原音到音频线。
-- 导入或拖入外部音频，并调整音频时间线位置。
-- 设置输出分辨率、画面适配、裁剪、帧率、CRF 和分割方式。
+- 导入或拖入外部音频，并调整音频时间线位置；重叠音频会自动混响。
+- 自定义输出分辨率与留黑/留白方式，并设置画面适配、帧率、CRF 和分割方式。
+- 导出过程中仍可播放和检查时间线，编辑不会改变已经提交的导出任务。
 
 最终导出由 FFmpeg 完成。
 
@@ -306,7 +312,7 @@ cd desktop
 
 输出目录：`desktop/dist_macos/`
 
-构建脚本默认生成便携目录。Python 环境、Torch 和系统依赖需要与目标操作系统及架构匹配，不能直接跨系统复制。
+构建脚本默认生成便携目录，并在缺少时自动下载对应平台的独立 FFmpeg/FFprobe。Python 环境、Torch 和系统依赖需要与目标操作系统及架构匹配，不能直接跨系统复制。
 
 ## 技术栈
 
@@ -337,7 +343,6 @@ video-containment-detector/
 
 ## 路线图
 
-- 增加正式界面截图和自动发布流程。
 - 增强不同编码格式的视频预览兼容性。
 - 为时间线编辑器增加转场、音量包络和更多音轨。
 - 增加候选粗筛和关系判定的基准数据集。

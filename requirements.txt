@@ -3,7 +3,8 @@ torch
 transformers
 pillow
 opencv-python
-decord2>=3.4.0
+decord2==2.0.0; sys_platform == "darwin" and platform_machine == "x86_64"
+decord2>=3.4.0; sys_platform != "darwin" or platform_machine != "x86_64"
 faiss-cpu
 imagehash
 flask

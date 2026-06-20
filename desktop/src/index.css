@@ -6295,33 +6295,115 @@ select {
     0 0 18px rgba(37, 184, 255, 0.42);
 }
 
-.editor-output-canvas > video {
+.editor-preview-item {
+  position: absolute;
   z-index: 1;
+  overflow: hidden;
+  border: 1px solid transparent;
   background: transparent;
+  touch-action: none;
+  contain: layout paint;
 }
 
-.editor-output-resolution,
-.editor-output-fit {
+.editor-preview-item.selected {
+  border-color: rgba(82, 213, 255, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.48);
+}
+
+.editor-preview-item.draggable {
+  cursor: move;
+}
+
+.editor-preview-item > video {
+  z-index: 1;
+  background: transparent;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.editor-group-selection {
   position: absolute;
-  z-index: 7;
-  padding: 3px 6px;
-  color: #dff7ff;
-  font: 10px/1.35 Consolas, monospace;
-  border: 1px solid rgba(53, 191, 255, 0.54);
+  z-index: 12;
+  min-width: 20px;
+  min-height: 20px;
+  cursor: move;
+  border: 2px solid #ffd65a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.58), 0 0 18px rgba(255, 199, 54, 0.55);
+  touch-action: none;
+}
+
+.editor-group-selection > span {
+  position: absolute;
+  top: 5px;
+  left: 6px;
+  padding: 2px 5px;
+  color: #221900;
+  font-size: 10px;
+  font-weight: 900;
   border-radius: 4px;
-  background: rgba(2, 18, 36, 0.82);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.34);
+  background: rgba(255, 214, 90, 0.94);
   pointer-events: none;
 }
 
-.editor-output-resolution {
-  top: 7px;
-  left: 7px;
+.editor-group-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 1px solid #fff;
+  border-radius: 2px;
+  background: #ffd65a;
+  transform: translate(-50%, -50%);
+  touch-action: none;
 }
 
-.editor-output-fit {
-  right: 7px;
-  bottom: 7px;
+.editor-group-handle.nw { top: 0; left: 0; cursor: nwse-resize; }
+.editor-group-handle.n { top: 0; left: 50%; cursor: ns-resize; }
+.editor-group-handle.ne { top: 0; left: 100%; cursor: nesw-resize; }
+.editor-group-handle.e { top: 50%; left: 100%; cursor: ew-resize; }
+.editor-group-handle.se { top: 100%; left: 100%; cursor: nwse-resize; }
+.editor-group-handle.s { top: 100%; left: 50%; cursor: ns-resize; }
+.editor-group-handle.sw { top: 100%; left: 0; cursor: nesw-resize; }
+.editor-group-handle.w { top: 50%; left: 0; cursor: ew-resize; }
+
+.editor-preview-size-tools {
+  display: flex;
+  position: absolute;
+  z-index: 16;
+  top: 8px;
+  right: 8px;
+}
+
+.editor-preview-size-tools button {
+  display: inline-flex;
+  min-height: 27px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 4px;
+  color: rgba(232, 242, 255, 0.88);
+  border: 1px solid rgba(86, 184, 255, 0.34);
+  border-radius: 5px;
+  background: rgba(3, 18, 41, 0.78);
+  font-size: 10px;
+}
+
+.editor-preview-size-tools svg {
+  width: 13px;
+}
+
+.editor-preview-resize-handle {
+  position: absolute;
+  z-index: 17;
+  right: 4px;
+  bottom: 4px;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  cursor: nwse-resize;
+  border: 0;
+  background:
+    linear-gradient(135deg, transparent 0 42%, rgba(70, 205, 255, 0.95) 43% 52%, transparent 53% 62%, rgba(70, 205, 255, 0.95) 63% 72%, transparent 73%);
+  touch-action: none;
 }
 
 .editor-preview-empty {
@@ -6598,6 +6680,51 @@ select {
   font-weight: 800;
 }
 
+.editor-overlap-layout {
+  display: flex;
+  min-height: 30px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.editor-overlap-layout > span {
+  margin-right: 2px;
+  color: rgba(214, 229, 250, 0.78);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.editor-overlap-layout > button {
+  height: 26px;
+  padding: 0 8px;
+  color: rgba(235, 243, 255, 0.88);
+  border: 1px solid rgba(91, 147, 221, 0.3);
+  border-radius: 5px;
+  background: rgba(12, 38, 76, 0.66);
+  font-size: 10px;
+}
+
+.editor-overlap-layout > button.active {
+  color: #201700;
+  border-color: #ffd65a;
+  background: #ffd65a;
+}
+
+.editor-overlap-layout > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(218, 230, 249, 0.78);
+  font-size: 10px;
+}
+
+.editor-overlap-layout > small {
+  color: rgba(185, 203, 232, 0.56);
+  font-size: 10px;
+}
+
 .editor-advanced-inline {
   display: grid;
   padding: 0 8px;
@@ -6814,19 +6941,20 @@ select {
   min-height: 0;
   grid-template-columns: 78px minmax(0, 1fr);
   gap: 8px;
-  overflow: hidden;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .timeline-track-labels {
   display: grid;
   position: relative;
   z-index: 10;
-  grid-template-rows: 22px 54px 54px;
+  grid-template-rows: 24px auto;
   gap: 6px;
   background: rgba(6, 18, 45, 0.92);
 }
 
-.timeline-track-labels span {
+.timeline-track-labels > span {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -6836,6 +6964,29 @@ select {
 
 .timeline-track-labels svg {
   width: 14px;
+}
+
+.timeline-track-label-list {
+  display: grid;
+  gap: 6px;
+}
+
+.timeline-track-label-list button {
+  display: flex;
+  min-width: 0;
+  height: 54px;
+  padding: 0 4px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: rgba(213, 225, 247, 0.74);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid rgba(86, 120, 185, 0.16);
+  border-radius: 4px;
+  background: rgba(4, 14, 35, 0.72);
+  cursor: default;
 }
 
 .timeline-scroll-viewport {
@@ -6857,7 +7008,6 @@ select {
   position: relative;
   min-width: 0;
   margin-top: 6px;
-  grid-template-rows: 54px 54px;
   gap: 6px;
   cursor: crosshair;
 }
@@ -6999,14 +7149,14 @@ select {
   height: 19px;
   padding: 0;
   pointer-events: auto;
-  cursor: grab;
+  cursor: default;
   border: 0;
   background: transparent;
   touch-action: none;
 }
 
 .timeline-playhead.dragging .timeline-playhead-handle {
-  cursor: grabbing;
+  cursor: default;
 }
 
 .timeline-playhead-handle i {
@@ -7133,7 +7283,7 @@ select {
   }
 
   .timeline-track-labels {
-    grid-template-rows: 20px 48px 48px;
+    grid-template-rows: 20px auto;
   }
 
   .timeline-ruler {
@@ -7144,10 +7294,7 @@ select {
     min-height: 128px;
   }
 
-  .timeline-tracks {
-    grid-template-rows: 48px 48px;
-    gap: 4px;
-  }
+  .timeline-tracks { gap: 4px; }
 
   .timeline-video-track,
   .timeline-audio-track {
@@ -7207,6 +7354,8 @@ select {
   width: 242px;
   max-height: calc(100vh - 16px);
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .clip-context-menu-range {

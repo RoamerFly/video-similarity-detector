@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.1.0"
+        description: "Release tag, for example v0.2.0"
         required: true
-        default: "v0.1.0"
+        default: "v0.2.0"
         type: string
       release_name:
         description: "Optional release title"
@@ -84,11 +84,23 @@ jobs:
       - name: Set release version
         run: python scripts/set_release_version.py "$TAG_NAME"
 
+      - name: Prepare standalone FFmpeg runtime
+        run: |
+          chmod +x scripts/prepare-ffmpeg-runtime.sh
+          ./scripts/prepare-ffmpeg-runtime.sh linux-x64
+
       - name: Build portable application directory
         working-directory: desktop
         run: |
           chmod +x build-linux.sh
           ./build-linux.sh --skip-npm-audit --python python
+
+      - name: Verify bundled Linux runtime
+        run: |
+          test -x desktop/dist_linux/env/ffmpeg
+          test -x desktop/dist_linux/env/ffprobe
+          desktop/dist_linux/env/ffmpeg -version
+          desktop/dist_linux/env/ffprobe -version
 
       - name: Package Linux assets
         shell: bash
@@ -196,11 +208,21 @@ jobs:
           retention-days: 3
 
   windows:
-    name: Build Windows x64
+    name: Build Windows x64 (${{ matrix.flavor }})
     runs-on: windows-latest
     timeout-minutes: 120
     env:
       TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: cpu
+            env_dir: env
+            dist_dir: dist_windows
+          - flavor: gpu
+            env_dir: env_gpu
+            dist_dir: dist_windows_gpu
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -224,28 +246,70 @@ jobs:
         shell: pwsh
         run: python scripts/set_release_version.py $env:TAG_NAME
 
+      - name: Prepare standalone FFmpeg runtime
+        shell: pwsh
+        run: |
+          .\scripts\prepare-ffmpeg-runtime.ps1 `
+            -DestinationDir "desktop\${{ matrix.env_dir }}"
+
       - name: Build portable directory and NSIS installer
         shell: pwsh
         working-directory: desktop
         run: |
-          .\build-windows.ps1 `
-            -SkipNpmAudit `
-            -BuildInstaller `
-            -Python python
+          if ("${{ matrix.flavor }}" -eq "gpu") {
+            .\build-windows.ps1 `
+              -SkipNpmAudit `
+              -BuildInstaller `
+              -CleanPythonEnv `
+              -GpuBuild `
+              -Python python
+          } else {
+            .\build-windows.ps1 `
+              -SkipNpmAudit `
+              -BuildInstaller `
+              -CleanPythonEnv `
+              -Python python
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows ${{ matrix.flavor }} build failed."
+          }
+
+      - name: Verify bundled Windows runtime
+        shell: pwsh
+        run: |
+          $dist = "desktop\${{ matrix.dist_dir }}"
+          foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
+            $path = Join-Path $dist "env\$tool"
+            if (!(Test-Path $path) -or (Get-Item $path).Length -lt 5MB) {
+              throw "$tool is missing or is not a standalone runtime."
+            }
+            $versionOutput = & $path -version 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "$tool failed its version check."
+            }
+            Write-Host ($versionOutput | Select-Object -First 1)
+          }
+          $python = Join-Path $dist "env\python\python.exe"
+          if ("${{ matrix.flavor }}" -eq "gpu") {
+            & $python -c "import torch; assert torch.version.cuda, 'CUDA runtime is not bundled'; print('CUDA runtime:', torch.version.cuda)"
+          } else {
+            & $python -c "import torch; assert torch.version.cuda is None, 'CPU package unexpectedly contains CUDA torch'; print('CPU-only torch:', torch.__version__)"
+          }
 
       - name: Package Windows assets
         shell: pwsh
         run: |
-          $base = "${env:APP_NAME}-${env:TAG_NAME}-windows-x64"
+          $base = "${env:APP_NAME}-${env:TAG_NAME}-windows-x64-${{ matrix.flavor }}"
+          $dist = "desktop\${{ matrix.dist_dir }}"
           New-Item -ItemType Directory -Force "release-assets" | Out-Null
 
           $portableRoot = Join-Path $env:RUNNER_TEMP "video-similarity-portable"
-          Copy-Item "desktop\dist_windows" $portableRoot -Recurse
+          Copy-Item $dist $portableRoot -Recurse
           Remove-Item (Join-Path $portableRoot "installer") -Recurse -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path (Join-Path $portableRoot "*") `
             -DestinationPath "release-assets\$base-portable.zip" -Force
 
-          $installer = Get-ChildItem "desktop\dist_windows\installer" `
+          $installer = Get-ChildItem (Join-Path $dist "installer") `
             -Recurse -Filter "*.exe" | Select-Object -First 1
           if ($null -eq $installer) {
             throw "Tauri NSIS installer was not generated."
@@ -255,7 +319,7 @@ jobs:
       - name: Upload Windows assets
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x64
+          name: windows-x64-${{ matrix.flavor }}
           path: release-assets/*
           if-no-files-found: error
           compression-level: 0
@@ -297,11 +361,23 @@ jobs:
       - name: Set release version
         run: python scripts/set_release_version.py "$TAG_NAME"
 
+      - name: Prepare standalone FFmpeg runtime
+        run: |
+          chmod +x scripts/prepare-ffmpeg-runtime.sh
+          ./scripts/prepare-ffmpeg-runtime.sh macos-${{ matrix.arch }}
+
       - name: Build portable application directory
         working-directory: desktop
         run: |
           chmod +x build-macos.sh
           ./build-macos.sh --skip-npm-audit --python python
+
+      - name: Verify bundled macOS runtime
+        run: |
+          test -x desktop/dist_macos/env/ffmpeg
+          test -x desktop/dist_macos/env/ffprobe
+          desktop/dist_macos/env/ffmpeg -version
+          desktop/dist_macos/env/ffprobe -version
 
       - name: Package macOS assets
         shell: bash
@@ -442,8 +518,10 @@ jobs:
             "${APP_NAME}-${TAG_NAME}-macos-arm64-portable.zip"
             "${APP_NAME}-${TAG_NAME}-macos-x64-installer.dmg"
             "${APP_NAME}-${TAG_NAME}-macos-x64-portable.zip"
-            "${APP_NAME}-${TAG_NAME}-windows-x64-installer.exe"
-            "${APP_NAME}-${TAG_NAME}-windows-x64-portable.zip"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-installer.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-portable.zip"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-installer.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-portable.zip"
           )
           for asset in "${expected[@]}"; do
             test -f "release-assets/$asset" || {

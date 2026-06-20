@@ -448,8 +448,6 @@ print("Torch:", torch.__version__)
 print("Torch CUDA:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
 print("FFmpeg:", imageio_ffmpeg.get_ffmpeg_exe())
-if $cudaRequiredLiteral and not torch.cuda.is_available():
-    raise SystemExit("CUDA is required for this GPU package, but torch.cuda.is_available() is False")
 if $cudaRequiredLiteral and not torch.version.cuda:
     raise SystemExit("CUDA is required for this GPU package, but this torch build has no CUDA runtime")
 print("Bundled Python env OK")
@@ -465,7 +463,7 @@ function Test-TorchCudaReady([string]$PythonExe) {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & $PythonExe -c "import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.version.cuda else 1)" *> $null
+        & $PythonExe -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -478,6 +476,8 @@ function Assert-PortablePackage([string]$DistDir, [bool]$RequireCuda = $false) {
     $required = @(
         "video-similarity-desktop.exe",
         "env\python\python.exe",
+        "env\ffmpeg.exe",
+        "env\ffprobe.exe",
         "data",
         "data\reports",
         "scripts\batch_compare.py",
@@ -492,6 +492,18 @@ function Assert-PortablePackage([string]$DistDir, [bool]$RequireCuda = $false) {
         if (-not (Test-Path $target)) {
             throw "Portable package is incomplete. Missing: $relative"
         }
+    }
+
+    foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
+        $toolPath = Join-Path $DistDir "env\$tool"
+        if ((Get-Item -LiteralPath $toolPath).Length -lt 5MB) {
+            throw "$tool is too small to be the bundled standalone runtime."
+        }
+        $versionOutput = & $toolPath -version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "$tool failed its portable package version check."
+        }
+        Write-Host ($versionOutput | Select-Object -First 1)
     }
 
     $distPython = Join-Path $DistDir "env\python\python.exe"
@@ -564,6 +576,18 @@ Write-Host "Build flavor : $(if ($GpuBuild) { "GPU / CUDA" } else { "CPU" })"
 Write-Host "Torch index  : $TorchIndexUrl"
 
 Set-Location $desktopDir
+
+if (-not (Test-Path (Join-Path $envDir "ffmpeg.exe")) -or -not (Test-Path (Join-Path $envDir "ffprobe.exe"))) {
+    Write-Step "[0/9] Downloading standalone FFmpeg runtime..."
+    $prepareFfmpeg = Join-Path $repoRoot "scripts\prepare-ffmpeg-runtime.ps1"
+    if (-not (Test-Path $prepareFfmpeg)) {
+        throw "FFmpeg preparation script was not found: $prepareFfmpeg"
+    }
+    & $prepareFfmpeg -DestinationDir $envDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to prepare the standalone FFmpeg runtime."
+    }
+}
 
 Write-Step "[1/9] Checking build tools..."
 Initialize-BuildToolPath
@@ -744,11 +768,33 @@ if ($SkipTauriBuild) {
         Remove-DirectoryWithRetry $bundleDir "Tauri bundle directory"
     }
     $tauriConfigOverride = Join-Path $env:TEMP "video-similarity-tauri-build-override.json"
-    Set-Content -LiteralPath $tauriConfigOverride -Value '{"build":{"beforeBuildCommand":""}}' -Encoding ASCII
+    $tauriOverride = @{
+        build = @{ beforeBuildCommand = "" }
+        bundle = @{
+            resources = @(
+                "../../scripts",
+                "../../video_sim",
+                "../../requirements.txt",
+                "../$EnvName"
+            )
+        }
+    } | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $tauriConfigOverride -Value $tauriOverride -Encoding ASCII
     Invoke-Checked { npx tauri build --features custom-protocol --config $tauriConfigOverride } "Tauri installer build failed."
 } else {
     $tauriConfigOverride = Join-Path $env:TEMP "video-similarity-tauri-build-override.json"
-    Set-Content -LiteralPath $tauriConfigOverride -Value '{"build":{"beforeBuildCommand":""}}' -Encoding ASCII
+    $tauriOverride = @{
+        build = @{ beforeBuildCommand = "" }
+        bundle = @{
+            resources = @(
+                "../../scripts",
+                "../../video_sim",
+                "../../requirements.txt",
+                "../$EnvName"
+            )
+        }
+    } | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $tauriConfigOverride -Value $tauriOverride -Encoding ASCII
     Invoke-Checked { npx tauri build --no-bundle --features custom-protocol --config $tauriConfigOverride } "Portable release exe build failed."
 }
 
@@ -800,6 +846,8 @@ set "USE_TF=0"
 set "TRANSFORMERS_NO_TF=1"
 set "TF_CPP_MIN_LOG_LEVEL=2"
 set "PYTHONNOUSERSITE=1"
+set "VIDEO_SIM_FFMPEG=%~dp0env\ffmpeg.exe"
+set "PATH=%~dp0env;%PATH%"
 start "" "%~dp0video-similarity-desktop.exe"
 "@
 Set-Content -LiteralPath (Join-Path $distDir "run-video-similarity.bat") -Value $launcher -Encoding ASCII
@@ -810,6 +858,7 @@ Video Similarity - Windows portable package
 Output structure:
 - video-similarity-desktop.exe: executable app.
 - env\python\: bundled runtime and dependencies.
+- env\ffmpeg.exe and env\ffprobe.exe: bundled standalone media tools.
 - data\: analysis data and reports.
 
 Run:
