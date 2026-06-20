@@ -1,5 +1,7 @@
 # Video Similarity & Containment Detector
 
+[![Downloads](https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&label=Downloads&color=2ea44f)](https://github.com/RoamerFly/video-similarity-detector/releases)
+
 本地优先的视频相似度、片段包含关系和重复文件分析工具。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
@@ -12,6 +14,22 @@
 Video Similarity & Containment Detector 会扫描指定目录中的视频，通过动态抽帧、画面预处理、CLIP 特征、FAISS 检索和时间一致性分析，计算视频之间的双向覆盖率、整体相似度、匹配片段和时间窗口结果。
 
 所有视频、缓存和报告默认保存在本机，不依赖远程服务。
+
+## 下载
+
+前往 [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/releases) 下载 Windows、Linux 或 macOS 版本。发布文件采用以下命名规则：
+
+```text
+Video_Similarity-v<版本>-linux-x64-installer.deb
+Video_Similarity-v<版本>-linux-x64-installer.rpm
+Video_Similarity-v<版本>-linux-x64-portable.tar.gz
+Video_Similarity-v<版本>-macos-arm64-installer.dmg
+Video_Similarity-v<版本>-macos-arm64-portable.zip
+Video_Similarity-v<版本>-macos-x64-installer.dmg
+Video_Similarity-v<版本>-macos-x64-portable.zip
+Video_Similarity-v<版本>-windows-x64-installer.exe
+Video_Similarity-v<版本>-windows-x64-portable.zip
+```
 
 ## 功能
 

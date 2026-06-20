@@ -1,0 +1,466 @@
+name: Build And Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        default: "v0.1.0"
+        type: string
+      release_name:
+        description: "Optional release title"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create release as draft"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: Video_Similarity
+  DISPLAY_NAME: Video Similarity
+  EXECUTABLE_NAME: video-similarity-desktop
+  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.10"
+
+jobs:
+  linux:
+    name: Build Linux x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            rpm
+
+      - name: Set release version
+        run: python scripts/set_release_version.py "$TAG_NAME"
+
+      - name: Build portable application directory
+        working-directory: desktop
+        run: |
+          chmod +x build-linux.sh
+          ./build-linux.sh --skip-npm-audit --python python
+
+      - name: Package Linux assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          base="${APP_NAME}-${TAG_NAME}-linux-x64"
+          dist_dir="$PWD/desktop/dist_linux"
+          mkdir -p release-assets
+
+          tar -C "$dist_dir" -czf "release-assets/${base}-portable.tar.gz" .
+
+          package_root="$(mktemp -d)"
+          mkdir -p \
+            "$package_root/DEBIAN" \
+            "$package_root/opt/${APP_NAME}" \
+            "$package_root/usr/bin" \
+            "$package_root/usr/share/applications" \
+            "$package_root/usr/share/icons/hicolor/512x512/apps"
+          cp -a "$dist_dir/." "$package_root/opt/${APP_NAME}/"
+          install -m 644 desktop/icon.png \
+            "$package_root/usr/share/icons/hicolor/512x512/apps/video-similarity.png"
+          cat > "$package_root/usr/bin/video-similarity" <<'SH'
+          #!/usr/bin/env sh
+          exec /opt/Video_Similarity/video-similarity-desktop "$@"
+          SH
+          chmod 755 "$package_root/usr/bin/video-similarity"
+          cat > "$package_root/usr/share/applications/video-similarity.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Video Similarity
+          Comment=Video similarity and containment detector
+          Exec=/usr/bin/video-similarity
+          Icon=video-similarity
+          Terminal=false
+          Categories=AudioVideo;Utility;
+          DESKTOP
+          installed_size="$(du -sk "$package_root" | cut -f1)"
+          cat > "$package_root/DEBIAN/control" <<DEB
+          Package: video-similarity
+          Version: ${version}
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Maintainer: RoamerFly
+          Installed-Size: ${installed_size}
+          Depends: libgtk-3-0, libwebkit2gtk-4.1-0
+          Description: Video similarity and containment detector
+          DEB
+          dpkg-deb --root-owner-group --build \
+            "$package_root" "release-assets/${base}-installer.deb"
+
+          rpm_topdir="$PWD/rpmbuild"
+          rpm_source="$(mktemp -d)"
+          mkdir -p "$rpm_topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p "$rpm_source/video-similarity-${version}"
+          cp -a "$package_root/opt" "$package_root/usr" \
+            "$rpm_source/video-similarity-${version}/"
+          tar -C "$rpm_source" -czf \
+            "$rpm_topdir/SOURCES/video-similarity-${version}.tar.gz" \
+            "video-similarity-${version}"
+          cat > "$rpm_topdir/SPECS/video-similarity.spec" <<RPM
+          %global __os_install_post %{nil}
+          Name: video-similarity
+          Version: ${version}
+          Release: 1%{?dist}
+          Summary: Video similarity and containment detector
+          License: MIT
+          BuildArch: x86_64
+          Source0: %{name}-%{version}.tar.gz
+          Requires: gtk3
+          Requires: webkit2gtk4.1
+
+          %description
+          Local-first video similarity and containment detector.
+
+          %prep
+          %setup -q
+
+          %build
+
+          %install
+          mkdir -p %{buildroot}
+          cp -a opt usr %{buildroot}/
+
+          %files
+          /opt/Video_Similarity
+          /usr/bin/video-similarity
+          /usr/share/applications/video-similarity.desktop
+          /usr/share/icons/hicolor/512x512/apps/video-similarity.png
+          RPM
+          rpmbuild --define "_topdir $rpm_topdir" -bb \
+            "$rpm_topdir/SPECS/video-similarity.spec"
+          rpm_assets=("$rpm_topdir/RPMS/x86_64/"*.rpm)
+          test -f "${rpm_assets[0]}"
+          cp "${rpm_assets[0]}" "release-assets/${base}-installer.rpm"
+
+      - name: Upload Linux assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set release version
+        shell: pwsh
+        run: python scripts/set_release_version.py $env:TAG_NAME
+
+      - name: Build portable directory and NSIS installer
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          .\build-windows.ps1 `
+            -SkipNpmAudit `
+            -BuildInstaller `
+            -Python python
+
+      - name: Package Windows assets
+        shell: pwsh
+        run: |
+          $base = "${env:APP_NAME}-${env:TAG_NAME}-windows-x64"
+          New-Item -ItemType Directory -Force "release-assets" | Out-Null
+
+          $portableRoot = Join-Path $env:RUNNER_TEMP "video-similarity-portable"
+          Copy-Item "desktop\dist_windows" $portableRoot -Recurse
+          Remove-Item (Join-Path $portableRoot "installer") -Recurse -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path (Join-Path $portableRoot "*") `
+            -DestinationPath "release-assets\$base-portable.zip" -Force
+
+          $installer = Get-ChildItem "desktop\dist_windows\installer" `
+            -Recurse -Filter "*.exe" | Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "Tauri NSIS installer was not generated."
+          }
+          Copy-Item $installer.FullName "release-assets\$base-installer.exe"
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  macos:
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set release version
+        run: python scripts/set_release_version.py "$TAG_NAME"
+
+      - name: Build portable application directory
+        working-directory: desktop
+        run: |
+          chmod +x build-macos.sh
+          ./build-macos.sh --skip-npm-audit --python python
+
+      - name: Package macOS assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${APP_NAME}-${TAG_NAME}-macos-${{ matrix.arch }}"
+          version="${TAG_NAME#v}"
+          app_dir="$RUNNER_TEMP/${DISPLAY_NAME}.app"
+          dmg_root="$RUNNER_TEMP/dmg-root"
+          iconset="$RUNNER_TEMP/AppIcon.iconset"
+          mkdir -p \
+            release-assets \
+            "$app_dir/Contents/MacOS" \
+            "$app_dir/Contents/Resources" \
+            "$iconset"
+          cp -a desktop/dist_macos/. "$app_dir/Contents/MacOS/"
+
+          for size in 16 32 128 256 512; do
+            sips -z "$size" "$size" desktop/icon.png \
+              --out "$iconset/icon_${size}x${size}.png" >/dev/null
+            double_size=$((size * 2))
+            sips -z "$double_size" "$double_size" desktop/icon.png \
+              --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" \
+            -o "$app_dir/Contents/Resources/icon.icns"
+
+          cat > "$app_dir/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>${DISPLAY_NAME}</string>
+            <key>CFBundleExecutable</key>
+            <string>${EXECUTABLE_NAME}</string>
+            <key>CFBundleIconFile</key>
+            <string>icon.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.videosimilarity.desktop</string>
+            <key>CFBundleName</key>
+            <string>${DISPLAY_NAME}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${version}</string>
+            <key>CFBundleVersion</key>
+            <string>${version}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.15</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          chmod +x \
+            "$app_dir/Contents/MacOS/${EXECUTABLE_NAME}" \
+            "$app_dir/Contents/MacOS/run-video-similarity.command"
+          codesign --force --deep --sign - "$app_dir"
+
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "$app_dir" "release-assets/${base}-portable.zip"
+
+          mkdir -p "$dmg_root"
+          cp -R "$app_dir" "$dmg_root/"
+          ln -s /Applications "$dmg_root/Applications"
+          dmg_path="release-assets/${base}-installer.dmg"
+          for attempt in 1 2 3; do
+            rm -f "$dmg_path"
+            if hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$dmg_root" \
+              -ov -format UDZO "$dmg_path"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Unable to create macOS DMG after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Upload macOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs:
+      - linux
+      - windows
+      - macos
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag_name="${{ inputs.tag_name }}"
+            release_name="${{ inputs.release_name }}"
+            prerelease="${{ inputs.prerelease }}"
+            draft="${{ inputs.draft }}"
+          else
+            tag_name="${GITHUB_REF_NAME}"
+            release_name=""
+            prerelease="false"
+            draft="false"
+          fi
+          if [ -z "$release_name" ]; then
+            release_name="${DISPLAY_NAME} ${tag_name}"
+          fi
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release asset names
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb"
+            "${APP_NAME}-${TAG_NAME}-linux-x64-installer.rpm"
+            "${APP_NAME}-${TAG_NAME}-linux-x64-portable.tar.gz"
+            "${APP_NAME}-${TAG_NAME}-macos-arm64-installer.dmg"
+            "${APP_NAME}-${TAG_NAME}-macos-arm64-portable.zip"
+            "${APP_NAME}-${TAG_NAME}-macos-x64-installer.dmg"
+            "${APP_NAME}-${TAG_NAME}-macos-x64-portable.zip"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-installer.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-portable.zip"
+          )
+          for asset in "${expected[@]}"; do
+            test -f "release-assets/$asset" || {
+              echo "Missing release asset: $asset" >&2
+              exit 1
+            }
+          done
+          ls -lh release-assets
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          draft: ${{ steps.meta.outputs.draft == 'true' }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          files: release-assets/*
+          fail_on_unmatched_files: true

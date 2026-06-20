@@ -5,7 +5,7 @@ torch
 transformers
 pillow
 opencv-python-headless
-decord
+decord2>=3.4.0
 faiss-cpu
 imagehash
 tqdm

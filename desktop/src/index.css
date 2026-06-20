@@ -6272,17 +6272,67 @@ select {
 
 .editor-preview-screen {
   width: 100%;
+  background:
+    radial-gradient(circle at center, rgba(17, 45, 82, 0.42), transparent 68%),
+    #020817;
 }
 
 .editor-preview-screen.crop-editing video {
   pointer-events: none;
 }
 
+.editor-output-canvas {
+  position: absolute;
+  z-index: 2;
+  inset: 10px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 3px;
+  background: #000;
+  box-shadow:
+    inset 0 0 0 2px #35bfff,
+    inset 0 0 0 3px rgba(190, 239, 255, 0.3),
+    0 0 18px rgba(37, 184, 255, 0.42);
+}
+
+.editor-output-canvas > video {
+  z-index: 1;
+  background: transparent;
+}
+
+.editor-output-resolution,
+.editor-output-fit {
+  position: absolute;
+  z-index: 7;
+  padding: 3px 6px;
+  color: #dff7ff;
+  font: 10px/1.35 Consolas, monospace;
+  border: 1px solid rgba(53, 191, 255, 0.54);
+  border-radius: 4px;
+  background: rgba(2, 18, 36, 0.82);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.34);
+  pointer-events: none;
+}
+
+.editor-output-resolution {
+  top: 7px;
+  left: 7px;
+}
+
+.editor-output-fit {
+  right: 7px;
+  bottom: 7px;
+}
+
 .editor-preview-empty {
   display: grid;
+  position: absolute;
+  z-index: 2;
+  inset: 0;
   gap: 10px;
   color: rgba(209, 222, 245, 0.58);
   place-items: center;
+  align-content: center;
 }
 
 .editor-preview-empty svg {
@@ -6529,35 +6579,23 @@ select {
 }
 
 .editor-advanced-settings {
-  border-top: 1px solid rgba(96, 126, 183, 0.18);
-}
-
-.editor-advanced-settings summary {
-  padding: 6px 1px 2px;
-  color: rgba(198, 213, 238, 0.7);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.editor-advanced-settings[open] {
   display: grid;
   gap: 7px;
 }
 
 .editor-advanced-settings-below-video {
   margin-top: -2px;
-  padding-top: 0;
+  padding: 7px 0 8px;
   border: 1px solid rgba(96, 126, 183, 0.2);
   border-radius: 6px;
   background: rgba(5, 16, 39, 0.46);
 }
 
-.editor-advanced-settings-below-video summary {
-  padding: 7px 9px;
-}
-
-.editor-advanced-settings-below-video[open] {
-  padding-bottom: 8px;
+.editor-advanced-title {
+  padding: 0 8px;
+  color: rgba(215, 229, 250, 0.8);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .editor-advanced-inline {
@@ -6595,15 +6633,6 @@ select {
   z-index: 8;
   cursor: crosshair;
   touch-action: none;
-}
-
-.video-crop-layer.view-only {
-  cursor: default;
-  pointer-events: none;
-}
-
-.video-crop-layer.view-only .video-crop-mask {
-  background: #020617;
 }
 
 .video-crop-mask {

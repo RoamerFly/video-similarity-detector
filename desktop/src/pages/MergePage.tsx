@@ -40,6 +40,7 @@ import {
 import {
   cancelVideoMerge,
   fileName,
+  hasTauriRuntime,
   localFileSrc,
   normalizeBackendError,
   probeVideoMetadata,
@@ -67,6 +68,7 @@ const timelinePixelsPerSecond = 12
 const timelineMinimumWidth = 720
 const scrubMediaIntervalMs = 32
 const minimumOutputDimension = 16
+const emptyTimelineResolutionLimit = { width: 3840, height: 2160 }
 const commonResolutionOptions = [
   { label: '超清 2160p', width: 3840, height: 2160 },
   { label: '高清 1080p', width: 1920, height: 1080 },
@@ -105,6 +107,13 @@ interface CropGeometry {
   sourceHeight: number
 }
 
+interface PreviewCanvasGeometry {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
 interface CropRect {
   x: number
   y: number
@@ -120,6 +129,7 @@ export function MergePage() {
   const pythonPath = useSettingsStore((state) => state.pythonPath)
   const previewRef = useRef<HTMLVideoElement | null>(null)
   const previewScreenRef = useRef<HTMLDivElement | null>(null)
+  const outputCanvasRef = useRef<HTMLDivElement | null>(null)
   const timelineRef = useRef<HTMLDivElement | null>(null)
   const timelineScrollRef = useRef<HTMLDivElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
@@ -145,6 +155,7 @@ export function MergePage() {
   const [audioContextMenu, setAudioContextMenu] = useState<AudioContextMenuState | null>(null)
   const [cropEditing, setCropEditing] = useState(false)
   const [cropGeometry, setCropGeometry] = useState<CropGeometry | null>(null)
+  const [outputCanvasGeometry, setOutputCanvasGeometry] = useState<PreviewCanvasGeometry | null>(null)
   const setMergeError = merge.setError
   const videoPathKey = useMemo(
     () => Array.from(new Set(merge.items.map((item) => normalizePath(item.path)))).sort().join('|'),
@@ -197,6 +208,7 @@ export function MergePage() {
   }, [merge.items, projectRoot, pythonPath, setMergeError, videoPathKey])
 
   useEffect(() => {
+    if (!hasTauriRuntime()) return undefined
     let dispose = () => undefined
     let disposed = false
     getCurrentWebview().onDragDropEvent((event) => {
@@ -258,8 +270,8 @@ export function MergePage() {
     })
     if (dimensions.length === 0) {
       return {
-        width: Math.max(minimumOutputDimension, merge.settings.width),
-        height: Math.max(minimumOutputDimension, merge.settings.height),
+        width: emptyTimelineResolutionLimit.width,
+        height: emptyTimelineResolutionLimit.height,
         ready: false,
       }
     }
@@ -268,7 +280,7 @@ export function MergePage() {
       height: Math.max(minimumOutputDimension, evenDimension(Math.max(...dimensions.map((item) => item.height)))),
       ready: true,
     }
-  }, [merge.items, merge.settings.height, merge.settings.width, metadata])
+  }, [merge.items, metadata])
   const resolutionOptions = useMemo(() => {
     const options = commonResolutionOptions.filter(
       (item) => item.width <= resolutionBounds.width && item.height <= resolutionBounds.height,
@@ -306,10 +318,31 @@ export function MergePage() {
     setMergeSettings,
   ])
 
-  const updateCropGeometry = useCallback(() => {
+  const updatePreviewGeometry = useCallback(() => {
     const screen = previewScreenRef.current
     const video = previewRef.current
-    if (!screen || !video) {
+    if (!screen || screen.clientWidth <= 0 || screen.clientHeight <= 0) {
+      setOutputCanvasGeometry(null)
+      setCropGeometry(null)
+      return
+    }
+    const availableWidth = Math.max(1, screen.clientWidth - 20)
+    const availableHeight = Math.max(1, screen.clientHeight - 20)
+    const outputRatio = Math.max(0.01, merge.settings.width / Math.max(1, merge.settings.height))
+    const canvasWidth = availableWidth / availableHeight > outputRatio
+      ? availableHeight * outputRatio
+      : availableWidth
+    const canvasHeight = availableWidth / availableHeight > outputRatio
+      ? availableHeight
+      : availableWidth / outputRatio
+    setOutputCanvasGeometry({
+      left: (screen.clientWidth - canvasWidth) / 2,
+      top: (screen.clientHeight - canvasHeight) / 2,
+      width: canvasWidth,
+      height: canvasHeight,
+    })
+
+    if (!video) {
       setCropGeometry(null)
       return
     }
@@ -318,36 +351,42 @@ export function MergePage() {
     const rotated = rotatedDimensions(rawWidth, rawHeight, previewClip?.rotation ?? 0)
     const sourceWidth = rotated.width
     const sourceHeight = rotated.height
-    if (sourceWidth <= 0 || sourceHeight <= 0 || screen.clientWidth <= 0 || screen.clientHeight <= 0) {
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
       setCropGeometry(null)
       return
     }
     const sourceRatio = sourceWidth / sourceHeight
-    const containerRatio = screen.clientWidth / screen.clientHeight
-    const width = containerRatio > sourceRatio ? screen.clientHeight * sourceRatio : screen.clientWidth
-    const height = containerRatio > sourceRatio ? screen.clientHeight : screen.clientWidth / sourceRatio
+    const canvasRatio = canvasWidth / canvasHeight
+    const width = canvasRatio > sourceRatio ? canvasHeight * sourceRatio : canvasWidth
+    const height = canvasRatio > sourceRatio ? canvasHeight : canvasWidth / sourceRatio
     setCropGeometry({
-      left: (screen.clientWidth - width) / 2,
-      top: (screen.clientHeight - height) / 2,
+      left: (canvasWidth - width) / 2,
+      top: (canvasHeight - height) / 2,
       width,
       height,
       sourceWidth,
       sourceHeight,
     })
-  }, [metadata, previewClip?.path, previewClip?.rotation])
+  }, [
+    merge.settings.height,
+    merge.settings.width,
+    metadata,
+    previewClip?.path,
+    previewClip?.rotation,
+  ])
 
   useEffect(() => {
     const screen = previewScreenRef.current
     if (!screen) return undefined
-    const observer = new ResizeObserver(() => updateCropGeometry())
+    const observer = new ResizeObserver(() => updatePreviewGeometry())
     observer.observe(screen)
-    window.requestAnimationFrame(updateCropGeometry)
+    window.requestAnimationFrame(updatePreviewGeometry)
     return () => observer.disconnect()
-  }, [updateCropGeometry])
+  }, [updatePreviewGeometry])
 
   useEffect(() => {
-    window.requestAnimationFrame(updateCropGeometry)
-  }, [previewClip?.id, updateCropGeometry])
+    window.requestAnimationFrame(updatePreviewGeometry)
+  }, [previewClip?.id, updatePreviewGeometry])
 
   const scrubGlobal = useCallback((time: number, forceMediaUpdate = false) => {
     const next = clamp(time, 0, Math.max(0, totalDuration))
@@ -835,9 +874,9 @@ export function MergePage() {
     if (!cropGeometry || !previewClip || event.button !== 0 || merge.running) return
     event.preventDefault()
     event.stopPropagation()
-    const screenRect = previewScreenRef.current?.getBoundingClientRect()
-    if (!screenRect) return
-    const startPoint = cropPointFromClient(event.clientX, event.clientY, screenRect, cropGeometry)
+    const canvasRect = outputCanvasRef.current?.getBoundingClientRect()
+    if (!canvasRect) return
+    const startPoint = cropPointFromClient(event.clientX, event.clientY, canvasRect, cropGeometry)
     const startRect = cropRectFromClip(previewClip, cropGeometry)
     const clipId = previewClip.id
     let latestEvent: PointerEvent | null = null
@@ -845,7 +884,7 @@ export function MergePage() {
     merge.beginHistoryTransaction()
 
     const apply = (pointerEvent: PointerEvent) => {
-      const point = cropPointFromClient(pointerEvent.clientX, pointerEvent.clientY, screenRect, cropGeometry)
+      const point = cropPointFromClient(pointerEvent.clientX, pointerEvent.clientY, canvasRect, cropGeometry)
       const next = resizeCropRect(startRect, startPoint, point, handle, cropGeometry)
       merge.updateVideo(clipId, {
         cropEnabled: true,
@@ -974,35 +1013,57 @@ export function MergePage() {
       <div className="editor-main-grid">
         <GlassPanel className="editor-preview-panel frame-preview-card video-preview-card">
           <div ref={previewScreenRef} className={`frame-image-box video-box editor-preview-screen ${cropEditing ? 'crop-editing' : ''}`}>
-            {previewClip ? (
-              <video
-                key={previewClip.id}
-                ref={previewRef}
-                data-clip-id={previewClip.id}
-                src={localFileSrc(previewClip.path)}
-                style={previewVideoStyle(previewClip.rotation, cropGeometry)}
-                muted={previewClip.muted}
-                preload="metadata"
-                playsInline
-                onTimeUpdate={handlePreviewTimeUpdate}
-                onSeeking={handlePreviewTimeUpdate}
-                onSeeked={handlePreviewTimeUpdate}
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
-                onEnded={handlePreviewTimeUpdate}
-                onLoadedMetadata={updateCropGeometry}
-              >
-                <track kind="captions" />
-              </video>
-            ) : (
-              <div className="editor-preview-empty">
-                <Film />
-                <strong>将视频拖入窗口或点击“添加视频”</strong>
-              </div>
-            )}
-            {previewClip?.cropEnabled && cropGeometry && (
+            <div
+              ref={outputCanvasRef}
+              className="editor-output-canvas"
+              style={outputCanvasGeometry ? {
+                left: outputCanvasGeometry.left,
+                top: outputCanvasGeometry.top,
+                width: outputCanvasGeometry.width,
+                height: outputCanvasGeometry.height,
+              } : undefined}
+            >
+              {previewClip ? (
+                <video
+                  key={previewClip.id}
+                  ref={previewRef}
+                  data-clip-id={previewClip.id}
+                  src={localFileSrc(previewClip.path)}
+                  style={previewExportVideoStyle(
+                    previewClip,
+                    cropGeometry,
+                    outputCanvasGeometry,
+                    merge.settings.fitMode,
+                    cropEditing,
+                  )}
+                  muted={previewClip.muted}
+                  preload="metadata"
+                  playsInline
+                  onTimeUpdate={handlePreviewTimeUpdate}
+                  onSeeking={handlePreviewTimeUpdate}
+                  onSeeked={handlePreviewTimeUpdate}
+                  onPlay={() => setPlaying(true)}
+                  onPause={() => setPlaying(false)}
+                  onEnded={handlePreviewTimeUpdate}
+                  onLoadedMetadata={updatePreviewGeometry}
+                >
+                  <track kind="captions" />
+                </video>
+              ) : (
+                <div className="editor-preview-empty">
+                  <Film />
+                  <strong>将视频拖入窗口或点击“添加视频”</strong>
+                </div>
+              )}
+              <span className="editor-output-resolution">
+                输出画布 {merge.settings.width} × {merge.settings.height}
+              </span>
+              <span className="editor-output-fit">
+                {fitModeLabel(merge.settings.fitMode)} · 实时预览
+              </span>
+            {previewClip && cropEditing && cropGeometry && (
               <div
-                className={`video-crop-layer ${cropEditing ? 'editing' : 'view-only'}`}
+                className="video-crop-layer editing"
                 style={{
                   left: cropGeometry.left,
                   top: cropGeometry.top,
@@ -1012,26 +1073,25 @@ export function MergePage() {
                 onPointerDown={cropEditing ? (event) => handleCropPointerDown(event, 'draw') : undefined}
               >
                 <CropMasks rect={cropRectFromClip(previewClip, cropGeometry)} geometry={cropGeometry} />
-                {cropEditing && (
-                  <div
-                    className="video-crop-selection"
-                    style={cropSelectionStyle(cropRectFromClip(previewClip, cropGeometry), cropGeometry)}
-                    onPointerDown={(event) => handleCropPointerDown(event, 'move')}
-                  >
-                    <span>导出区域</span>
-                    {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as CropHandle[]).map((handle) => (
-                      <button
-                        type="button"
-                        key={handle}
-                        className={`video-crop-handle ${handle}`}
-                        aria-label={`调整选区 ${handle}`}
-                        onPointerDown={(event) => handleCropPointerDown(event, handle)}
-                      />
-                    ))}
-                  </div>
-                )}
+                <div
+                  className="video-crop-selection"
+                  style={cropSelectionStyle(cropRectFromClip(previewClip, cropGeometry), cropGeometry)}
+                  onPointerDown={(event) => handleCropPointerDown(event, 'move')}
+                >
+                  <span>导出区域</span>
+                  {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as CropHandle[]).map((handle) => (
+                    <button
+                      type="button"
+                      key={handle}
+                      className={`video-crop-handle ${handle}`}
+                      aria-label={`调整选区 ${handle}`}
+                      onPointerDown={(event) => handleCropPointerDown(event, handle)}
+                    />
+                  ))}
+                </div>
               </div>
             )}
+            </div>
             {previewClip && cropEditing && (
               <div className="video-crop-toolbar">
                 <strong><SquareDashedMousePointer />调整视频尺寸</strong>
@@ -1062,8 +1122,8 @@ export function MergePage() {
               onChange={(event) => seekGlobal(Number(event.target.value))}
             />
           </div>
-          <details className="editor-advanced-settings editor-advanced-settings-below-video">
-            <summary>高级输出设置</summary>
+          <section className="editor-advanced-settings editor-advanced-settings-below-video">
+            <div className="editor-advanced-title">高级输出设置</div>
             <div className="editor-advanced-inline">
               <label>
                 <ParameterHint label="画面适配" tip="完整画面会留黑边，铺满画布会裁边。" />
@@ -1087,7 +1147,7 @@ export function MergePage() {
                 <NumberField label={merge.settings.splitMode === 'duration' ? '每段秒数' : '分割数量'} value={merge.settings.splitValue} min={1} onChange={(splitValue) => merge.setSettings({ splitValue })} />
               )}
             </div>
-          </details>
+          </section>
         </GlassPanel>
 
         <GlassPanel className="editor-inspector-panel">
@@ -1132,7 +1192,7 @@ export function MergePage() {
             </div>
             <div className="editor-setting-row">
               <label>
-                <ParameterHint label="输出分辨率" tip="红框内容最终缩放到该输出尺寸。" />
+                <ParameterHint label="输出分辨率" tip="播放窗口中的蓝框代表该输出尺寸和宽高比。" />
                 <SelectInput
                   value={resolutionValue}
                   onChange={(event) => {
@@ -1580,25 +1640,70 @@ function cropRectForDimensions(
   }
 }
 
-function previewVideoStyle(rotation: MergeRotation, geometry: CropGeometry | null): React.CSSProperties {
-  if (!geometry) {
-    return rotation === 0
-      ? {}
-      : { opacity: 0 }
+function previewExportVideoStyle(
+  clip: MergeQueueItem,
+  sourceGeometry: CropGeometry | null,
+  canvasGeometry: PreviewCanvasGeometry | null,
+  fitMode: MergeFitMode,
+  cropEditing: boolean,
+): React.CSSProperties {
+  if (!sourceGeometry || !canvasGeometry) return { opacity: 0 }
+  const sideways = clip.rotation === 90 || clip.rotation === 270
+  const rawWidth = sideways ? sourceGeometry.sourceHeight : sourceGeometry.sourceWidth
+  const rawHeight = sideways ? sourceGeometry.sourceWidth : sourceGeometry.sourceHeight
+  const crop = cropEditing
+    ? { x: 0, y: 0, width: sourceGeometry.sourceWidth, height: sourceGeometry.sourceHeight }
+    : clip.cropEnabled
+      ? cropRectForDimensions(clip, sourceGeometry.sourceWidth, sourceGeometry.sourceHeight)
+      : { x: 0, y: 0, width: sourceGeometry.sourceWidth, height: sourceGeometry.sourceHeight }
+  const effectiveFitMode: MergeFitMode = cropEditing ? 'contain' : fitMode
+  const canvasWidth = canvasGeometry.width
+  const canvasHeight = canvasGeometry.height
+  let scaleX = canvasWidth / crop.width
+  let scaleY = canvasHeight / crop.height
+  if (effectiveFitMode !== 'stretch') {
+    const scale = effectiveFitMode === 'cover'
+      ? Math.max(scaleX, scaleY)
+      : Math.min(scaleX, scaleY)
+    scaleX = scale
+    scaleY = scale
   }
-  const sideways = rotation === 90 || rotation === 270
+  const offsetX = (canvasWidth - crop.width * scaleX) / 2
+  const offsetY = (canvasHeight - crop.height * scaleY) / 2
+  const rotation = rotationMatrix(clip.rotation, rawWidth, rawHeight)
+  const matrix = [
+    scaleX * rotation.a,
+    scaleY * rotation.b,
+    scaleX * rotation.c,
+    scaleY * rotation.d,
+    scaleX * rotation.e + offsetX - crop.x * scaleX,
+    scaleY * rotation.f + offsetY - crop.y * scaleY,
+  ]
   return {
     position: 'absolute',
-    top: '50%',
-    left: '50%',
-    width: sideways ? geometry.height : geometry.width,
-    height: sideways ? geometry.width : geometry.height,
+    top: 0,
+    left: 0,
+    width: rawWidth,
+    height: rawHeight,
     maxWidth: 'none',
     maxHeight: 'none',
     objectFit: 'fill',
-    transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
-    transformOrigin: 'center',
+    transform: `matrix(${matrix.join(',')})`,
+    transformOrigin: '0 0',
   }
+}
+
+function rotationMatrix(rotation: MergeRotation, rawWidth: number, rawHeight: number) {
+  if (rotation === 90) return { a: 0, b: 1, c: -1, d: 0, e: rawHeight, f: 0 }
+  if (rotation === 180) return { a: -1, b: 0, c: 0, d: -1, e: rawWidth, f: rawHeight }
+  if (rotation === 270) return { a: 0, b: -1, c: 1, d: 0, e: 0, f: rawWidth }
+  return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }
+}
+
+function fitModeLabel(fitMode: MergeFitMode) {
+  if (fitMode === 'cover') return '铺满画布'
+  if (fitMode === 'stretch') return '拉伸填满'
+  return '完整画面'
 }
 
 function rotatedDimensions(width: number, height: number, rotation: MergeRotation) {

@@ -3,7 +3,7 @@ torch
 transformers
 pillow
 opencv-python
-decord
+decord2>=3.4.0
 faiss-cpu
 imagehash
 flask
