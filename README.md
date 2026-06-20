@@ -35,6 +35,8 @@ Video_Similarity-v<版本>-windows-x64-gpu-portable.zip
 
 安装包和便携包都内置 Python 运行环境、FFmpeg 与 FFprobe，下载后无需另行安装这些依赖。Windows GPU 版内置 CUDA 版 PyTorch，适合具有兼容 NVIDIA 显卡和驱动的设备；其他用户请选择 CPU 版。
 
+Windows GPU 安装包使用项目自带的 ZIP64 自解压安装器，默认安装到当前用户的本地程序目录，从而避开传统 NSIS 对超大 CUDA 运行时的文件大小限制。
+
 ## 功能
 
 - 动态抽帧：根据画面变化决定保留哪些帧，避免固定抽帧遗漏内容。

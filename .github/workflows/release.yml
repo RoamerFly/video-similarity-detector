@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.2.1"
+        description: "Release tag, for example v0.2.2"
         required: true
-        default: "v0.2.1"
+        default: "v0.2.2"
         type: string
       release_name:
         description: "Optional release title"
@@ -255,14 +255,13 @@ jobs:
           .\scripts\prepare-ffmpeg-runtime.ps1 `
             -DestinationDir "desktop\${{ matrix.env_dir }}"
 
-      - name: Build portable directory and NSIS installer
+      - name: Build portable directory and installer
         shell: pwsh
         working-directory: desktop
         run: |
           if ("${{ matrix.flavor }}" -eq "gpu") {
             .\build-windows.ps1 `
               -SkipNpmAudit `
-              -BuildInstaller `
               -CleanPythonEnv `
               -GpuBuild `
               -Python python
@@ -309,15 +308,28 @@ jobs:
           $portableRoot = Join-Path $env:RUNNER_TEMP "video-similarity-portable"
           Copy-Item $dist $portableRoot -Recurse
           Remove-Item (Join-Path $portableRoot "installer") -Recurse -Force -ErrorAction SilentlyContinue
-          Compress-Archive -Path (Join-Path $portableRoot "*") `
-            -DestinationPath "release-assets\$base-portable.zip" -Force
-
-          $installer = Get-ChildItem (Join-Path $dist "installer") `
-            -Recurse -Filter "*.exe" | Select-Object -First 1
-          if ($null -eq $installer) {
-            throw "Tauri NSIS installer was not generated."
+          $portableZip = "release-assets\$base-portable.zip"
+          & 7z a -tzip -mx=9 $portableZip (Join-Path $portableRoot "*")
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $portableZip)) {
+            throw "Portable ZIP was not generated."
           }
-          Copy-Item $installer.FullName "release-assets\$base-installer.exe"
+
+          $installerOutput = "release-assets\$base-installer.exe"
+          if ("${{ matrix.flavor }}" -eq "gpu") {
+            .\scripts\build-windows-self-extractor.ps1 `
+              -PayloadZip $portableZip `
+              -OutputExe $installerOutput `
+              -DisplayName "Video Similarity GPU" `
+              -InstallFolderName "Video Similarity GPU"
+          } else {
+            $installer = Get-ChildItem (Join-Path $dist "installer") `
+              -Recurse -Filter "*.exe" | Select-Object -First 1
+            if ($null -eq $installer) {
+              throw "Tauri NSIS installer was not generated."
+            }
+            Copy-Item $installer.FullName $installerOutput
+          }
+          Get-ChildItem release-assets | Select-Object Name, Length
 
       - name: Upload Windows assets
         uses: actions/upload-artifact@v4
@@ -439,16 +451,6 @@ jobs:
           chmod +x \
             "$app_dir/Contents/MacOS/${EXECUTABLE_NAME}" \
             "$app_dir/Contents/MacOS/run-video-similarity.command"
-          while IFS= read -r -d '' binary; do
-            if file "$binary" | grep -q "Mach-O"; then
-              codesign --force --sign - "$binary"
-            fi
-          done < <(
-            find "$app_dir/Contents/MacOS" -type f \
-              \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print0
-          )
-          codesign --force --sign - "$app_dir"
-          codesign --verify --verbose=2 "$app_dir"
 
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
             "$app_dir" "release-assets/${base}-portable.zip"
