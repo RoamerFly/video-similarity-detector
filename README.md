@@ -1,6 +1,6 @@
 # Video Similarity & Containment Detector
 
-[![Downloads](https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&label=Downloads&color=2ea44f)](https://github.com/RoamerFly/video-similarity-detector/releases)
+[![Downloads](https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&logo=github&color=blue)](https://github.com/RoamerFly/video-similarity-detector/releases)
 
 本地优先的视频相似度、片段包含关系和重复文件分析工具。
 
