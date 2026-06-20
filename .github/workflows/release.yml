@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.2.2"
+        description: "Release tag, for example v0.2.3"
         required: true
-        default: "v0.2.2"
+        default: "v0.2.3"
         type: string
       release_name:
         description: "Optional release title"
@@ -316,11 +316,15 @@ jobs:
 
           $installerOutput = "release-assets\$base-installer.exe"
           if ("${{ matrix.flavor }}" -eq "gpu") {
-            .\scripts\build-windows-self-extractor.ps1 `
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File ".\scripts\build-windows-self-extractor.ps1" `
               -PayloadZip $portableZip `
               -OutputExe $installerOutput `
               -DisplayName "Video Similarity GPU" `
               -InstallFolderName "Video Similarity GPU"
+            if ($LASTEXITCODE -ne 0) {
+              throw "GPU self-extracting installer was not generated."
+            }
           } else {
             $installer = Get-ChildItem (Join-Path $dist "installer") `
               -Recurse -Filter "*.exe" | Select-Object -First 1

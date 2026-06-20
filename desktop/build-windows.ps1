@@ -375,6 +375,9 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
         "Lib\tkinter",
         "Lib\turtledemo",
         "Lib\idlelib",
+        "Lib\ensurepip",
+        "Lib\site-packages\torch\include",
+        "Lib\site-packages\torch\testing",
         "share\doc"
     )
 
