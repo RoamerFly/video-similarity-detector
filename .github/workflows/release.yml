@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.2.6"
+        description: "Release tag, for example v0.2.7"
         required: true
-        default: "v0.2.6"
+        default: "v0.2.7"
         type: string
       release_name:
         description: "Optional release title"
@@ -328,6 +328,10 @@ jobs:
             -InstallFolderName $installFolder
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $installerOutput)) {
             throw "Interactive Windows installer was not generated."
+          }
+          $uninstallerEntry = & 7z l -ba $portableZip | Select-String "uninstall\.exe$"
+          if ($LASTEXITCODE -ne 0 -or $null -eq $uninstallerEntry) {
+            throw "uninstall.exe was not added to the Windows package."
           }
           Get-ChildItem release-assets | Select-Object Name, Length
 

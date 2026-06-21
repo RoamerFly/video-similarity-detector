@@ -24,6 +24,426 @@ function Convert-ToCSharpLiteral([string]$Value) {
 $escapedDisplayName = Convert-ToCSharpLiteral $DisplayName
 $escapedInstallFolder = Convert-ToCSharpLiteral $InstallFolderName
 $escapedExecutableName = Convert-ToCSharpLiteral $ExecutableName
+$uninstallerPath = Join-Path ([System.IO.Path]::GetTempPath()) ("video-similarity-uninstall-" + [guid]::NewGuid().ToString("N") + ".exe")
+$uninstallerSource = @"
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Threading;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+internal static class VideoSimilarityUninstaller
+{
+    internal const string DisplayName = "$escapedDisplayName";
+    internal const string ExecutableName = "$escapedExecutableName";
+    internal const string RegistryKeyName = "VideoSimilarity-$escapedInstallFolder";
+    internal const string AppIdentifier = "com.videosimilarity.desktop";
+
+    [STAThread]
+    private static int Main(string[] args)
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        using (UninstallerForm form = new UninstallerForm(args))
+        {
+            Application.Run(form);
+            return form.ExitCode;
+        }
+    }
+}
+
+internal sealed class UninstallerForm : Form
+{
+    private readonly string installRoot;
+    private readonly CheckBox preserveData;
+    private readonly Label statusLabel;
+    private readonly ProgressBar progressBar;
+    private readonly Button uninstallButton;
+    private readonly Button cancelButton;
+    private readonly BackgroundWorker worker;
+    private readonly bool autoStart;
+    private readonly bool autoClose;
+    private bool completed;
+    private bool cleanupScheduled;
+
+    internal int ExitCode { get; private set; }
+
+    internal UninstallerForm(string[] args)
+    {
+        installRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+        autoStart = HasArgument(args, "--auto-start");
+        autoClose = HasArgument(args, "--auto-close");
+        bool removeData = HasArgument(args, "--remove-data");
+        ExitCode = 1;
+
+        Text = "\u5378\u8f7d " + VideoSimilarityUninstaller.DisplayName;
+        ClientSize = new Size(560, 330);
+        MinimumSize = new Size(560, 365);
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        BackColor = Color.FromArgb(246, 248, 253);
+        Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+
+        Panel banner = new Panel();
+        banner.Dock = DockStyle.Top;
+        banner.Height = 82;
+        banner.BackColor = Color.FromArgb(158, 45, 65);
+        Controls.Add(banner);
+
+        Label heading = new Label();
+        heading.AutoSize = false;
+        heading.Location = new Point(26, 16);
+        heading.Size = new Size(505, 30);
+        heading.ForeColor = Color.White;
+        heading.Font = new Font(Font.FontFamily, 16F, FontStyle.Bold);
+        heading.Text = "\u5378\u8f7d " + VideoSimilarityUninstaller.DisplayName;
+        banner.Controls.Add(heading);
+
+        Label description = new Label();
+        description.AutoSize = false;
+        description.Location = new Point(28, 50);
+        description.Size = new Size(500, 22);
+        description.ForeColor = Color.FromArgb(255, 225, 231);
+        description.Text = "\u53ef\u9009\u62e9\u4fdd\u7559\u89c6\u9891\u3001\u7f13\u5b58\u3001\u62a5\u544a\u548c\u5176\u4ed6\u7528\u6237\u6570\u636e\u3002";
+        banner.Controls.Add(description);
+
+        Label pathLabel = new Label();
+        pathLabel.AutoSize = false;
+        pathLabel.Location = new Point(28, 104);
+        pathLabel.Size = new Size(505, 42);
+        pathLabel.Text = "\u5b89\u88c5\u4f4d\u7f6e\uff1a" + installRoot;
+        pathLabel.ForeColor = Color.FromArgb(70, 78, 98);
+        Controls.Add(pathLabel);
+
+        preserveData = new CheckBox();
+        preserveData.AutoSize = true;
+        preserveData.Location = new Point(28, 158);
+        preserveData.Text = "\u4fdd\u7559\u7528\u6237\u6570\u636e\uff08data\u3001videos\u3001embeddings\uff09";
+        preserveData.Checked = !removeData;
+        Controls.Add(preserveData);
+
+        statusLabel = new Label();
+        statusLabel.AutoSize = false;
+        statusLabel.Location = new Point(28, 196);
+        statusLabel.Size = new Size(505, 24);
+        statusLabel.Text = "\u70b9\u51fb\u201c\u5378\u8f7d\u201d\u540e\u5c06\u5173\u95ed\u5df2\u5b89\u88c5\u7684\u5e94\u7528\u5e76\u5220\u9664\u7a0b\u5e8f\u6587\u4ef6\u3002";
+        Controls.Add(statusLabel);
+
+        progressBar = new ProgressBar();
+        progressBar.Location = new Point(28, 226);
+        progressBar.Size = new Size(504, 18);
+        progressBar.Style = ProgressBarStyle.Continuous;
+        Controls.Add(progressBar);
+
+        uninstallButton = new Button();
+        uninstallButton.Location = new Point(332, 270);
+        uninstallButton.Size = new Size(96, 34);
+        uninstallButton.Text = "\u5378\u8f7d";
+        uninstallButton.BackColor = Color.FromArgb(180, 50, 72);
+        uninstallButton.ForeColor = Color.White;
+        uninstallButton.FlatStyle = FlatStyle.Flat;
+        uninstallButton.FlatAppearance.BorderSize = 0;
+        uninstallButton.Click += UninstallButtonClick;
+        Controls.Add(uninstallButton);
+
+        cancelButton = new Button();
+        cancelButton.Location = new Point(436, 270);
+        cancelButton.Size = new Size(96, 34);
+        cancelButton.Text = "\u53d6\u6d88";
+        cancelButton.Click += delegate { Close(); };
+        Controls.Add(cancelButton);
+
+        worker = new BackgroundWorker();
+        worker.WorkerReportsProgress = true;
+        worker.DoWork += WorkerDoWork;
+        worker.ProgressChanged += WorkerProgressChanged;
+        worker.RunWorkerCompleted += WorkerCompleted;
+
+        FormClosing += UninstallerFormClosing;
+        Shown += delegate {
+            if (autoStart)
+            {
+                BeginInvoke(new MethodInvoker(BeginUninstall));
+            }
+        };
+    }
+
+    private static bool HasArgument(string[] args, string value)
+    {
+        foreach (string item in args)
+        {
+            if (String.Equals(item, value, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void UninstallButtonClick(object sender, EventArgs e)
+    {
+        if (completed)
+        {
+            ScheduleSelfCleanup();
+            Close();
+            return;
+        }
+        if (!autoStart && MessageBox.Show(
+            this,
+            preserveData.Checked
+                ? "\u786e\u5b9a\u5378\u8f7d\u7a0b\u5e8f\u5e76\u4fdd\u7559\u7528\u6237\u6570\u636e\u5417\uff1f"
+                : "\u786e\u5b9a\u5b8c\u5168\u5378\u8f7d\u5e76\u5220\u9664\u6240\u6709\u672c\u5730\u6570\u636e\u5417\uff1f",
+            Text,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning
+        ) != DialogResult.Yes)
+        {
+            return;
+        }
+        BeginUninstall();
+    }
+
+    private void BeginUninstall()
+    {
+        if (worker.IsBusy)
+        {
+            return;
+        }
+        if (!File.Exists(Path.Combine(installRoot, VideoSimilarityUninstaller.ExecutableName)) &&
+            !File.Exists(Path.Combine(installRoot, ".video-similarity-install.json")))
+        {
+            MessageBox.Show(this, "\u5f53\u524d\u76ee\u5f55\u4e0d\u662f\u6709\u6548\u7684 Video Similarity \u5b89\u88c5\u76ee\u5f55\u3002", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        preserveData.Enabled = false;
+        uninstallButton.Enabled = false;
+        cancelButton.Enabled = false;
+        progressBar.Style = ProgressBarStyle.Marquee;
+        statusLabel.Text = "\u6b63\u5728\u5378\u8f7d\u7a0b\u5e8f...";
+        worker.RunWorkerAsync(preserveData.Checked);
+    }
+
+    private void WorkerDoWork(object sender, DoWorkEventArgs e)
+    {
+        bool keepData = (bool)e.Argument;
+        BackgroundWorker backgroundWorker = (BackgroundWorker)sender;
+        backgroundWorker.ReportProgress(10, "\u6b63\u5728\u5173\u95ed\u5e94\u7528...");
+        StopInstalledApplication();
+        backgroundWorker.ReportProgress(30, "\u6b63\u5728\u5220\u9664\u5feb\u6377\u65b9\u5f0f\u548c\u5378\u8f7d\u4fe1\u606f...");
+        RemoveShortcutsAndRegistry();
+        backgroundWorker.ReportProgress(50, "\u6b63\u5728\u5220\u9664\u7a0b\u5e8f\u6587\u4ef6...");
+        DeleteInstalledFiles(keepData);
+        if (!keepData)
+        {
+            DeleteApplicationSettings();
+        }
+        backgroundWorker.ReportProgress(100, keepData
+            ? "\u5378\u8f7d\u5b8c\u6210\uff0c\u7528\u6237\u6570\u636e\u5df2\u4fdd\u7559\u3002"
+            : "\u5b8c\u5168\u5378\u8f7d\u5b8c\u6210\u3002");
+    }
+
+    private void WorkerProgressChanged(object sender, ProgressChangedEventArgs e)
+    {
+        statusLabel.Text = Convert.ToString(e.UserState);
+    }
+
+    private void WorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+    {
+        progressBar.Style = ProgressBarStyle.Continuous;
+        if (e.Error != null)
+        {
+            statusLabel.Text = "\u5378\u8f7d\u5931\u8d25\uff1a" + e.Error.Message;
+            uninstallButton.Enabled = true;
+            cancelButton.Enabled = true;
+            preserveData.Enabled = true;
+            return;
+        }
+        completed = true;
+        ExitCode = 0;
+        progressBar.Value = 100;
+        uninstallButton.Enabled = true;
+        uninstallButton.Text = "\u5b8c\u6210";
+        cancelButton.Visible = false;
+        if (autoClose)
+        {
+            ScheduleSelfCleanup();
+            BeginInvoke(new MethodInvoker(Close));
+        }
+    }
+
+    private void UninstallerFormClosing(object sender, FormClosingEventArgs e)
+    {
+        if (worker.IsBusy)
+        {
+            e.Cancel = true;
+            return;
+        }
+        if (completed)
+        {
+            ScheduleSelfCleanup();
+        }
+    }
+
+    private void StopInstalledApplication()
+    {
+        string expected = Path.GetFullPath(Path.Combine(installRoot, VideoSimilarityUninstaller.ExecutableName));
+        string processName = Path.GetFileNameWithoutExtension(VideoSimilarityUninstaller.ExecutableName);
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            try
+            {
+                string candidate = Path.GetFullPath(process.MainModule.FileName);
+                if (String.Equals(candidate, expected, StringComparison.OrdinalIgnoreCase))
+                {
+                    process.Kill();
+                    process.WaitForExit(10000);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private void RemoveShortcutsAndRegistry()
+    {
+        foreach (string shortcut in new string[] {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), VideoSimilarityUninstaller.DisplayName + ".lnk"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), VideoSimilarityUninstaller.DisplayName + ".lnk")
+        })
+        {
+            try
+            {
+                if (File.Exists(shortcut))
+                {
+                    File.Delete(shortcut);
+                }
+            }
+            catch
+            {
+            }
+        }
+        try
+        {
+            Registry.CurrentUser.DeleteSubKeyTree(
+                @"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + VideoSimilarityUninstaller.RegistryKeyName,
+                false
+            );
+        }
+        catch
+        {
+        }
+    }
+
+    private void DeleteInstalledFiles(bool keepData)
+    {
+        string self = Path.GetFullPath(Application.ExecutablePath);
+        foreach (string entry in Directory.GetFileSystemEntries(installRoot))
+        {
+            string full = Path.GetFullPath(entry);
+            if (String.Equals(full, self, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            string name = Path.GetFileName(full);
+            if (keepData && (
+                String.Equals(name, "data", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(name, "videos", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(name, "embeddings", StringComparison.OrdinalIgnoreCase)
+            ))
+            {
+                continue;
+            }
+            if (Directory.Exists(full))
+            {
+                Directory.Delete(full, true);
+            }
+            else if (File.Exists(full))
+            {
+                File.Delete(full);
+            }
+        }
+    }
+
+    private void DeleteApplicationSettings()
+    {
+        foreach (Environment.SpecialFolder folder in new Environment.SpecialFolder[] {
+            Environment.SpecialFolder.ApplicationData,
+            Environment.SpecialFolder.LocalApplicationData
+        })
+        {
+            string path = Path.Combine(
+                Environment.GetFolderPath(folder),
+                VideoSimilarityUninstaller.AppIdentifier
+            );
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, true);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private void ScheduleSelfCleanup()
+    {
+        if (cleanupScheduled)
+        {
+            return;
+        }
+        cleanupScheduled = true;
+        string self = Path.GetFullPath(Application.ExecutablePath);
+        string command = "/C ping 127.0.0.1 -n 3 > nul & del /f /q \"" + self +
+            "\" & rmdir \"" + installRoot + "\" 2>nul";
+        Process.Start(new ProcessStartInfo("cmd.exe", command) {
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            WindowStyle = ProcessWindowStyle.Hidden
+        });
+    }
+}
+"@
+
+Add-Type `
+    -TypeDefinition $uninstallerSource `
+    -Language CSharp `
+    -OutputAssembly $uninstallerPath `
+    -OutputType WindowsApplication `
+    -ReferencedAssemblies @(
+        "System.dll",
+        "System.Drawing.dll",
+        "System.Windows.Forms.dll"
+    )
+
+[System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression") | Out-Null
+[System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem") | Out-Null
+$payloadArchive = [System.IO.Compression.ZipFile]::Open(
+    $payloadPath,
+    [System.IO.Compression.ZipArchiveMode]::Update
+)
+try {
+    $existingUninstaller = $payloadArchive.GetEntry("uninstall.exe")
+    if ($null -ne $existingUninstaller) {
+        $existingUninstaller.Delete()
+    }
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+        $payloadArchive,
+        $uninstallerPath,
+        "uninstall.exe",
+        [System.IO.Compression.CompressionLevel]::Optimal
+    ) | Out-Null
+} finally {
+    $payloadArchive.Dispose()
+}
+
 $source = @"
 using System;
 using System.ComponentModel;
@@ -73,6 +493,7 @@ internal sealed class InstallerOptions
     internal bool AutoStart;
     internal bool AutoClose;
     internal bool NoLaunch;
+    internal bool NoShortcuts;
 
     internal static InstallerOptions Parse(string[] args)
     {
@@ -107,6 +528,10 @@ internal sealed class InstallerOptions
             else if (String.Equals(args[i], "--no-launch", StringComparison.OrdinalIgnoreCase))
             {
                 options.NoLaunch = true;
+            }
+            else if (String.Equals(args[i], "--no-shortcuts", StringComparison.OrdinalIgnoreCase))
+            {
+                options.NoShortcuts = true;
             }
         }
         return options;
@@ -201,7 +626,7 @@ internal sealed class InstallerForm : Form
         desktopShortcut.AutoSize = true;
         desktopShortcut.Location = new Point(30, 194);
         desktopShortcut.Text = TextValue.Get("5Yib5bu65qGM6Z2i5b+r5o235pa55byP");
-        desktopShortcut.Checked = !options.IsUpdate;
+        desktopShortcut.Checked = !options.IsUpdate && !options.NoShortcuts;
         Controls.Add(desktopShortcut);
 
         launchAfterInstall = new CheckBox();
@@ -399,23 +824,27 @@ internal sealed class InstallerForm : Form
         }
 
         WriteInstallMarker(options.Target, options.IsUpdate);
-        CreateShortcut(
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Programs),
-                VideoSimilarityInstaller.DisplayName + ".lnk"
-            ),
-            executable
-        );
-        if (createDesktopShortcutRequested)
+        if (!options.NoShortcuts)
         {
             CreateShortcut(
                 Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    Environment.GetFolderPath(Environment.SpecialFolder.Programs),
                     VideoSimilarityInstaller.DisplayName + ".lnk"
                 ),
                 executable
             );
+            if (createDesktopShortcutRequested)
+            {
+                CreateShortcut(
+                    Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                        VideoSimilarityInstaller.DisplayName + ".lnk"
+                    ),
+                    executable
+                );
+            }
         }
+        RegisterUninstaller(options.Target, executable);
         backgroundWorker.ReportProgress(100, new ProgressInfo(TextValue.Get("5a6J6KOF5a6M5oiQ"), options.Target));
     }
 
@@ -726,6 +1155,27 @@ internal sealed class InstallerForm : Form
         File.WriteAllText(Path.Combine(target, ".video-similarity-install.json"), json, new UTF8Encoding(false));
     }
 
+    private static void RegisterUninstaller(string target, string executable)
+    {
+        string uninstall = Path.Combine(target, "uninstall.exe");
+        if (!File.Exists(uninstall))
+        {
+            throw new FileNotFoundException("Uninstaller was not installed.", uninstall);
+        }
+        string registryPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\VideoSimilarity-" +
+            VideoSimilarityInstaller.InstallFolderName;
+        using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(registryPath))
+        {
+            key.SetValue("DisplayName", VideoSimilarityInstaller.DisplayName);
+            key.SetValue("DisplayVersion", FileVersionInfo.GetVersionInfo(executable).FileVersion ?? "");
+            key.SetValue("InstallLocation", target);
+            key.SetValue("DisplayIcon", executable + ",0");
+            key.SetValue("UninstallString", "\"" + uninstall + "\"");
+            key.SetValue("NoModify", 1, Microsoft.Win32.RegistryValueKind.DWord);
+            key.SetValue("NoRepair", 1, Microsoft.Win32.RegistryValueKind.DWord);
+        }
+    }
+
     private static string EscapeJson(string value)
     {
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
@@ -922,4 +1372,5 @@ try {
     Write-Host "Installer bytes: $($result.Length)"
 } finally {
     Remove-Item -LiteralPath $stubPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $uninstallerPath -Force -ErrorAction SilentlyContinue
 }

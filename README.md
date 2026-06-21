@@ -45,6 +45,8 @@ Windows CPU/GPU 安装包使用项目自带的 ZIP64 图形安装向导，可自
 
 没有安装图形软件中心的精简 Linux 环境仍可使用命令行包管理器，或直接下载便携版。
 
+Windows 安装目录和便携包中均包含 `uninstall.exe` 图形卸载程序。卸载时可选择保留 `data/`、`videos/`、`embeddings/`、报告和界面设置，或执行完整卸载。安装版也会注册到 Windows“已安装的应用”列表。
+
 ## 功能
 
 - 动态抽帧：根据画面变化决定保留哪些帧，避免固定抽帧遗漏内容。
@@ -129,6 +131,7 @@ CPU 版：
 ```text
 desktop/dist_windows/
 ├─ video-similarity-desktop.exe
+├─ uninstall.exe                  # 图形卸载程序
 ├─ env/                         # Python、FFmpeg、FFprobe
 └─ data/
 ```
@@ -138,6 +141,7 @@ GPU 版：
 ```text
 desktop/dist_windows_gpu/
 ├─ video-similarity-desktop.exe
+├─ uninstall.exe                  # 图形卸载程序
 ├─ env/                         # CUDA PyTorch、FFmpeg、FFprobe
 └─ data/
 ```
