@@ -411,6 +411,7 @@ cargo check
 
 感谢以下开源项目和社区：
 
+- [DewduSendanayake/Video-Similarity-Search](https://github.com/DewduSendanayake/Video-Similarity-Search.git) — 本项目的基座，为视频相似度搜索的核心思路与初始实现提供了重要基础。
 - [Tauri](https://tauri.app/)
 - [React](https://react.dev/) 与 [Vite](https://vite.dev/)
 - [Rust](https://www.rust-lang.org/) 与 [Python](https://www.python.org/)
