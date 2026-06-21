@@ -1,19 +1,48 @@
-# 视频相似度检测 Video Similarity detector
+<p align="center">
+  <img src="icon.png" alt="Video Similarity Detector" width="160">
+</p>
 
-[![Downloads](https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&logo=github&color=blue)](https://github.com/RoamerFly/video-similarity-detector/releases)
+<h1 align="center">视频相似度检测<br>Video Similarity Detector</h1>
 
-本地优先的视频相似度、片段包含关系和重复文件分析工具。
+<p align="center">
+  <a href="https://github.com/RoamerFly/video-similarity-detector/releases"><img src="https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&logo=github&color=blue" alt="Downloads"></a>
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2563eb)
-![Tauri](https://img.shields.io/badge/Tauri-2.x-24c8db)
-![React](https://img.shields.io/badge/React-19-61dafb)
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)
-![CUDA](https://img.shields.io/badge/CUDA-optional-16a34a)
+<p align="center">本地优先的视频相似度、片段包含关系和重复文件分析工具。</p>
 
-Video Similarity & Containment Detector 会扫描指定目录中的视频，通过动态抽帧、画面预处理、CLIP 特征、FAISS 检索和时间一致性分析，计算视频之间的双向覆盖率、整体相似度、匹配片段和时间窗口结果。
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2563eb" alt="Platform">
+  <img src="https://img.shields.io/badge/Tauri-2.x-24c8db" alt="Tauri">
+  <img src="https://img.shields.io/badge/React-19-61dafb" alt="React">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776ab" alt="Python">
+  <img src="https://img.shields.io/badge/CUDA-optional-16a34a" alt="CUDA">
+</p>
 
-所有视频、缓存和报告默认保存在本机，不依赖远程服务。
+<p align="center">
+  <a href="#%E4%B8%8B%E8%BD%BD">📥 下载</a> &nbsp;|&nbsp;
+  <a href="#%E5%8A%9F%E8%83%BD">✨ 功能</a> &nbsp;|&nbsp;
+  <a href="#%E7%95%8C%E9%9D%A2%E9%A2%84%E8%A7%88">🖼️ 界面</a> &nbsp;|&nbsp;
+  <a href="#%E5%B7%A5%E4%BD%9C%E5%8E%9F%E7%90%86">⚙️ 原理</a> &nbsp;|&nbsp;
+  <a href="#%E5%BF%AB%E9%80%9F%E5%BC%80%E5%A7%8B">🚀 快速开始</a> &nbsp;|&nbsp;
+  <a href="#%E4%BD%BF%E7%94%A8%E6%96%B9%E6%B3%95">📖 使用方法</a> &nbsp;|&nbsp;
+  <a href="#%E5%91%BD%E4%BB%A4%E8%A1%8C">💻 命令行</a> &nbsp;|&nbsp;
+  <a href="#%E5%BC%80%E5%8F%91">🛠️ 开发</a> &nbsp;|&nbsp;
+  <a href="#%E6%9E%84%E5%BB%BA">📦 构建</a> &nbsp;|&nbsp;
+  <a href="#%E6%8A%80%E6%9C%AF%E6%A0%88">🧰 技术栈</a> &nbsp;|&nbsp;
+  <a href="#%E9%A1%B9%E7%9B%AE%E7%BB%93%E6%9E%84">📂 结构</a> &nbsp;|&nbsp;
+  <a href="#%E8%B4%A1%E7%8C%AE">🤝 贡献</a> &nbsp;|&nbsp;
+  <a href="#%E8%AE%B8%E5%8F%AF%E8%AF%81">📄 许可证</a>
+</p>
+
+---
+
+<p align="center">
+Video Similarity Detector 会扫描指定目录中的视频，通过动态抽帧、画面预处理、CLIP 特征、FAISS 检索和时间一致性分析，计算视频之间的双向覆盖率、整体相似度、匹配片段和时间窗口结果。
+</p>
+
+
+<p align="center">所有视频、缓存和报告默认保存在本机，不依赖远程服务。</p>
 
 ## 下载
 
