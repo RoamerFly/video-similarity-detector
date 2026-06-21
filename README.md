@@ -63,10 +63,10 @@ openai/clip-vit-base-patch32
 - [模型配置 `config.json`](https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/config.json?download=true)
 - [图像预处理配置 `preprocessor_config.json`](https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/preprocessor_config.json?download=true)
 
-安装包和便携包已经内置 Python、Torch、Transformers 等运行依赖，但没有内置模型权重。首次分析时程序默认从 Hugging Face 下载模型。若目标电脑无法联网，可以提前下载模型缓存并作为单独的 Release 文件上传，例如：
+安装包和便携包已经内置 Python、Torch、Transformers 等运行依赖，但没有内置模型权重。首次分析时程序默认从 Hugging Face 下载模型。若希望无网开箱即用，可以自行下载或直接下载release中的模型：
 
 ```text
-Video_Similarity-clip-vit-base-patch32-model.zip
+clip-vit-base-patch32-model.zip
 ```
 
 推荐将 Release 模型压缩包整理成可直接放在程序同级目录的结构：
