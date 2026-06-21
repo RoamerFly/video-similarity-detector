@@ -522,6 +522,7 @@ function Assert-PortablePackage([string]$DistDir, [bool]$RequireCuda = $false) {
         "env\ffprobe.exe",
         "data",
         "data\reports",
+        "models",
         "scripts\batch_compare.py",
         "scripts\merge_videos.py",
         "video_sim\candidate_selector.py",
@@ -881,6 +882,7 @@ Copy-Directory $envDir (Join-Path $distDir "env")
 New-Item -ItemType Directory -Path (Join-Path $distDir "data\reports") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $distDir "data\cache") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $distDir "data\frames") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $distDir "models") -Force | Out-Null
 
 $launcher = @"
 @echo off

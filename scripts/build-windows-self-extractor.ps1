@@ -122,7 +122,7 @@ internal sealed class UninstallerForm : Form
         preserveData = new CheckBox();
         preserveData.AutoSize = true;
         preserveData.Location = new Point(28, 158);
-        preserveData.Text = "\u4fdd\u7559\u7528\u6237\u6570\u636e\uff08data\u3001videos\u3001embeddings\uff09";
+        preserveData.Text = "\u4fdd\u7559\u7528\u6237\u6570\u636e\u548c\u6a21\u578b\uff08data\u3001videos\u3001embeddings\u3001models\uff09";
         preserveData.Checked = !removeData;
         Controls.Add(preserveData);
 
@@ -353,7 +353,8 @@ internal sealed class UninstallerForm : Form
             if (keepData && (
                 String.Equals(name, "data", StringComparison.OrdinalIgnoreCase) ||
                 String.Equals(name, "videos", StringComparison.OrdinalIgnoreCase) ||
-                String.Equals(name, "embeddings", StringComparison.OrdinalIgnoreCase)
+                String.Equals(name, "embeddings", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(name, "models", StringComparison.OrdinalIgnoreCase)
             ))
             {
                 continue;

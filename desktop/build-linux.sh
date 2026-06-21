@@ -245,7 +245,7 @@ remove_dist_dir() {
 copy_runtime_tree() {
   remove_dist_dir
 
-  mkdir -p "$DIST_DIR/data/reports" "$DIST_DIR/data/cache" "$DIST_DIR/data/frames"
+  mkdir -p "$DIST_DIR/data/reports" "$DIST_DIR/data/cache" "$DIST_DIR/data/frames" "$DIST_DIR/models"
   cp -R "$REPO_ROOT/scripts" "$DIST_DIR/scripts"
   cp -R "$REPO_ROOT/video_sim" "$DIST_DIR/video_sim"
   prune_portable_sources "$DIST_DIR"
@@ -304,6 +304,7 @@ assert_portable_package() {
   [[ -x "$DIST_DIR/env/ffmpeg" ]] || { echo "[ERROR] Missing env/ffmpeg"; exit 1; }
   [[ -x "$DIST_DIR/env/ffprobe" ]] || { echo "[ERROR] Missing env/ffprobe"; exit 1; }
   [[ -d "$DIST_DIR/data/reports" ]] || { echo "[ERROR] Missing data/reports"; exit 1; }
+  [[ -d "$DIST_DIR/models" ]] || { echo "[ERROR] Missing models directory"; exit 1; }
   [[ -f "$DIST_DIR/scripts/batch_compare.py" ]] || { echo "[ERROR] Missing scripts/batch_compare.py"; exit 1; }
   [[ -f "$DIST_DIR/scripts/merge_videos.py" ]] || { echo "[ERROR] Missing scripts/merge_videos.py"; exit 1; }
   [[ -f "$DIST_DIR/video_sim/candidate_selector.py" ]] || { echo "[ERROR] Missing video_sim/candidate_selector.py"; exit 1; }

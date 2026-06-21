@@ -31,8 +31,11 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 from video_sim.preprocess import PreprocessConfig, preprocess_frame_for_clip
+from video_sim.model_locator import (
+    DEFAULT_EMBEDDING_MODEL,
+    resolve_embedding_model_source,
+)
 
-DEFAULT_EMBEDDING_MODEL = "openai/clip-vit-base-patch32"
 FRAME_CACHE_SCHEMA_VERSION = 2
 
 
@@ -112,15 +115,22 @@ class VideoEmbedder:
         if torch_threads.isdigit():
             torch.set_num_threads(max(1, int(torch_threads)))
 
-        print(f"Loading CLIP model on {self.device}...")
+        model_source = resolve_embedding_model_source()
+        local_model = isinstance(model_source, Path)
+        print(
+            f"Loading CLIP model on {self.device} from "
+            f"{model_source if local_model else DEFAULT_EMBEDDING_MODEL}..."
+        )
         captured_stderr = io.StringIO()
         try:
             with redirect_stderr(captured_stderr):
                 self.clip_processor = ClipImageProcessor.from_pretrained(
-                    DEFAULT_EMBEDDING_MODEL
+                    str(model_source),
+                    local_files_only=local_model,
                 )
                 self.clip_model = CLIPVisionModel.from_pretrained(
-                    DEFAULT_EMBEDDING_MODEL
+                    str(model_source),
+                    local_files_only=local_model,
                 ).to(self.device)
         except Exception as exc:
             details = captured_stderr.getvalue().strip().splitlines()[-5:]

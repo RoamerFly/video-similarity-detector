@@ -47,6 +47,85 @@ Windows CPU/GPU 安装包使用项目自带的 ZIP64 图形安装向导，可自
 
 Windows 安装目录和便携包中均包含 `uninstall.exe` 图形卸载程序。卸载时可选择保留 `data/`、`videos/`、`embeddings/`、报告和界面设置，或执行完整卸载。安装版也会注册到 Windows“已安装的应用”列表。
 
+### 离线安装 CLIP 模型
+
+AI 相似度分析使用以下模型：
+
+```text
+openai/clip-vit-base-patch32
+```
+
+官方下载地址：
+
+- [模型主页](https://huggingface.co/openai/clip-vit-base-patch32)
+- [模型文件列表](https://huggingface.co/openai/clip-vit-base-patch32/tree/main)
+- [PyTorch 权重 `pytorch_model.bin`](https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/pytorch_model.bin?download=true)
+- [模型配置 `config.json`](https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/config.json?download=true)
+- [图像预处理配置 `preprocessor_config.json`](https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/preprocessor_config.json?download=true)
+
+安装包和便携包已经内置 Python、Torch、Transformers 等运行依赖，但没有内置模型权重。首次分析时程序默认从 Hugging Face 下载模型。若目标电脑无法联网，可以提前下载模型缓存并作为单独的 Release 文件上传，例如：
+
+```text
+Video_Similarity-clip-vit-base-patch32-model.zip
+```
+
+推荐将 Release 模型压缩包整理成可直接放在程序同级目录的结构：
+
+```text
+models/
+└─ clip-vit-base-patch32/
+   ├─ config.json
+   ├─ preprocessor_config.json
+   └─ pytorch_model.bin
+```
+
+本项目只使用 CLIP 的图像编码器，因此离线包至少需要以上三个文件，不需要下载仓库中的 TensorFlow 和 Flax 权重。
+
+下载后直接解压到程序目录，最终结构如下：
+
+Windows：
+
+```text
+Video Similarity/
+├─ video-similarity-desktop.exe
+└─ models/
+   └─ clip-vit-base-patch32/
+```
+
+macOS：
+
+```text
+Video Similarity.app/
+└─ Contents/
+   └─ MacOS/
+      └─ models/
+         └─ clip-vit-base-patch32/
+```
+
+Linux：
+
+```text
+Video_Similarity/
+├─ video-similarity-desktop
+└─ models/
+   └─ clip-vit-base-patch32/
+```
+
+程序会优先读取同级 `models/clip-vit-base-patch32/`。安装版和便携版都支持此方式，整个程序目录复制到其他电脑后模型也会随之迁移。应用内覆盖更新不会删除 `models/`。
+
+同时兼容 Hugging Face 原始缓存结构。如果你直接打包缓存，可放置为：
+
+```text
+程序目录/
+└─ models/
+   └─ models--openai--clip-vit-base-patch32/
+      ├─ blobs/
+      ├─ refs/
+      └─ snapshots/
+```
+
+个人目录下的默认 Hugging Face 缓存 `~/.cache/huggingface/hub/` 仍然可用。查找顺序为：程序同级 `models/`、个人 Hugging Face 缓存、联网下载。模型放置正确后即可断网运行 AI 分析。
+
 ## 功能
 
 - 动态抽帧：根据画面变化决定保留哪些帧，避免固定抽帧遗漏内容。
