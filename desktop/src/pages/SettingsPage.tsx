@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   CheckCircle2,
+  Download,
+  ExternalLink,
   FileSearch,
   FolderOpen,
   Info,
@@ -26,16 +28,22 @@ import {
 } from '@/components/DesignSystem'
 import {
   checkPythonEnv,
+  checkForUpdates,
   clearCacheItems,
+  downloadAndInstallUpdate,
   formatBytes,
   getAppInfo,
+  listenUpdateDownloadProgress,
   normalizeBackendError,
+  openReleasePage,
   scanCache,
   selectOutputDirectory,
   selectPythonExecutable,
   selectVideoDirectory,
   type AppInfo,
   type CacheScanResult,
+  type UpdateDownloadProgress,
+  type UpdateInfo,
 } from '@/services/backend'
 import { useEnvironmentStore } from '@/stores/environmentStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -546,26 +554,161 @@ function BaseSettings({
         </label>
       </div>
 
-      <div className="settings-about-card">
-        <div className="about-title">
-          <Info size={24} />
-          <h3>关于与版本</h3>
-        </div>
-        <div className="about-grid compact">
-          <div>
-            <span>应用版本</span>
-            <strong title={`v${appInfo?.version ?? '0.1.0'}`}>v{appInfo?.version ?? '0.1.0'}</strong>
+      <div className="settings-side-stack">
+        <UpdateSettingsCard appInfo={appInfo} />
+        <div className="settings-about-card">
+          <div className="about-title">
+            <Info size={24} />
+            <h3>关于与版本</h3>
           </div>
-          <div>
-            <span>界面框架</span>
-            <strong title="桌面界面(Tauri + React)">桌面界面(Tauri + React)</strong>
-          </div>
-          <div>
-            <span>核心引擎</span>
-            <strong title="Python 视频相似度引擎(Python Video Similarity Engine)">Python 视频相似度引擎(Python Video Similarity Engine)</strong>
+          <div className="about-grid compact">
+            <div>
+              <span>应用版本</span>
+              <strong title={`v${appInfo?.version ?? '0.1.0'}`}>v{appInfo?.version ?? '0.1.0'}</strong>
+            </div>
+            <div>
+              <span>运行版本</span>
+              <strong>{appInfo?.buildFlavor === 'gpu' ? 'GPU / CUDA' : 'CPU'}</strong>
+            </div>
+            <div>
+              <span>安装方式</span>
+              <strong>{appInfo?.installType === 'installed' ? '安装版' : '便携版'}</strong>
+            </div>
+            <div>
+              <span>界面框架</span>
+              <strong title="桌面界面(Tauri + React)">桌面界面(Tauri + React)</strong>
+            </div>
+            <div>
+              <span>核心引擎</span>
+              <strong title="Python 视频相似度引擎(Python Video Similarity Engine)">Python 视频相似度引擎(Python Video Similarity Engine)</strong>
+            </div>
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+function UpdateSettingsCard({ appInfo }: { appInfo: AppInfo | null }) {
+  const [update, setUpdate] = useState<UpdateInfo | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [progress, setProgress] = useState<UpdateDownloadProgress | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    let stop = () => undefined
+    void listenUpdateDownloadProgress((payload) => {
+      if (!active) return
+      setProgress(payload)
+    })
+      .then((unlisten) => {
+        if (!active) unlisten()
+        else stop = unlisten
+      })
+      .catch((err) => {
+        if (active) setError(normalizeBackendError(err))
+      })
+    return () => {
+      active = false
+      stop()
+    }
+  }, [])
+
+  async function handleCheckUpdate() {
+    setChecking(true)
+    setError('')
+    setProgress(null)
+    try {
+      setUpdate(await checkForUpdates())
+    } catch (err) {
+      setError(normalizeBackendError(err))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!update?.canAutoInstall) return
+    const confirmed = window.confirm(
+      `将下载 ${formatBytes(update.assetSize)} 的 ${update.buildFlavor.toUpperCase()} 安装包，完成后自动退出并覆盖安装到：\n${update.installRoot}\n\n数据、报告、缓存和设置不会被删除。是否继续？`,
+    )
+    if (!confirmed) return
+    setInstalling(true)
+    setError('')
+    setProgress({
+      downloadedBytes: 0,
+      totalBytes: update.assetSize,
+      progress: 0,
+      stage: '正在连接 GitHub Releases',
+    })
+    try {
+      await downloadAndInstallUpdate(update)
+    } catch (err) {
+      setInstalling(false)
+      setError(normalizeBackendError(err))
+    }
+  }
+
+  const statusText = error || update?.message || '点击检查 GitHub Releases 中的最新稳定版本。'
+  const currentVersion = update?.currentVersion || appInfo?.version || '0.1.0'
+  const targetVersion = update?.latestVersion || currentVersion
+  const installProgress = Math.max(0, Math.min(100, progress?.progress || 0))
+
+  return (
+    <div className="settings-update-card">
+      <div className="about-title">
+        <Download size={24} />
+        <h3>检查更新</h3>
+      </div>
+      <div className="update-version-line">
+        <span>当前 v{currentVersion}</span>
+        <strong>{update?.updateAvailable ? `可更新至 v${targetVersion}` : `${appInfo?.buildFlavor === 'gpu' ? 'GPU' : 'CPU'} 版`}</strong>
+      </div>
+      <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{statusText}</p>
+      {(appInfo?.installRoot || update?.installRoot) && (
+        <p className="update-install-path" title={update?.installRoot || appInfo?.installRoot}>
+          安装位置：{update?.installRoot || appInfo?.installRoot}
+        </p>
+      )}
+      {installing && (
+        <div className="update-progress-block">
+          <div>
+            <span>{progress?.stage || '正在准备更新'}</span>
+            <strong>{installProgress.toFixed(0)}%</strong>
+          </div>
+          <div className="update-progress-track">
+            <span style={{ width: `${installProgress}%` }} />
+          </div>
+          {progress?.totalBytes ? (
+            <small>{formatBytes(progress.downloadedBytes)} / {formatBytes(progress.totalBytes)}</small>
+          ) : null}
+        </div>
+      )}
+      <div className="update-actions">
+        <NeonButton
+          variant="outline"
+          type="button"
+          onClick={() => void handleCheckUpdate()}
+          disabled={checking || installing}
+        >
+          <RefreshCw size={17} className={checking ? 'spin-slow' : ''} />
+          {checking ? '检查中' : '检查更新'}
+        </NeonButton>
+        {update?.canAutoInstall ? (
+          <NeonButton type="button" onClick={() => void handleInstallUpdate()} disabled={installing}>
+            <Download size={17} />
+            {installing ? '下载中' : '立即更新'}
+          </NeonButton>
+        ) : update?.updateAvailable && update.releaseUrl ? (
+          <NeonButton variant="outline" type="button" onClick={() => void openReleasePage(update.releaseUrl)}>
+            <ExternalLink size={17} />
+            打开发布页
+          </NeonButton>
+        ) : null}
+      </div>
+      <small className="update-preserve-note">覆盖升级仅替换程序文件，保留 data、videos、embeddings、报告和界面设置。</small>
     </div>
   )
 }

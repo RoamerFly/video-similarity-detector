@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.2.4"
+        description: "Release tag, for example v0.2.5"
         required: true
-        default: "v0.2.4"
+        default: "v0.2.5"
         type: string
       release_name:
         description: "Optional release title"
@@ -268,7 +268,6 @@ jobs:
           } else {
             .\build-windows.ps1 `
               -SkipNpmAudit `
-              -BuildInstaller `
               -CleanPythonEnv `
               -Python python
           }
@@ -309,29 +308,26 @@ jobs:
           Copy-Item $dist $portableRoot -Recurse
           Remove-Item (Join-Path $portableRoot "installer") -Recurse -Force -ErrorAction SilentlyContinue
           $portableZip = "release-assets\$base-portable.zip"
-          & 7z a -tzip -mx=9 $portableZip (Join-Path $portableRoot "*")
+          & 7z a -tzip -mx=7 $portableZip (Join-Path $portableRoot "*")
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $portableZip)) {
             throw "Portable ZIP was not generated."
           }
 
           $installerOutput = "release-assets\$base-installer.exe"
-          if ("${{ matrix.flavor }}" -eq "gpu") {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-              -File ".\scripts\build-windows-self-extractor.ps1" `
-              -PayloadZip $portableZip `
-              -OutputExe $installerOutput `
-              -DisplayName "Video Similarity GPU" `
-              -InstallFolderName "Video Similarity GPU"
-            if ($LASTEXITCODE -ne 0) {
-              throw "GPU self-extracting installer was not generated."
-            }
+          $displayName = if ("${{ matrix.flavor }}" -eq "gpu") {
+            "Video Similarity GPU"
           } else {
-            $installer = Get-ChildItem (Join-Path $dist "installer") `
-              -Recurse -Filter "*.exe" | Select-Object -First 1
-            if ($null -eq $installer) {
-              throw "Tauri NSIS installer was not generated."
-            }
-            Copy-Item $installer.FullName $installerOutput
+            "Video Similarity"
+          }
+          $installFolder = $displayName
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File ".\scripts\build-windows-self-extractor.ps1" `
+            -PayloadZip $portableZip `
+            -OutputExe $installerOutput `
+            -DisplayName $displayName `
+            -InstallFolderName $installFolder
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $installerOutput)) {
+            throw "Interactive Windows installer was not generated."
           }
           Get-ChildItem release-assets | Select-Object Name, Length
 

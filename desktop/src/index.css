@@ -7603,6 +7603,107 @@ select {
   background: rgba(7, 18, 45, 0.34);
 }
 
+.settings-side-stack {
+  display: grid;
+  min-height: 0;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+}
+
+.settings-update-card {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(74, 164, 255, 0.32);
+  border-radius: 10px;
+  background:
+    linear-gradient(145deg, rgba(21, 74, 148, 0.24), rgba(7, 18, 45, 0.38));
+}
+
+.update-version-line,
+.update-progress-block > div:first-child,
+.update-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.update-version-line span,
+.update-version-line strong {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.update-version-line span {
+  color: rgba(226, 232, 255, 0.7);
+}
+
+.update-version-line strong {
+  color: rgba(113, 207, 255, 0.96);
+}
+
+.update-status-copy,
+.update-install-path,
+.update-preserve-note {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.update-status-copy {
+  color: rgba(238, 242, 255, 0.82);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.update-install-path {
+  overflow: hidden;
+  color: rgba(226, 232, 255, 0.56);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-progress-block {
+  display: grid;
+  gap: 6px;
+}
+
+.update-progress-block span,
+.update-progress-block strong,
+.update-progress-block small,
+.update-preserve-note {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.update-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(116, 145, 255, 0.16);
+}
+
+.update-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #299dff, #8558ff);
+  transition: width 160ms ease;
+}
+
+.update-actions .neon-button {
+  min-width: 0;
+  flex: 1 1 0;
+  padding-inline: 10px;
+}
+
+.update-preserve-note {
+  color: rgba(142, 232, 194, 0.78);
+}
+
 .about-title {
   gap: 10px;
 }

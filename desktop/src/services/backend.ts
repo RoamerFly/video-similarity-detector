@@ -9,6 +9,33 @@ export interface AppInfo {
   defaultOutputDir: string
   appName: string
   version: string
+  buildFlavor: string
+  installType: string
+  installRoot: string
+}
+
+export interface UpdateInfo {
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  releaseUrl: string
+  releaseNotes: string
+  publishedAt: string
+  assetName: string
+  assetUrl: string
+  assetSize: number
+  buildFlavor: string
+  installType: string
+  installRoot: string
+  canAutoInstall: boolean
+  message: string
+}
+
+export interface UpdateDownloadProgress {
+  downloadedBytes: number
+  totalBytes: number
+  progress: number
+  stage: string
 }
 
 export interface VideoFile {
@@ -253,9 +280,53 @@ export async function getAppInfo() {
       defaultOutputDir: 'data/reports',
       appName: 'video-similarity-desktop',
       version: '0.1.0',
+      buildFlavor: 'cpu',
+      installType: 'portable',
+      installRoot: '',
     } satisfies AppInfo
   }
   return invoke<AppInfo>('get_app_info')
+}
+
+export async function checkForUpdates() {
+  if (!hasTauriRuntime()) {
+    return {
+      currentVersion: '0.1.0',
+      latestVersion: '0.1.0',
+      updateAvailable: false,
+      releaseUrl: 'https://github.com/RoamerFly/video-similarity-detector/releases',
+      releaseNotes: '',
+      publishedAt: '',
+      assetName: '',
+      assetUrl: '',
+      assetSize: 0,
+      buildFlavor: 'cpu',
+      installType: 'portable',
+      installRoot: '',
+      canAutoInstall: false,
+      message: '浏览器预览模式不检查更新。',
+    } satisfies UpdateInfo
+  }
+  return invoke<UpdateInfo>('check_for_updates')
+}
+
+export async function downloadAndInstallUpdate(update: UpdateInfo) {
+  if (!hasTauriRuntime()) throw new Error('覆盖更新需要在桌面应用中运行。')
+  return invoke<void>('download_and_install_update', {
+    request: {
+      assetName: update.assetName,
+      assetUrl: update.assetUrl,
+      assetSize: update.assetSize,
+    },
+  })
+}
+
+export async function openReleasePage(url: string) {
+  if (!hasTauriRuntime()) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return
+  }
+  return invoke<void>('open_release_page', { url })
 }
 
 export async function selectVideoDirectory() {
@@ -545,6 +616,19 @@ export async function listenMergeEvents(handlers: {
 export async function listenAppCloseRequested(handler: () => void) {
   if (!hasTauriRuntime()) return () => undefined
   const unlisten = await listen('app-close-requested', () => handler())
+  return () => {
+    unlisten()
+  }
+}
+
+export async function listenUpdateDownloadProgress(
+  handler: (payload: UpdateDownloadProgress) => void,
+) {
+  if (!hasTauriRuntime()) return () => undefined
+  const unlisten = await listen<UpdateDownloadProgress>(
+    'update-download-progress',
+    (event) => handler(event.payload),
+  )
   return () => {
     unlisten()
   }

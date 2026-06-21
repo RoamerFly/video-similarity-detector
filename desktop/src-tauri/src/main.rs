@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -29,6 +29,10 @@ const MAIN_TRAY_ID: &str = "main-tray";
 const CLOSE_BEHAVIOR_ASK: u8 = 0;
 const CLOSE_BEHAVIOR_TRAY: u8 = 1;
 const CLOSE_BEHAVIOR_EXIT: u8 = 2;
+const RELEASES_API_URL: &str =
+    "https://api.github.com/repos/RoamerFly/video-similarity-detector/releases/latest";
+const RELEASE_DOWNLOAD_PREFIX: &str =
+    "https://github.com/RoamerFly/video-similarity-detector/releases/download/";
 static CLOSE_BEHAVIOR: AtomicU8 = AtomicU8::new(CLOSE_BEHAVIOR_ASK);
 
 #[derive(Default)]
@@ -57,6 +61,61 @@ struct AppInfo {
     default_output_dir: String,
     app_name: String,
     version: String,
+    build_flavor: String,
+    install_type: String,
+    install_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    body: Option<String>,
+    published_at: Option<String>,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    release_url: String,
+    release_notes: String,
+    published_at: String,
+    asset_name: String,
+    asset_url: String,
+    asset_size: u64,
+    build_flavor: String,
+    install_type: String,
+    install_root: String,
+    can_auto_install: bool,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallUpdateRequest {
+    asset_name: String,
+    asset_url: String,
+    asset_size: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDownloadProgress {
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    progress: f64,
+    stage: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -448,6 +507,8 @@ struct ReportGroup {
 #[tauri::command]
 fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     let root = resolve_project_root(&app)?;
+    let build_flavor = detect_build_flavor(&root);
+    let install_type = detect_install_type(&root);
     Ok(AppInfo {
         default_video_dir: path_to_string(root.join("videos")),
         default_cache_dir: path_to_string(root.join("data")),
@@ -455,7 +516,331 @@ fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
         project_root: path_to_string(root),
         app_name: app.package_info().name.to_string(),
         version: app.package_info().version.to_string(),
+        build_flavor,
+        install_type,
+        install_root: path_to_string(resolve_install_root()?),
     })
+}
+
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || check_for_updates_impl(&app))
+        .await
+        .map_err(|e| format!("检查更新任务异常: {e}"))?
+}
+
+fn check_for_updates_impl(app: &tauri::AppHandle) -> Result<UpdateInfo, String> {
+    let root = resolve_project_root(app)?;
+    let current_version = app.package_info().version.to_string();
+    let build_flavor = detect_build_flavor(&root);
+    let install_type = detect_install_type(&root);
+    let install_root = resolve_install_root()?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!(
+            "Video-Similarity/{current_version} (+https://github.com/RoamerFly/video-similarity-detector)"
+        ))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建更新请求失败: {e}"))?;
+    let release = client
+        .get(RELEASES_API_URL)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|e| format!("连接 GitHub Releases 失败: {e}"))?
+        .json::<GithubRelease>()
+        .map_err(|e| format!("解析 GitHub 最新版本失败: {e}"))?;
+
+    let latest_version = release.tag_name.trim_start_matches('v').to_string();
+    let update_available = compare_versions(&latest_version, &current_version).is_gt();
+    let expected_suffix = update_asset_suffix(&build_flavor);
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.to_ascii_lowercase().ends_with(&expected_suffix))
+        .or_else(|| {
+            release.assets.iter().find(|asset| {
+                asset
+                    .name
+                    .to_ascii_lowercase()
+                    .ends_with("-windows-x64-cpu-installer.exe")
+            })
+        });
+    let can_auto_install = cfg!(target_os = "windows")
+        && update_available
+        && asset.is_some();
+    let message = if !update_available {
+        format!("当前已是最新版本 v{current_version}")
+    } else if can_auto_install {
+        format!("发现新版本 v{latest_version}，可保留数据直接覆盖安装")
+    } else {
+        format!("发现新版本 v{latest_version}，请打开发布页下载")
+    };
+
+    Ok(UpdateInfo {
+        current_version,
+        latest_version,
+        update_available,
+        release_url: release.html_url,
+        release_notes: release.body.unwrap_or_default(),
+        published_at: release.published_at.unwrap_or_default(),
+        asset_name: asset.map(|item| item.name.clone()).unwrap_or_default(),
+        asset_url: asset
+            .map(|item| item.browser_download_url.clone())
+            .unwrap_or_default(),
+        asset_size: asset.map(|item| item.size).unwrap_or(0),
+        build_flavor,
+        install_type,
+        install_root: path_to_string(install_root),
+        can_auto_install,
+        message,
+    })
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app: tauri::AppHandle,
+    request: InstallUpdateRequest,
+) -> Result<(), String> {
+    validate_update_asset(&request)?;
+    let app_for_download = app.clone();
+    let request_for_download = request;
+    let installer = tauri::async_runtime::spawn_blocking(move || {
+        download_update_installer(&app_for_download, &request_for_download)
+    })
+    .await
+    .map_err(|e| format!("下载更新任务异常: {e}"))??;
+
+    #[cfg(target_os = "windows")]
+    {
+        let install_root = resolve_install_root()?;
+        Command::new(&installer)
+            .arg("--update")
+            .arg("--auto-start")
+            .arg("--target")
+            .arg(&install_root)
+            .arg("--wait-pid")
+            .arg(std::process::id().to_string())
+            .spawn()
+            .map_err(|e| format!("启动更新安装器失败: {e}"))?;
+        let _ = app.emit(
+            "update-download-progress",
+            UpdateDownloadProgress {
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                progress: 100.0,
+                stage: "安装器已启动，应用即将退出".to_string(),
+            },
+        );
+        app.exit(0);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = installer;
+        Err("当前平台暂不支持应用内覆盖安装，请从发布页下载安装包。".to_string())
+    }
+}
+
+fn download_update_installer(
+    app: &tauri::AppHandle,
+    request: &InstallUpdateRequest,
+) -> Result<PathBuf, String> {
+    let temp_dir = std::env::temp_dir().join("video-similarity-updates");
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("创建更新临时目录失败: {e}"))?;
+    let target = temp_dir.join(&request.asset_name);
+    let partial = target.with_extension("exe.download");
+    let _ = fs::remove_file(&partial);
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Video-Similarity-Updater")
+        .timeout(Duration::from_secs(60 * 30))
+        .build()
+        .map_err(|e| format!("创建下载请求失败: {e}"))?;
+    let mut response = client
+        .get(&request.asset_url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|e| format!("下载更新安装器失败: {e}"))?;
+    let total = response.content_length().unwrap_or(0);
+    let mut output =
+        fs::File::create(&partial).map_err(|e| format!("创建安装器临时文件失败: {e}"))?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut downloaded = 0u64;
+
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|e| format!("读取更新数据失败: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|e| format!("写入更新安装器失败: {e}"))?;
+        downloaded = downloaded.saturating_add(read as u64);
+        let progress = if total > 0 {
+            (downloaded as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let _ = app.emit(
+            "update-download-progress",
+            UpdateDownloadProgress {
+                downloaded_bytes: downloaded,
+                total_bytes: total,
+                progress,
+                stage: "正在下载更新安装器".to_string(),
+            },
+        );
+    }
+    output
+        .sync_all()
+        .map_err(|e| format!("保存更新安装器失败: {e}"))?;
+    if downloaded == 0 || (total > 0 && downloaded != total) {
+        let _ = fs::remove_file(&partial);
+        return Err(format!(
+            "更新安装器下载不完整：已下载 {downloaded} 字节，预期 {total} 字节"
+        ));
+    }
+    if request.asset_size > 0 && downloaded != request.asset_size {
+        let _ = fs::remove_file(&partial);
+        return Err(format!(
+            "更新安装器大小校验失败：已下载 {downloaded} 字节，发布信息为 {} 字节",
+            request.asset_size
+        ));
+    }
+    let mut signature = [0u8; 2];
+    fs::File::open(&partial)
+        .and_then(|mut file| file.read_exact(&mut signature))
+        .map_err(|e| format!("读取更新安装器签名失败: {e}"))?;
+    if signature != *b"MZ" {
+        let _ = fs::remove_file(&partial);
+        return Err("下载的文件不是有效的 Windows 安装程序。".to_string());
+    }
+    let _ = fs::remove_file(&target);
+    fs::rename(&partial, &target).map_err(|e| format!("完成更新下载失败: {e}"))?;
+    Ok(target)
+}
+
+fn validate_update_asset(request: &InstallUpdateRequest) -> Result<(), String> {
+    let lower_name = request.asset_name.to_ascii_lowercase();
+    if !lower_name.ends_with("-installer.exe")
+        || !lower_name.starts_with("video_similarity-v")
+        || request.asset_name.contains('/')
+        || request.asset_name.contains('\\')
+    {
+        return Err("更新安装器文件名不受信任。".to_string());
+    }
+    if !request.asset_url.starts_with(RELEASE_DOWNLOAD_PREFIX) {
+        return Err("更新下载地址不受信任。".to_string());
+    }
+    if request.asset_size < 1024 * 1024 || request.asset_size > 8 * 1024 * 1024 * 1024 {
+        return Err("更新安装器大小异常。".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    if !url.starts_with("https://github.com/RoamerFly/video-similarity-detector/releases") {
+        return Err("发布页地址不受信任。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&url);
+        command
+    };
+
+    command
+        .spawn()
+        .map_err(|e| format!("打开 GitHub 发布页失败: {e}"))?;
+    Ok(())
+}
+
+fn update_asset_suffix(build_flavor: &str) -> String {
+    format!(
+        "-windows-x64-{}-installer.exe",
+        if build_flavor.eq_ignore_ascii_case("gpu") {
+            "gpu"
+        } else {
+            "cpu"
+        }
+    )
+}
+
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let parse = |value: &str| {
+        value
+            .trim()
+            .trim_start_matches('v')
+            .split(['.', '-', '+'])
+            .take(4)
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let mut left_parts = parse(left);
+    let mut right_parts = parse(right);
+    let length = left_parts.len().max(right_parts.len()).max(3);
+    left_parts.resize(length, 0);
+    right_parts.resize(length, 0);
+    left_parts.cmp(&right_parts)
+}
+
+fn resolve_install_root() -> Result<PathBuf, String> {
+    std::env::current_exe()
+        .map_err(|e| format!("无法读取当前程序路径: {e}"))?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位当前安装目录。".to_string())
+}
+
+fn detect_build_flavor(root: &Path) -> String {
+    let marker = root.join("BUILD_FLAVOR.txt");
+    if let Ok(value) = fs::read_to_string(marker) {
+        let value = value.trim().to_ascii_lowercase();
+        if value == "gpu" || value == "cpu" {
+            return value;
+        }
+    }
+    if root
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("gpu")
+    {
+        "gpu".to_string()
+    } else {
+        "cpu".to_string()
+    }
+}
+
+fn detect_install_type(root: &Path) -> String {
+    if root.join(".video-similarity-install.json").exists() {
+        return "installed".to_string();
+    }
+    let normalized = root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    if normalized.contains("/appdata/local/programs/") {
+        "installed".to_string()
+    } else {
+        "portable".to_string()
+    }
 }
 
 #[tauri::command]
@@ -2722,6 +3107,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
+            check_for_updates,
+            download_and_install_update,
+            open_release_page,
             select_video_directory,
             select_video_files,
             select_audio_files,

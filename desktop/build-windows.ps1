@@ -377,6 +377,8 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
         "Lib\idlelib",
         "Lib\ensurepip",
         "Lib\site-packages\torch\include",
+        "Lib\site-packages\pip",
+        "Lib\site-packages\imageio_ffmpeg",
         "share\doc"
     )
 
@@ -401,6 +403,31 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
             Assert-ChildPath $PythonDir $_.FullName
             Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
         }
+
+    $sitePackages = Join-Path $PythonDir "Lib\site-packages"
+    if (Test-Path $sitePackages) {
+        Get-ChildItem -LiteralPath $sitePackages -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -like "pip-*.dist-info" -or
+                $_.Name -eq "wheel" -or
+                $_.Name -like "wheel-*.dist-info" -or
+                $_.Name -like "imageio_ffmpeg-*.dist-info"
+            } |
+            ForEach-Object {
+                Assert-ChildPath $PythonDir $_.FullName
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+        $transformerModels = Join-Path $sitePackages "transformers\models"
+        if (Test-Path $transformerModels) {
+            Get-ChildItem -LiteralPath $transformerModels -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notin @("auto", "clip") } |
+                ForEach-Object {
+                    Assert-ChildPath $PythonDir $_.FullName
+                    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+        }
+    }
 }
 
 function Remove-PortableSourceWaste([string]$DistDir) {
@@ -445,6 +472,7 @@ missing = [name for name in ["numpy", "torch", "transformers", "PIL", "cv2", "de
 if missing:
     raise SystemExit("Missing modules: " + ", ".join(missing))
 import torch
+from transformers import CLIPImageProcessor, CLIPVisionModel
 print("Torch:", torch.__version__)
 print("Torch CUDA:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
@@ -671,6 +699,7 @@ if ($SkipPythonEnv) {
     $env:TRANSFORMERS_NO_TF = "1"
     $env:TF_CPP_MIN_LOG_LEVEL = "2"
     $env:PYTHONNOUSERSITE = "1"
+    $env:PYTHONDONTWRITEBYTECODE = "1"
 
     Write-Host "  - Python: $(& $activePythonExe --version)" -ForegroundColor Green
     Invoke-Checked { & $activePythonExe -m pip install --no-cache-dir --upgrade pip wheel "setuptools<82" } "Failed to upgrade pip in bundled Python."
@@ -831,6 +860,7 @@ Copy-Directory (Join-Path $repoRoot "video_sim") (Join-Path $distDir "video_sim"
 Remove-PortableSourceWaste $distDir
 Copy-Item -LiteralPath $requirements -Destination (Join-Path $distDir "requirements.txt") -Force
 Copy-Item -LiteralPath $runtimeRequirements -Destination (Join-Path $distDir "requirements-runtime.txt") -Force
+Set-Content -LiteralPath (Join-Path $distDir "BUILD_FLAVOR.txt") -Value $(if ($GpuBuild) { "gpu" } else { "cpu" }) -Encoding ASCII
 
 Copy-Directory $envDir (Join-Path $distDir "env")
 
