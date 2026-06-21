@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon.png" alt="Video Similarity Detector" width="160">
+  <img src="icon.png" alt="Video Similarity Detector" width="160" style="border-radius: 32px; box-shadow: 0 8px 32px rgba(0,0,0,0.15);">
 </p>
 
 <h1 align="center">视频相似度检测<br>Video Similarity Detector</h1>
