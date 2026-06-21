@@ -37,6 +37,14 @@ Video_Similarity-v<版本>-windows-x64-gpu-portable.zip
 
 Windows CPU/GPU 安装包使用项目自带的 ZIP64 图形安装向导，可自定义安装目录、查看解压进度并执行保留数据的覆盖升级，同时避开传统 NSIS 对超大 CUDA 运行时的文件大小限制。
 
+各平台安装程序均支持图形化安装，并遵循系统本身的安装习惯：
+
+- Windows `.exe`：使用项目自带安装向导，可选择安装路径、创建快捷方式并查看进度；
+- macOS `.dmg`：打开安装盘后，将 `Video Similarity.app` 拖到 `Applications`；
+- Linux `.deb/.rpm`：双击后使用 GNOME Software、KDE Discover 等系统软件中心安装，路径由 Linux 包管理规范统一管理。
+
+没有安装图形软件中心的精简 Linux 环境仍可使用命令行包管理器，或直接下载便携版。
+
 ## 功能
 
 - 动态抽帧：根据画面变化决定保留哪些帧，避免固定抽帧遗漏内容。

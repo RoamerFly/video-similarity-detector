@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.2.5"
+        description: "Release tag, for example v0.2.6"
         required: true
-        default: "v0.2.5"
+        default: "v0.2.6"
         type: string
       release_name:
         description: "Optional release title"
@@ -458,6 +458,8 @@ jobs:
           mkdir -p "$dmg_root"
           cp -R "$app_dir" "$dmg_root/"
           ln -s /Applications "$dmg_root/Applications"
+          test -d "$dmg_root/${DISPLAY_NAME}.app"
+          test -L "$dmg_root/Applications"
           dmg_path="release-assets/${base}-installer.dmg"
           for attempt in 1 2 3; do
             rm -f "$dmg_path"

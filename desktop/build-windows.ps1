@@ -391,7 +391,21 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
     }
 
     Get-ChildItem -LiteralPath $PythonDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @("__pycache__", "test", "tests") } |
+        Where-Object {
+            if ($_.Name -eq "__pycache__") {
+                return $true
+            }
+            if ($_.Name -notin @("test", "tests")) {
+                return $false
+            }
+
+            $relative = $_.FullName.Substring(
+                [System.IO.Path]::GetFullPath($PythonDir).TrimEnd('\').Length
+            ).TrimStart('\')
+            # NumPy testing imports this private module at runtime; SciPy reaches it
+            # while Transformers loads CLIP, so it is not removable test-only data.
+            return $relative -notlike "Lib\site-packages\numpy\_core\tests"
+        } |
         ForEach-Object {
             Assert-ChildPath $PythonDir $_.FullName
             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
