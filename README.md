@@ -5,7 +5,7 @@
 <h1 align="center">视频相似度检测<br>Video Similarity Detector</h1>
 
 <p align="center">
-  <a href="https://github.com/RoamerFly/video-similarity-detector/releases"><img src="https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat&logo=github&color=blue" alt="Downloads"></a>
+  <a href="https://github.com/RoamerFly/video-similarity-detector/releases"><img src="https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat-square" alt="Downloads"></a>
 </p>
 
 <p align="center">本地优先的视频相似度、片段包含关系和重复文件分析工具。</p>
