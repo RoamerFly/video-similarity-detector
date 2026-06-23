@@ -21,6 +21,7 @@ import {
   Search,
   Shapes,
   Trash2,
+  X,
 } from 'lucide-react'
 import {
   Badge,
@@ -31,7 +32,20 @@ import {
   StatCard,
   TextInput,
 } from '@/components/DesignSystem'
-import { deleteFiles, fileName, formatDateTime, getAppInfo, listReports, normalizeBackendError, openFile, pathStatus, revealInFolder, type ReportSummary } from '@/services/backend'
+import {
+  deleteFiles,
+  deleteReport,
+  fileName,
+  formatDateTime,
+  getAppInfo,
+  listReports,
+  normalizeBackendError,
+  openFile,
+  pathStatus,
+  revealInFolder,
+  updateReportEntries,
+  type ReportSummary,
+} from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import {
@@ -49,7 +63,6 @@ import {
   loadBatchReport,
   metricPercent,
   summarizePairs,
-  type BatchReport,
   type ReportPair,
   type ReportWindow,
 } from '@/utils/reportParser'
@@ -72,7 +85,6 @@ interface VideoContextMenuState {
 }
 
 const pageSizeOptions = [10, 20, 50]
-const deletedPairsStorageKey = 'video-similarity-deleted-pairs:v1'
 
 export function ResultsPage() {
   const navigate = useNavigate()
@@ -118,9 +130,10 @@ export function ResultsPage() {
   const [multiSelectMode, setMultiSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [selectedVideoKeys, setSelectedVideoKeys] = useState<Set<string>>(() => new Set())
-  const [deletedPairIdsBySource, setDeletedPairIdsBySource] = useState<Record<string, string[]>>(readDeletedPairMap)
   const [defaultReportDir, setDefaultReportDir] = useState('')
   const [videoContextMenu, setVideoContextMenu] = useState<VideoContextMenuState | null>(null)
+  const [deleteAllDialogOpen, setDeleteAllDialogOpen] = useState(false)
+  const [deletingResults, setDeletingResults] = useState(false)
   const initializedRef = useRef(false)
   const addMergeVideo = useMergeStore((state) => state.addVideo)
   const addMergeVideos = useMergeStore((state) => state.addVideos)
@@ -144,15 +157,6 @@ export function ResultsPage() {
       window.removeEventListener('keydown', closeOnEscape)
     }
   }, [videoContextMenu])
-
-  const reportSourceKey = useMemo(
-    () => buildReportSourceKey(report, activeReport),
-    [activeReport, report],
-  )
-  const deletedPairIds = useMemo(
-    () => new Set(reportSourceKey ? deletedPairIdsBySource[reportSourceKey] ?? [] : []),
-    [deletedPairIdsBySource, reportSourceKey],
-  )
 
   useEffect(() => {
     let alive = true
@@ -341,11 +345,11 @@ export function ResultsPage() {
   useEffect(() => {
     const timer = window.setTimeout(() => resetPage(), 0)
     return () => window.clearTimeout(timer)
-  }, [query, relationFilter, sortState, activeTab, pageSize, deletedPairIdsBySource, resetPage])
+  }, [query, relationFilter, sortState, activeTab, pageSize, resetPage])
 
   const visibleSourcePairs = useMemo(
-    () => (report?.pairs ?? []).filter((pair) => !deletedPairIds.has(pair.id)),
-    [deletedPairIds, report?.pairs],
+    () => report?.pairs ?? [],
+    [report?.pairs],
   )
   const visibleSourcePairIds = useMemo(
     () => visibleSourcePairs.map((pair) => pair.id),
@@ -388,28 +392,14 @@ export function ResultsPage() {
   const visibleWindows = windowRows.slice(start, start + pageSize)
   const selectedVisibleCount = visiblePairs.filter((pair) => selectedIds.has(pair.id)).length
   const allVisibleSelected = visiblePairs.length > 0 && selectedVisibleCount === visiblePairs.length
-  const selectedVideoEntries = useMemo(() => visibleSourcePairs.flatMap((pair) => {
-    const rows: Array<{ key: string; pairId: string; path: string; name: string }> = []
-    const aKey = videoSelectionKey(pair.id, 'A')
-    const bKey = videoSelectionKey(pair.id, 'B')
-    if (selectedVideoKeys.has(aKey)) {
-      rows.push({
-        key: aKey,
-        pairId: pair.id,
-        path: resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir),
-        name: pair.videoA,
-      })
-    }
-    if (selectedVideoKeys.has(bKey)) {
-      rows.push({
-        key: bKey,
-        pairId: pair.id,
-        path: resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir),
-        name: pair.videoB,
-      })
-    }
-    return rows
-  }), [selectedVideoKeys, videoDir, visibleSourcePairs])
+  const allResultVideoEntries = useMemo(
+    () => videoEntriesForPairs(visibleSourcePairs, videoDir),
+    [videoDir, visibleSourcePairs],
+  )
+  const selectedVideoEntries = useMemo(
+    () => allResultVideoEntries.filter((entry) => selectedVideoKeys.has(entry.key)),
+    [allResultVideoEntries, selectedVideoKeys],
+  )
 
   async function handleOpenRawReport() {
     const path = rawPath || report?.sourcePath || activeReport?.jsonPath || activeReport?.csvPath
@@ -480,49 +470,121 @@ export function ResultsPage() {
     })
   }
 
-  function markPairsDeleted(ids: string[], message: string) {
+  async function removePairsFromReport(ids: string[], message: string) {
     const uniqueIds = Array.from(new Set(ids)).filter(Boolean)
-    if (!reportSourceKey || uniqueIds.length === 0) return
-    setDeletedPairIdsBySource((current) => {
-      const nextIds = new Set(current[reportSourceKey] ?? [])
-      uniqueIds.forEach((id) => nextIds.add(id))
-      const next = { ...current, [reportSourceKey]: Array.from(nextIds) }
-      writeDeletedPairMap(next)
-      return next
-    })
-    setSelectedIds(new Set())
-    setSelectedVideoKeys(new Set())
-    setSelectedPair(null)
-    setNotice(message)
+    if (!report || uniqueIds.length === 0) return false
+    const sourcePath = report.sourcePath || activeReport?.jsonPath || activeReport?.csvPath || activeReport?.htmlPath || activeReport?.path
+    if (!sourcePath) {
+      setError('当前结果没有对应的报告文件，无法同步删除。')
+      return false
+    }
+    const deletingPairs = report.pairs.filter((pair) => uniqueIds.includes(pair.id))
+    if (deletingPairs.length === 0) return false
+
+    setDeletingResults(true)
+    setError('')
+    try {
+      const result = await updateReportEntries(
+        sourcePath,
+        deletingPairs.map((pair) => ({
+          videoA: pair.videoA,
+          videoB: pair.videoB,
+          videoAPath: pair.videoAPath,
+          videoBPath: pair.videoBPath,
+        })),
+      )
+      const remainingPairs = report.pairs.filter((pair) => !uniqueIds.includes(pair.id))
+      const nextSummary = summarizePairs(remainingPairs, threshold)
+      setReport({ ...report, pairs: remainingPairs, summary: nextSummary })
+      setResultSummary(nextSummary)
+      if (activeReport) {
+        const updatedReport = {
+          ...activeReport,
+          pairCount: result.remainingCount,
+          modifiedAt: new Date().toISOString(),
+        }
+        setActiveReport(updatedReport)
+        setReportOptions(reportOptions.map((item) => reportKey(item) === reportKey(activeReport) ? updatedReport : item))
+      }
+      setSelectedIds(new Set())
+      setSelectedVideoKeys(new Set())
+      setSelectedPair(null)
+      setNotice(message)
+      return true
+    } catch (deleteError) {
+      setError(normalizeBackendError(deleteError))
+      return false
+    } finally {
+      setDeletingResults(false)
+    }
   }
 
-  function deletePairs(ids: string[], scope: 'selected' | 'all' = 'selected') {
+  async function deletePairs(ids: string[]) {
     const uniqueIds = Array.from(new Set(ids)).filter(Boolean)
-    if (!reportSourceKey || uniqueIds.length === 0) return
+    if (uniqueIds.length === 0) return
     const confirmed = window.confirm(
-      scope === 'all'
-        ? `确定删除当前报告中的全部 ${uniqueIds.length} 条结果数据吗？`
-        : uniqueIds.length === 1
-          ? '确定删除这条结果数据吗？'
-          : `确定删除选中的 ${uniqueIds.length} 条结果数据吗？`,
+      uniqueIds.length === 1
+        ? '确定删除这条结果数据吗？该条目会同步从 JSON、CSV 和 HTML 报告文件中删除。'
+        : `确定删除选中的 ${uniqueIds.length} 条结果数据吗？这些条目会同步从 JSON、CSV 和 HTML 报告文件中删除。`,
     )
     if (!confirmed) return
 
-    markPairsDeleted(
+    await removePairsFromReport(
       uniqueIds,
-      scope === 'all'
-        ? `已删除当前报告中的全部 ${uniqueIds.length} 条结果。`
-        : `已从当前结果列表删除 ${uniqueIds.length} 条数据。`,
+      `已从当前结果及报告文件中删除 ${uniqueIds.length} 条数据。`,
     )
   }
 
-  async function deleteSelectedVideoFiles(entries = selectedVideoEntries) {
+  async function handleDeleteAllResults(deleteReportFiles: boolean) {
+    if (!report || report.pairs.length === 0) return
+    const sourcePath = report.sourcePath || activeReport?.jsonPath || activeReport?.csvPath || activeReport?.htmlPath || activeReport?.path
+    if (!sourcePath) {
+      setError('当前结果没有对应的报告文件，无法删除。')
+      return
+    }
+
+    setDeletingResults(true)
+    setError('')
+    try {
+      if (deleteReportFiles) {
+        await deleteReport(sourcePath)
+        setReport(null)
+        setResultSummary(null)
+        setActiveReport(null)
+        setSelectedIds(new Set())
+        setSelectedVideoKeys(new Set())
+        setSelectedPair(null)
+        setDeleteAllDialogOpen(false)
+        const reports = await loadReportList({ selectLatest: true })
+        if (reports.length > 0) {
+          await loadReport({ report: reports[0], reportList: reports })
+          setNotice('已删除当前报告中的全部结果及对应报告文件。')
+        } else {
+          setNotice('已删除当前报告中的全部结果及对应报告文件。')
+        }
+        return
+      }
+
+      const ids = report.pairs.map((pair) => pair.id)
+      const removed = await removePairsFromReport(ids, `已清空当前报告的 ${ids.length} 条结果，报告文件已保留为空报告。`)
+      if (removed) setDeleteAllDialogOpen(false)
+    } catch (deleteError) {
+      setError(normalizeBackendError(deleteError))
+    } finally {
+      setDeletingResults(false)
+    }
+  }
+
+  async function deleteSelectedVideoFiles(
+    entries = selectedVideoEntries,
+    scope: 'selected' | 'all' = 'selected',
+  ) {
     const uniquePaths = Array.from(new Set(entries.map((entry) => entry.path).filter(Boolean)))
     if (uniquePaths.length === 0) return
     const names = Array.from(new Set(entries.map((entry) => entry.name))).slice(0, 4).join('、')
-    const confirmed = window.confirm(
-      `确定永久删除 ${uniquePaths.length} 个视频文件吗？\n${names}${entries.length > 4 ? ' 等' : ''}\n\n文件删除后无法恢复，对应结果记录也会从当前视图移除。`,
-    )
+    const confirmed = window.confirm(scope === 'all'
+      ? `确定永久删除当前报告全部结果关联的 ${uniquePaths.length} 个视频文件吗？\n${names}${entries.length > 4 ? ' 等' : ''}\n\n文件删除后无法恢复，删除成功的视频对应结果记录也会从当前视图移除。`
+      : `确定永久删除 ${uniquePaths.length} 个视频文件吗？\n${names}${entries.length > 4 ? ' 等' : ''}\n\n文件删除后无法恢复，对应结果记录也会从当前视图移除。`)
     if (!confirmed) return
 
     setError('')
@@ -533,7 +595,12 @@ export function ResultsPage() {
         .filter((entry) => deleted.has(normalizeComparablePath(entry.path)))
         .map((entry) => entry.pairId)
       if (affectedPairIds.length > 0) {
-        markPairsDeleted(affectedPairIds, `已删除 ${result.deletedPaths.length} 个视频文件及对应结果记录。`)
+        await removePairsFromReport(
+          affectedPairIds,
+          scope === 'all'
+            ? `已删除 ${result.deletedPaths.length} 个视频文件，并同步更新报告文件。`
+            : `已删除 ${result.deletedPaths.length} 个视频文件，并同步删除报告中的对应记录。`,
+        )
       }
       if (result.failed.length > 0) {
         setError(result.failed.map((item) => `${item.path}：${item.error}`).join('；'))
@@ -689,17 +756,17 @@ export function ResultsPage() {
                   tone="red"
                   type="button"
                   className="batch-delete-button"
-                  disabled={selectedIds.size === 0}
-                  onClick={() => deletePairs(Array.from(selectedIds))}
+                  disabled={selectedIds.size === 0 || deletingResults}
+                  onClick={() => void deletePairs(Array.from(selectedIds))}
                 >
                   <Trash2 size={16} />
-                  仅删除记录({selectedIds.size})
+                  删除记录({selectedIds.size})
                 </NeonButton>
                 <NeonButton
                   variant="outline"
                   tone="red"
                   type="button"
-                  disabled={selectedVideoEntries.length === 0}
+                  disabled={selectedVideoEntries.length === 0 || deletingResults}
                   onClick={() => void deleteSelectedVideoFiles()}
                 >
                   <Trash2 size={16} />
@@ -712,8 +779,8 @@ export function ResultsPage() {
               tone="red"
               type="button"
               className="delete-all-results-button"
-              disabled={visibleSourcePairIds.length === 0}
-              onClick={() => deletePairs(visibleSourcePairIds, 'all')}
+              disabled={visibleSourcePairIds.length === 0 || deletingResults}
+              onClick={() => setDeleteAllDialogOpen(true)}
             >
               <Trash2 size={16} />
               删除全部
@@ -859,7 +926,7 @@ export function ResultsPage() {
                         </button>
                         <button className="icon-button danger" type="button" aria-label={`删除 ${pair.videoA}`} onClick={(event) => {
                           event.stopPropagation()
-                          deletePairs([pair.id])
+                          void deletePairs([pair.id])
                         }}>
                           <Trash2 size={22} />
                         </button>
@@ -1023,7 +1090,71 @@ export function ResultsPage() {
         </div>,
         document.body,
       )}
+      <DeleteAllResultsDialog
+        open={deleteAllDialogOpen}
+        busy={deletingResults}
+        count={report?.pairs.length ?? 0}
+        sourcePath={report?.sourcePath || activeReport?.path || ''}
+        onClose={() => setDeleteAllDialogOpen(false)}
+        onKeepReport={() => void handleDeleteAllResults(false)}
+        onDeleteReport={() => void handleDeleteAllResults(true)}
+      />
     </div>
+  )
+}
+
+function DeleteAllResultsDialog({
+  open,
+  busy,
+  count,
+  sourcePath,
+  onClose,
+  onKeepReport,
+  onDeleteReport,
+}: {
+  open: boolean
+  busy: boolean
+  count: number
+  sourcePath: string
+  onClose: () => void
+  onKeepReport: () => void
+  onDeleteReport: () => void
+}) {
+  if (!open) return null
+  return createPortal(
+    <div className="task-detail-backdrop" role="presentation">
+      <section className="results-delete-dialog" role="dialog" aria-modal="true" aria-label="删除全部结果">
+        <div className="task-detail-head">
+          <div>
+            <h3>删除全部结果</h3>
+            <p title={sourcePath}>{sourcePath || '当前报告'}</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭删除全部结果提示" disabled={busy}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="task-delete-copy">
+          <Trash2 size={24} />
+          <div>
+            <strong>是否同时删除报告文件？</strong>
+            <p>将删除当前报告中的全部 {count} 条结果。视频原文件不会被删除。</p>
+          </div>
+        </div>
+        <div className="task-delete-actions">
+          <NeonButton variant="ghost" type="button" disabled={busy} onClick={onClose}>
+            取消
+          </NeonButton>
+          <NeonButton variant="outline" type="button" disabled={busy} onClick={onKeepReport}>
+            否，只清空结果
+          </NeonButton>
+          <NeonButton tone="red" type="button" disabled={busy} onClick={onDeleteReport}>
+            <Trash2 size={16} />
+            删除结果和报告文件
+          </NeonButton>
+        </div>
+      </section>
+    </div>,
+    document.body,
   )
 }
 
@@ -1064,6 +1195,23 @@ function formatFrameMatchCount(pair: ReportPair) {
 
 function videoSelectionKey(pairId: string, side: 'A' | 'B') {
   return `${pairId}::${side}`
+}
+
+function videoEntriesForPairs(pairs: ReportPair[], videoDir: string) {
+  return pairs.flatMap((pair) => [
+    {
+      key: videoSelectionKey(pair.id, 'A'),
+      pairId: pair.id,
+      path: resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir),
+      name: pair.videoA,
+    },
+    {
+      key: videoSelectionKey(pair.id, 'B'),
+      pairId: pair.id,
+      path: resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir),
+      name: pair.videoB,
+    },
+  ])
 }
 
 function normalizeComparablePath(path: string) {
@@ -1139,13 +1287,6 @@ function relationMatches(relation: string, filter: RelationFilter) {
   if (filter === 'clip') return normalized.includes('clip') || label.includes('片段')
   if (filter === 'unknown') return normalized === 'unknown' || label.includes('未知')
   return normalized.includes('different') || label.includes('差异')
-}
-
-function buildReportSourceKey(report: BatchReport | null, activeReport: ReportSummary | null) {
-  const path = report?.sourcePath || activeReport?.path || ''
-  if (!path) return ''
-  const version = report?.timestamp || activeReport?.modifiedAt || ''
-  return `${path}::${version || 'unknown-version'}`
 }
 
 function selectReportPaths(paths: { reportJson?: string; reportCsv?: string }, format: ReportReadFormat) {
@@ -1251,27 +1392,6 @@ function pageNumbers(current: number, total: number) {
   const start = Math.max(1, Math.min(current - 1, total - 2))
   const end = Math.min(total, start + 2)
   return Array.from({ length: end - start + 1 }, (_, index) => start + index)
-}
-
-function readDeletedPairMap(): Record<string, string[]> {
-  try {
-    const raw = window.localStorage.getItem(deletedPairsStorageKey)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== 'object') return {}
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>).map(([key, value]) => [
-        key,
-        Array.isArray(value) ? value.map(String) : [],
-      ]),
-    )
-  } catch {
-    return {}
-  }
-}
-
-function writeDeletedPairMap(value: Record<string, string[]>) {
-  window.localStorage.setItem(deletedPairsStorageKey, JSON.stringify(value))
 }
 
 function resolveResultVideoPath(path: string, name: string, videoDir: string) {

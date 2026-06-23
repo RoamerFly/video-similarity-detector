@@ -4,7 +4,7 @@ import type { AnalysisConfig } from '@/types/config'
 import { defaultSettings } from '@/types/config'
 import type { BatchReport, ReportPair, ReportSummaryStats } from '@/utils/reportParser'
 
-export type RunningStatus = 'idle' | 'running' | 'success' | 'error' | 'cancelled'
+export type RunningStatus = 'idle' | 'running' | 'paused' | 'success' | 'error' | 'cancelled'
 
 export interface AnalysisLog {
   stream: 'stdout' | 'stderr'
@@ -38,10 +38,12 @@ interface AnalysisState {
   selectedPair: ReportPair | null
   report: BatchReport | null
   errorMessage: string
+  activeTaskId: string
   setAnalysisConfig: (config: Partial<AnalysisConfig>) => void
   setRunningStatus: (status: RunningStatus) => void
   setProgress: (progress: number, stage?: string, subTask?: { subProgress?: number | null; subStage?: string | null }) => void
   setScannedVideos: (videos: VideoFile[], scannedDir: string) => void
+  quarantineScannedVideo: (originalPath: string, destinationPath: string, moved: boolean) => void
   setScanMessage: (message: string) => void
   appendLog: (log: AnalysisLog) => void
   clearLogs: () => void
@@ -50,6 +52,7 @@ interface AnalysisState {
   setSelectedPair: (pair: ReportPair | null) => void
   setReport: (report: BatchReport | null) => void
   setErrorMessage: (message: string) => void
+  setActiveTaskId: (taskId: string) => void
   resetRunState: () => void
 }
 
@@ -73,6 +76,10 @@ const initialAnalysisConfig: AnalysisConfig = {
   inputSize: defaultSettings.defaultInputSize,
   portraitRotation: defaultSettings.defaultPortraitRotation,
   force: defaultSettings.defaultForce,
+  errorTolerancePreset: defaultSettings.errorTolerancePreset,
+  errorToleranceSevereLimit: defaultSettings.errorToleranceSevereLimit,
+  errorToleranceMissingPictureLimit: defaultSettings.errorToleranceMissingPictureLimit,
+  errorTolerancePreflightValidation: defaultSettings.errorTolerancePreflightValidation,
   mode: defaultSettings.analysisMode,
 }
 
@@ -96,6 +103,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   selectedPair: null,
   report: null,
   errorMessage: '',
+  activeTaskId: '',
 
   setAnalysisConfig: (config) =>
     set((state) => ({
@@ -111,7 +119,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         }
       }
 
-      if (['success', 'error', 'cancelled'].includes(runningStatus)) {
+      if (['paused', 'success', 'error', 'cancelled'].includes(runningStatus)) {
         return {
           runningStatus,
           runFinishedAt: state.runStartedAt ? Date.now() : state.runFinishedAt,
@@ -138,6 +146,20 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       scannedVideos,
       scannedDir,
     }),
+  quarantineScannedVideo: (originalPath, destinationPath, moved) =>
+    set((state) => {
+      const normalizedOriginal = normalizeVideoPath(originalPath)
+      const scannedVideos = state.scannedVideos.filter(
+        (video) => normalizeVideoPath(video.path) !== normalizedOriginal,
+      )
+      const pairCount = Math.max(0, (scannedVideos.length * (scannedVideos.length - 1)) / 2)
+      return {
+        scannedVideos,
+        scanMessage: moved
+          ? `已将错误视频移至 ${destinationPath}；当前剩余 ${scannedVideos.length} 个视频，预计比较 ${pairCount} 对。`
+          : `错误视频移动失败，但已移出本次比较列表；当前剩余 ${scannedVideos.length} 个视频，预计比较 ${pairCount} 对。`,
+      }
+    }),
   setScanMessage: (scanMessage) => set({ scanMessage }),
   appendLog: (log) =>
     set((state) => {
@@ -155,6 +177,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   setSelectedPair: (selectedPair) => set({ selectedPair }),
   setReport: (report) => set({ report }),
   setErrorMessage: (errorMessage) => set({ errorMessage }),
+  setActiveTaskId: (activeTaskId) => set({ activeTaskId }),
   resetRunState: () =>
     set({
       runningStatus: 'idle',
@@ -175,10 +198,15 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       selectedPair: null,
       report: null,
       errorMessage: '',
+      activeTaskId: '',
     }),
 }))
 
 function normalizeProgress(progress: number) {
   if (!Number.isFinite(progress)) return 0
   return Math.round(Math.max(0, Math.min(100, progress)) * 100) / 100
+}
+
+function normalizeVideoPath(path: string) {
+  return path.replaceAll('\\', '/').toLocaleLowerCase()
 }

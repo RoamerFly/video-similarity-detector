@@ -24,7 +24,9 @@ export function AppLayout() {
 
   const performCloseAction = useCallback(async (action: Exclude<CloseBehavior, 'ask'>, remember = false) => {
     if (remember) {
-      useSettingsStore.getState().setCloseBehavior(action)
+      const settings = useSettingsStore.getState()
+      settings.setCloseBehavior(action)
+      settings.saveSettings()
       void setCloseBehavior(action).catch(() => undefined)
     }
 
@@ -87,21 +89,35 @@ export function AppLayout() {
           : undefined
         useAnalysisStore.getState().setProgress(payload.progress, payload.stage, subTask)
       },
+      onVideoQuarantined: (payload) => {
+        useAnalysisStore.getState().quarantineScannedVideo(payload.originalPath, payload.destinationPath, payload.moved)
+      },
       onFinished: (payload) => {
         const store = useAnalysisStore.getState()
         store.setReportPaths(payload)
         store.setRunningStatus('success')
+        store.setActiveTaskId('')
         store.setProgress(100, '分析完成', { subProgress: 100, subStage: '当前子任务完成' })
         store.setErrorMessage('')
         navigate('/results')
       },
+      onStageFinished: () => {
+        const store = useAnalysisStore.getState()
+        store.setRunningStatus('paused')
+        store.setActiveTaskId('')
+        store.setProgress(store.progress, '当前阶段已完成，可继续下一阶段', {
+          subProgress: 100,
+          subStage: '阶段产物已保存',
+        })
+        store.setErrorMessage('')
+      },
       onError: (payload) => {
         const friendlyMessage = normalizeBackendError(payload.message)
-        const cancelled = friendlyMessage.includes('取消')
+        const cancelled = friendlyMessage.includes('取消') || friendlyMessage.includes('cancel')
         const store = useAnalysisStore.getState()
-        store.setRunningStatus(cancelled ? 'cancelled' : 'error')
-        store.setErrorMessage(friendlyMessage)
-        store.setProgress(cancelled ? store.progress : 100, cancelled ? '分析已取消' : '分析失败')
+        store.setRunningStatus(cancelled ? 'paused' : 'error')
+        store.setErrorMessage(cancelled ? '' : friendlyMessage)
+        store.setProgress(cancelled ? store.progress : 100, cancelled ? '任务已暂停' : '分析失败')
       },
     })
       .then((unlisten) => {

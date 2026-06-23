@@ -302,6 +302,8 @@ npm run tauri:dev
 3. 进入“分析任务”，双击视频目录或点击选择按钮。
 4. 扫描视频并启动分析。
 5. 在日志栏切换“正常输出”和“错误输出”，查看实时状态。
+
+分析配置中的“错误容忍设置”提供严格、标准、宽松和仅失败时隔离四档。标准档为默认值；如果视频虽然存在坏帧但肉眼播放影响不大，可选择“宽松”或“仅失败时隔离”。被隔离的视频保存在程序同级 `data/error_videos/`。
 6. 分析完成后，在“结果总览”中筛选、排序或选择报告。
 7. 双击结果行进入“对比视图”，人工检查视频和相似帧。
 8. 右键视频可加入“合并视频”时间线，或在确认后删除源文件。
@@ -437,6 +439,18 @@ cd desktop
 ```
 
 输出目录：`desktop/dist_windows_gpu/`
+
+已有 `desktop/env_gpu/` 和 `desktop/node_modules/` 时，可使用本机快速测试构建，不重复复制完整 CUDA/Python 环境：
+
+```powershell
+cd desktop
+.\build-windows-gpu-fast.ps1 -Launch
+
+# 仅修改 Rust 或 Python 时可进一步跳过前端构建
+.\build-windows-gpu-fast.ps1 -SkipFrontendBuild
+```
+
+测试输出目录：`desktop/dist_windows_gpu_quick/`。该目录使用本地目录链接，仅供当前电脑测试，不能作为便携包分发。
 
 ### Linux
 

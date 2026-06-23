@@ -319,6 +319,21 @@ class DynamicFrameSampler:
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
+        # Decord implements sparse get_batch requests with repeated random
+        # seeking. Older DVD/x264 files with long GOPs or irregular timestamps
+        # can make each seek spin for thousands of attempts and emit
+        # video_reader.cc:711 warnings. OpenCV's grab loop advances
+        # sequentially and is much more reliable for frame_step > 1.
+        if self.frame_step > 1:
+            try:
+                return self._sample_with_opencv(video_path, progress_callback)
+            except Exception as opencv_error:
+                print(
+                    f"Warning: OpenCV sequential frame reader failed for {video_path.resolve()}; "
+                    f"falling back to Decord: {opencv_error}"
+                )
+                return self._sample_with_decord(video_path, progress_callback)
+
         try:
             return self._sample_with_decord(video_path, progress_callback)
         except Exception as decord_error:

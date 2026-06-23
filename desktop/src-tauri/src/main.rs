@@ -4,14 +4,14 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,6 +33,8 @@ const RELEASES_API_URL: &str =
     "https://api.github.com/repos/RoamerFly/video-similarity-detector/releases/latest";
 const RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/download/";
+const ANALYSIS_VIDEO_CONTEXT_PREFIX: &str = "ANALYSIS_VIDEO_CONTEXT|";
+const ANALYSIS_VIDEO_QUARANTINED_PREFIX: &str = "ANALYSIS_VIDEO_QUARANTINED|";
 static CLOSE_BEHAVIOR: AtomicU8 = AtomicU8::new(CLOSE_BEHAVIOR_ASK);
 
 #[derive(Default)]
@@ -126,6 +128,7 @@ struct VideoFile {
     extension: String,
     size_bytes: u64,
     size_mb: f64,
+    modified_at_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -195,8 +198,25 @@ struct AnalysisFinishedPayload {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct AnalysisStageFinishedPayload {
+    task_id: String,
+    stage_id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct AnalysisErrorPayload {
     message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisVideoQuarantinedPayload {
+    original_path: String,
+    destination_path: String,
+    remaining_videos: usize,
+    removed_videos: usize,
+    moved: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -225,6 +245,83 @@ struct ParsedProgress {
     progress: f64,
     sub_stage: Option<String>,
     sub_progress: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+struct AnalysisVideoContext {
+    path: String,
+    phase: String,
+}
+
+#[derive(Debug, Default)]
+struct DecoderWarningAccumulator {
+    context: Option<AnalysisVideoContext>,
+    total: u64,
+    invalid_nal: u64,
+    missing_picture: u64,
+    other: u64,
+    last_reported: u64,
+}
+
+impl DecoderWarningAccumulator {
+    fn switch_context(&mut self, context: AnalysisVideoContext) -> Option<String> {
+        let summary = self.pending_summary("视频解码告警汇总");
+        self.context = Some(context);
+        self.total = 0;
+        self.invalid_nal = 0;
+        self.missing_picture = 0;
+        self.other = 0;
+        self.last_reported = 0;
+        summary
+    }
+
+    fn record(&mut self, line: &str) -> Option<String> {
+        self.total += 1;
+        if line.contains("Invalid NAL unit size") {
+            self.invalid_nal += 1;
+        } else if line.contains("missing picture in access unit") {
+            self.missing_picture += 1;
+        } else {
+            self.other += 1;
+        }
+
+        if self.total == 100 || self.total % 1000 == 0 {
+            self.last_reported = self.total;
+            return Some(self.format_summary("视频解码告警累计"));
+        }
+
+        None
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        let summary = self.pending_summary("视频解码告警汇总");
+        self.last_reported = self.total;
+        summary
+    }
+
+    fn pending_summary(&self, title: &str) -> Option<String> {
+        let severe = self.invalid_nal + self.other;
+        (self.total > self.last_reported && (self.total >= 100 || severe >= 20))
+            .then(|| self.format_summary(title))
+    }
+
+    fn format_summary(&self, title: &str) -> String {
+        let (path, phase) = self.context_description();
+        format!(
+            "{title}：path={path}；阶段={phase}；NAL 长度错误 {} 次；缺失画面 {} 次；其他 H.264 告警 {} 次；合计 {} 条。",
+            self.invalid_nal, self.missing_picture, self.other, self.total
+        )
+    }
+
+    fn context_description(&self) -> (&str, &str) {
+        match self.context.as_ref() {
+            Some(context) => (
+                context.path.as_str(),
+                decoder_phase_label(context.phase.as_str()),
+            ),
+            None => ("未知视频（未收到上下文）", "未知"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +356,30 @@ struct VideoMetadata {
 #[serde(rename_all = "camelCase")]
 struct ReportPathRequest {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportPairIdentity {
+    video_a: String,
+    video_b: String,
+    video_a_path: String,
+    video_b_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateReportEntriesRequest {
+    path: String,
+    pairs: Vec<ReportPairIdentity>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateReportEntriesResult {
+    removed_count: usize,
+    remaining_count: usize,
+    updated_files: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,7 +507,7 @@ struct EnvironmentRequest {
     output_dir: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RunBatchCompareConfig {
     video_dir: String,
@@ -407,9 +528,193 @@ struct RunBatchCompareConfig {
     portrait_rotation: Option<String>,
     force: bool,
     device: Option<String>,
+    error_tolerance_preset: Option<String>,
+    error_tolerance_severe_limit: Option<u32>,
+    error_tolerance_missing_picture_limit: Option<u32>,
+    error_tolerance_preflight_validation: Option<bool>,
+    analysis_mode: Option<String>,
     min_segment_duration: Option<f64>,
     min_segment_matches: Option<u32>,
     offset_tolerance: Option<f64>,
+    task_id: Option<String>,
+    task_match_key: Option<String>,
+    execution_stage: Option<String>,
+    redo_stage: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigTemplateListRequest {
+    project_root: Option<String>,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveConfigTemplateRequest {
+    project_root: Option<String>,
+    id: Option<String>,
+    kind: String,
+    name: String,
+    config: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteConfigTemplateRequest {
+    project_root: Option<String>,
+    kind: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigTemplateRecord {
+    id: String,
+    kind: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+    config: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisTaskListRequest {
+    cache_dir: String,
+    project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteAnalysisTaskRequest {
+    cache_dir: String,
+    project_root: Option<String>,
+    task_id: String,
+    #[serde(default)]
+    delete_cache: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAnalysisTaskRequest {
+    cache_dir: String,
+    project_root: Option<String>,
+    config: RunBatchCompareConfig,
+    task_match_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAnalysisTaskRequest {
+    cache_dir: String,
+    project_root: Option<String>,
+    task_id: String,
+    status: Option<String>,
+    stage: Option<String>,
+    progress: Option<f64>,
+    total_pairs: Option<usize>,
+    completed_pairs: Option<usize>,
+    videos: Option<Vec<AnalysisTaskVideo>>,
+    report_json: Option<String>,
+    report_csv: Option<String>,
+    report_html: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisTaskVideo {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    mtime_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisTaskStage {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    progress: f64,
+    #[serde(default)]
+    weight: f64,
+    #[serde(default)]
+    started_at: String,
+    #[serde(default)]
+    completed_at: String,
+    #[serde(default)]
+    elapsed_ms: u64,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisTaskCacheArtifact {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisTaskRecord {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
+    video_dir: String,
+    #[serde(default)]
+    video_count: usize,
+    #[serde(default)]
+    total_pairs: usize,
+    #[serde(default)]
+    completed_pairs: usize,
+    #[serde(default)]
+    progress: f64,
+    #[serde(default)]
+    stage: String,
+    #[serde(default)]
+    match_key: String,
+    #[serde(default)]
+    videos: Vec<AnalysisTaskVideo>,
+    #[serde(default)]
+    config: Value,
+    #[serde(default)]
+    report_json: String,
+    #[serde(default)]
+    report_csv: String,
+    #[serde(default)]
+    report_html: String,
+    #[serde(default)]
+    active_stage: String,
+    #[serde(default)]
+    stages: Vec<AnalysisTaskStage>,
+    #[serde(default)]
+    cache_artifacts: Vec<AnalysisTaskCacheArtifact>,
+    #[serde(default)]
+    reused_video_caches: usize,
+    #[serde(default)]
+    generated_video_caches: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,7 +844,8 @@ fn check_for_updates_impl(app: &tauri::AppHandle) -> Result<UpdateInfo, String> 
         .user_agent(format!(
             "Video-Similarity/{current_version} (+https://github.com/RoamerFly/video-similarity-detector)"
         ))
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("创建更新请求失败: {e}"))?;
     let release = client
@@ -566,9 +872,7 @@ fn check_for_updates_impl(app: &tauri::AppHandle) -> Result<UpdateInfo, String> 
                     .ends_with("-windows-x64-cpu-installer.exe")
             })
         });
-    let can_auto_install = cfg!(target_os = "windows")
-        && update_available
-        && asset.is_some();
+    let can_auto_install = cfg!(target_os = "windows") && update_available && asset.is_some();
     let message = if !update_available {
         format!("当前已是最新版本 v{current_version}")
     } else if can_auto_install {
@@ -820,11 +1124,7 @@ fn detect_build_flavor(root: &Path) -> String {
             return value;
         }
     }
-    if root
-        .to_string_lossy()
-        .to_ascii_lowercase()
-        .contains("gpu")
-    {
+    if root.to_string_lossy().to_ascii_lowercase().contains("gpu") {
         "gpu".to_string()
     } else {
         "cpu".to_string()
@@ -835,7 +1135,10 @@ fn detect_install_type(root: &Path) -> String {
     if root.join(".video-similarity-install.json").exists() {
         return "installed".to_string();
     }
-    let normalized = root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let normalized = root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     if normalized.contains("/appdata/local/programs/") {
         "installed".to_string()
     } else {
@@ -974,8 +1277,7 @@ print(json.dumps(rows, ensure_ascii=False))
             first_non_empty(&output.stderr, &output.stdout)
         ));
     }
-    serde_json::from_str(output.stdout.trim())
-        .map_err(|e| format!("解析视频信息失败: {e}"))
+    serde_json::from_str(output.stdout.trim()).map_err(|e| format!("解析视频信息失败: {e}"))
 }
 
 fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
@@ -1162,6 +1464,392 @@ async fn check_environment(
 }
 
 #[tauri::command]
+fn list_config_templates(
+    app: tauri::AppHandle,
+    request: ConfigTemplateListRequest,
+) -> Result<Vec<ConfigTemplateRecord>, String> {
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let directory = config_template_dir(&root, &request.kind)?;
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut templates = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|e| format!("读取配置模板目录失败: {e}"))?
+    {
+        let path = entry.map_err(|e| format!("读取配置模板失败: {e}"))?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let record = match serde_json::from_str::<ConfigTemplateRecord>(&content) {
+            Ok(record) if record.kind == request.kind => record,
+            _ => continue,
+        };
+        templates.push(record);
+    }
+    templates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(templates)
+}
+
+#[tauri::command]
+fn save_config_template(
+    app: tauri::AppHandle,
+    request: SaveConfigTemplateRequest,
+) -> Result<ConfigTemplateRecord, String> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err("模板名称不能为空".to_string());
+    }
+    if name.chars().count() > 80 {
+        return Err("模板名称不能超过 80 个字符".to_string());
+    }
+
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let directory = config_template_dir(&root, &request.kind)?;
+    fs::create_dir_all(&directory).map_err(|e| format!("创建配置模板目录失败: {e}"))?;
+    let now = timestamp_millis().to_string();
+    let id = request
+        .id
+        .as_deref()
+        .filter(|value| is_safe_storage_id(value))
+        .map(str::to_string)
+        .unwrap_or_else(|| storage_record_id(name));
+    let target = directory.join(format!("{id}.json"));
+    let created_at = fs::read_to_string(&target)
+        .ok()
+        .and_then(|content| serde_json::from_str::<ConfigTemplateRecord>(&content).ok())
+        .map(|record| record.created_at)
+        .unwrap_or_else(|| now.clone());
+    let record = ConfigTemplateRecord {
+        id,
+        kind: request.kind,
+        name: name.to_string(),
+        created_at,
+        updated_at: now,
+        config: request.config,
+    };
+    write_json_atomic(&target, &record)?;
+    Ok(record)
+}
+
+#[tauri::command]
+fn delete_config_template(
+    app: tauri::AppHandle,
+    request: DeleteConfigTemplateRequest,
+) -> Result<(), String> {
+    if !is_safe_storage_id(&request.id) {
+        return Err("模板标识无效".to_string());
+    }
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let target = config_template_dir(&root, &request.kind)?.join(format!("{}.json", request.id));
+    if target.exists() {
+        fs::remove_file(target).map_err(|e| format!("删除配置模板失败: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_analysis_tasks(
+    app: tauri::AppHandle,
+    request: AnalysisTaskListRequest,
+) -> Result<Vec<AnalysisTaskRecord>, String> {
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let cache_dir = resolve_user_path(&root, &request.cache_dir);
+    let directory = analysis_tasks_dir(&cache_dir);
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut tasks = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|e| format!("读取历史任务失败: {e}"))? {
+        let task_dir = entry
+            .map_err(|e| format!("读取历史任务目录项失败: {e}"))?
+            .path();
+        if !task_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = task_dir.join("task.json");
+        let content = match fs::read_to_string(&manifest_path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let mut record = match serde_json::from_str::<AnalysisTaskRecord>(&content) {
+            Ok(record) => record,
+            Err(_) => continue,
+        };
+        if record.id.is_empty() {
+            record.id = task_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+        }
+        if record.stages.is_empty() {
+            record.stages = default_analysis_task_stages();
+        }
+        tasks.push(record);
+    }
+    tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(tasks)
+}
+
+#[tauri::command]
+fn create_analysis_task(
+    app: tauri::AppHandle,
+    request: CreateAnalysisTaskRequest,
+) -> Result<AnalysisTaskRecord, String> {
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let cache_dir = resolve_user_path(&root, &request.cache_dir);
+    let directory = analysis_tasks_dir(&cache_dir);
+    fs::create_dir_all(&directory).map_err(|e| format!("创建分析任务目录失败: {e}"))?;
+
+    let id = format!("analysis-{}", timestamp_millis());
+    let now = (timestamp_millis() / 1000).to_string();
+    let mut config = request.config;
+    config.task_id = Some(id.clone());
+    config.task_match_key = Some(request.task_match_key.clone());
+    let video_dir = config.video_dir.clone();
+    let record = AnalysisTaskRecord {
+        version: 1,
+        id: id.clone(),
+        status: "created".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        video_dir,
+        video_count: 0,
+        total_pairs: 0,
+        completed_pairs: 0,
+        progress: 0.0,
+        stage: "等待启动".to_string(),
+        match_key: request.task_match_key,
+        videos: Vec::new(),
+        config: serde_json::to_value(config).map_err(|e| format!("序列化分析任务失败: {e}"))?,
+        report_json: String::new(),
+        report_csv: String::new(),
+        report_html: String::new(),
+        active_stage: String::new(),
+        stages: default_analysis_task_stages(),
+        cache_artifacts: Vec::new(),
+        reused_video_caches: 0,
+        generated_video_caches: 0,
+    };
+    write_json_atomic(&directory.join(&id).join("task.json"), &record)?;
+    Ok(record)
+}
+
+#[tauri::command]
+fn update_analysis_task(
+    app: tauri::AppHandle,
+    request: UpdateAnalysisTaskRequest,
+) -> Result<AnalysisTaskRecord, String> {
+    if !is_safe_storage_id(&request.task_id) {
+        return Err("任务标识无效".to_string());
+    }
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let cache_dir = resolve_user_path(&root, &request.cache_dir);
+    let manifest_path = analysis_tasks_dir(&cache_dir)
+        .join(&request.task_id)
+        .join("task.json");
+    let content =
+        fs::read_to_string(&manifest_path).map_err(|e| format!("读取分析任务失败: {e}"))?;
+    let mut record = serde_json::from_str::<AnalysisTaskRecord>(&content)
+        .map_err(|e| format!("解析分析任务失败: {e}"))?;
+
+    if let Some(status) = request.status {
+        record.status = status;
+    }
+    if let Some(stage) = request.stage {
+        record.stage = stage;
+    }
+    if let Some(progress) = request.progress {
+        record.progress = progress.clamp(0.0, 100.0);
+    }
+    if let Some(total_pairs) = request.total_pairs {
+        record.total_pairs = total_pairs;
+    }
+    if let Some(completed_pairs) = request.completed_pairs {
+        record.completed_pairs = completed_pairs;
+    }
+    if let Some(videos) = request.videos {
+        record.video_count = videos.len();
+        record.videos = videos;
+    }
+    if let Some(path) = request.report_json {
+        record.report_json = path;
+    }
+    if let Some(path) = request.report_csv {
+        record.report_csv = path;
+    }
+    if let Some(path) = request.report_html {
+        record.report_html = path;
+    }
+    record.updated_at = (timestamp_millis() / 1000).to_string();
+    write_json_atomic(&manifest_path, &record)?;
+    Ok(record)
+}
+
+#[tauri::command]
+fn delete_analysis_task(
+    app: tauri::AppHandle,
+    request: DeleteAnalysisTaskRequest,
+) -> Result<(), String> {
+    if !is_safe_storage_id(&request.task_id) {
+        return Err("任务标识无效".to_string());
+    }
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let cache_dir = resolve_user_path(&root, &request.cache_dir);
+    let target = analysis_tasks_dir(&cache_dir).join(&request.task_id);
+    if request.delete_cache {
+        let manifest_path = target.join("task.json");
+        let record = fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<AnalysisTaskRecord>(&content).ok())
+            .unwrap_or_default();
+        let cache_root = cache_dir
+            .canonicalize()
+            .unwrap_or_else(|_| cache_dir.clone());
+        let task_root = target.canonicalize().unwrap_or_else(|_| target.clone());
+
+        for artifact in record.cache_artifacts {
+            let raw_path = PathBuf::from(&artifact.path);
+            let path = if raw_path.is_absolute() {
+                raw_path
+            } else {
+                cache_dir.join(raw_path)
+            };
+            if !path.exists() {
+                continue;
+            }
+            let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !is_child_path(&cache_root, &resolved) || resolved.starts_with(&task_root) {
+                continue;
+            }
+            if resolved.is_dir() {
+                fs::remove_dir_all(&resolved)
+                    .map_err(|e| format!("删除任务缓存失败 {}: {e}", resolved.display()))?;
+            } else {
+                fs::remove_file(&resolved)
+                    .map_err(|e| format!("删除任务缓存失败 {}: {e}", resolved.display()))?;
+            }
+        }
+    }
+    if target.exists() {
+        fs::remove_dir_all(target).map_err(|e| format!("删除历史任务失败: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn scan_analysis_task_cache(
+    app: tauri::AppHandle,
+    request: DeleteAnalysisTaskRequest,
+) -> Result<CacheScanResult, String> {
+    if !is_safe_storage_id(&request.task_id) {
+        return Err("任务标识无效".to_string());
+    }
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let cache_dir = resolve_user_path(&root, &request.cache_dir);
+    let task_dir = analysis_tasks_dir(&cache_dir).join(&request.task_id);
+    let manifest_path = task_dir.join("task.json");
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    let record = fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<AnalysisTaskRecord>(&content).ok())
+        .unwrap_or_default();
+
+    if task_dir.is_dir() {
+        for entry in fs::read_dir(&task_dir).map_err(|e| format!("读取任务缓存失败: {e}"))?
+        {
+            let path = entry
+                .map_err(|e| format!("读取任务缓存项失败: {e}"))?
+                .path();
+            if path == manifest_path {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if name.starts_with("task.json.") {
+                continue;
+            }
+            if seen.insert(path_to_string(&path)) {
+                if let Some(entry) = build_cache_entry(
+                    &cache_dir,
+                    &path,
+                    "任务断点",
+                    "当前任务的比较断点或临时恢复数据",
+                )? {
+                    items.push(entry);
+                }
+            }
+        }
+    }
+
+    let base = cache_dir
+        .canonicalize()
+        .unwrap_or_else(|_| cache_dir.clone());
+    for artifact in record.cache_artifacts {
+        let raw_path = PathBuf::from(&artifact.path);
+        let path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            cache_dir.join(raw_path)
+        };
+        if !path.exists() {
+            continue;
+        }
+        let target = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !is_child_path(&base, &target) || !seen.insert(path_to_string(&target)) {
+            continue;
+        }
+        if let Some(entry) = build_cache_entry(
+            &cache_dir,
+            &target,
+            if artifact.category.is_empty() {
+                "任务生成缓存"
+            } else {
+                &artifact.category
+            },
+            if artifact.description.is_empty() {
+                "当前任务新生成的视频特征缓存；同配置任务可能复用"
+            } else {
+                &artifact.description
+            },
+        )? {
+            items.push(entry);
+        }
+    }
+
+    items.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then(left.name.cmp(&right.name))
+    });
+    let total_size_bytes = items.iter().map(|item| item.size_bytes).sum();
+    let total_entries = items.iter().map(|item| item.entry_count).sum();
+    let message = if items.is_empty() {
+        "该任务没有可清理的独立缓存；复用缓存不会列入当前任务。".to_string()
+    } else {
+        format!("发现 {} 个当前任务产生或持有的缓存项目", items.len())
+    };
+
+    Ok(CacheScanResult {
+        cache_dir: path_to_string(cache_dir),
+        items,
+        total_size_bytes,
+        total_entries,
+        message,
+    })
+}
+
+#[tauri::command]
 fn run_batch_compare(
     app: tauri::AppHandle,
     task_state: State<'_, TaskState>,
@@ -1209,6 +1897,25 @@ fn run_batch_compare(
         let _ = fs::remove_file(&cancel_file);
     }
     let python = resolve_python(&app, &root, config.python_path.as_deref());
+    let task_id = config
+        .task_id
+        .as_deref()
+        .filter(|value| is_safe_storage_id(value))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("analysis-{}", timestamp_millis()));
+    let execution_stage = config
+        .execution_stage
+        .as_deref()
+        .filter(|value| {
+            matches!(
+                *value,
+                "scan" | "cache" | "features" | "candidate" | "compare" | "report"
+            )
+        })
+        .map(str::to_string);
+    let redo_stage = config.redo_stage.unwrap_or(false);
+    let task_config_json =
+        serde_json::to_string(&config).map_err(|e| format!("序列化历史任务配置失败: {e}"))?;
 
     {
         let pid_guard = task_state
@@ -1222,7 +1929,7 @@ fn run_batch_compare(
         }
         if let Ok(mut cancel_guard) = task_state.cancel_requested.lock() {
             *cancel_guard = false;
-        }
+        };
     }
 
     let mut args = vec![
@@ -1258,9 +1965,35 @@ fn run_batch_compare(
             .unwrap_or_else(|| "right_90".to_string()),
         "--device".into(),
         device.clone(),
+        "--error-tolerance".into(),
+        config
+            .error_tolerance_preset
+            .unwrap_or_else(|| "balanced".to_string()),
+        "--error-severe-limit".into(),
+        config
+            .error_tolerance_severe_limit
+            .unwrap_or(20)
+            .to_string(),
+        "--error-missing-limit".into(),
+        config
+            .error_tolerance_missing_picture_limit
+            .unwrap_or(100)
+            .to_string(),
         "--cancel-file".into(),
         path_to_string(&cancel_file),
+        "--task-id".into(),
+        task_id.clone(),
+        "--task-match-key".into(),
+        config.task_match_key.unwrap_or_default(),
+        "--task-config-json".into(),
+        task_config_json,
     ];
+    if let Some(stage_id) = execution_stage.as_deref() {
+        args.extend(["--target-stage".into(), stage_id.to_string()]);
+    }
+    if redo_stage {
+        args.push("--redo-stage".into());
+    }
 
     if let Some(value) = config.min_segment_duration {
         args.extend(["--min-segment-duration".into(), value.to_string()]);
@@ -1276,6 +2009,9 @@ fn run_batch_compare(
     }
     if config.force {
         args.push("--force".into());
+    }
+    if !config.error_tolerance_preflight_validation.unwrap_or(true) {
+        args.push("--skip-stream-validation".into());
     }
 
     let mut command = Command::new(&python);
@@ -1333,8 +2069,16 @@ fn run_batch_compare(
 
     let app_for_task = app.clone();
     let payload_for_task = payload.clone();
+    let task_id_for_event = task_id.clone();
+    let stage_for_event = execution_stage.clone();
     thread::spawn(move || {
-        run_batch_compare_process(app_for_task, command, payload_for_task);
+        run_batch_compare_process(
+            app_for_task,
+            command,
+            payload_for_task,
+            task_id_for_event,
+            stage_for_event,
+        );
     });
 
     Ok(payload)
@@ -1492,9 +2236,40 @@ async fn run_duplicate_file_check(
     app: tauri::AppHandle,
     config: DuplicateFileCheckConfig,
 ) -> Result<AnalysisFinishedPayload, String> {
-    tauri::async_runtime::spawn_blocking(move || run_duplicate_file_check_impl(app, config))
-        .await
-        .map_err(|e| format!("相同文件检查任务异常: {e}"))?
+    {
+        let task_state = app.state::<TaskState>();
+        let mut running_guard = task_state
+            .is_running
+            .lock()
+            .map_err(|_| "任务状态锁定失败".to_string())?;
+        if *running_guard {
+            return Err("已有分析任务正在运行".to_string());
+        }
+        *running_guard = true;
+        if let Ok(mut pid_guard) = task_state.current_pid.lock() {
+            *pid_guard = None;
+        }
+        if let Ok(mut cancel_file_guard) = task_state.cancel_file.lock() {
+            *cancel_file_guard = None;
+        }
+        {
+            let mut cancel_guard = task_state
+                .cancel_requested
+                .lock()
+                .map_err(|_| "任务状态锁定失败".to_string())?;
+            *cancel_guard = false;
+        }
+    }
+
+    let app_for_task = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        run_duplicate_file_check_impl(app_for_task, config)
+    })
+    .await
+    .map_err(|e| format!("相同文件检查任务异常: {e}"))
+    .and_then(|value| value);
+    reset_task_state(&app);
+    result
 }
 
 fn run_duplicate_file_check_impl(
@@ -1512,6 +2287,7 @@ fn run_duplicate_file_check_impl(
 
     let output_dir = resolve_user_path(&root, &config.output_dir);
     fs::create_dir_all(&output_dir).map_err(|e| format!("创建报告目录失败: {e}"))?;
+    ensure_analysis_not_cancelled(&app)?;
 
     emit_progress(&app, "扫描视频文件", 5.0);
     emit_log(&app, "stdout", "相同文件检查：开始扫描视频目录");
@@ -1519,7 +2295,12 @@ fn run_duplicate_file_check_impl(
         input_dir: path_to_string(&video_dir),
         recursive: config.recursive.or(Some(true)),
     })?;
-    emit_log(&app, "stdout", &format!("相同文件检查：发现 {} 个视频文件", videos.len()));
+    ensure_analysis_not_cancelled(&app)?;
+    emit_log(
+        &app,
+        "stdout",
+        &format!("相同文件检查：发现 {} 个视频文件", videos.len()),
+    );
 
     let mut by_size: BTreeMap<u64, Vec<VideoFile>> = BTreeMap::new();
     for video in videos.iter().cloned() {
@@ -1545,6 +2326,7 @@ fn run_duplicate_file_check_impl(
     let mut processed = 0usize;
     for group in by_size.values().filter(|group| group.len() > 1) {
         for video in group {
+            ensure_analysis_not_cancelled(&app)?;
             processed += 1;
             let fingerprint = file_fingerprint(&PathBuf::from(&video.path))
                 .map_err(|e| format!("计算文件指纹失败 {}: {e}", video.path))?;
@@ -1578,8 +2360,12 @@ fn run_duplicate_file_check_impl(
     let mut duplicate_file_count = 0usize;
 
     for (group_index, (fingerprint, group)) in duplicate_groups.iter().enumerate() {
+        ensure_analysis_not_cancelled(&app)?;
         duplicate_file_count += group.len();
-        let paths = group.iter().map(|video| video.path.clone()).collect::<Vec<_>>();
+        let paths = group
+            .iter()
+            .map(|video| video.path.clone())
+            .collect::<Vec<_>>();
         for left_index in 0..group.len() {
             for right_index in (left_index + 1)..group.len() {
                 let left = &group[left_index];
@@ -1653,6 +2439,7 @@ fn run_duplicate_file_check_impl(
     let output_json = output_dir.join(format!("{output_stem}.json"));
     let output_csv = output_dir.join(format!("{output_stem}.csv"));
     let output_html = output_dir.join(format!("{output_stem}.html"));
+    ensure_analysis_not_cancelled(&app)?;
     fs::write(
         &output_json,
         serde_json::to_string_pretty(&report).map_err(|e| format!("生成 JSON 报告失败: {e}"))?,
@@ -1679,6 +2466,14 @@ fn run_duplicate_file_check_impl(
         report_csv: path_to_string(output_csv),
         report_html: path_to_string(output_html),
     })
+}
+
+fn ensure_analysis_not_cancelled(app: &tauri::AppHandle) -> Result<(), String> {
+    if is_cancel_requested(app) {
+        Err("任务已暂停，可从历史任务继续".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -1737,6 +2532,8 @@ fn run_batch_compare_process(
     app: tauri::AppHandle,
     mut command: Command,
     payload: AnalysisFinishedPayload,
+    task_id: String,
+    execution_stage: Option<String>,
 ) {
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1828,8 +2625,16 @@ fn run_batch_compare_process(
         return;
     }
 
-    emit_progress(&app, "分析完成", 100.0);
-    let _ = app.emit("analysis-finished", payload);
+    if let Some(stage_id) = execution_stage {
+        emit_progress(&app, "当前阶段已完成", 100.0);
+        let _ = app.emit(
+            "analysis-stage-finished",
+            AnalysisStageFinishedPayload { task_id, stage_id },
+        );
+    } else {
+        emit_progress(&app, "分析完成", 100.0);
+        let _ = app.emit("analysis-finished", payload);
+    }
 }
 
 fn run_video_merge_process(
@@ -1870,9 +2675,7 @@ fn run_video_merge_process(
         .unwrap_or(false);
 
     let outcome = match status {
-        Ok(status) if cancelled || status.code() == Some(130) => {
-            Err("视频合并已取消".to_string())
-        }
+        Ok(status) if cancelled || status.code() == Some(130) => Err("视频合并已取消".to_string()),
         Ok(status) if !status.success() => Err(match status.code() {
             Some(code) => format!("视频合并失败，退出码: {code}。请展开日志查看 FFmpeg 详细原因。"),
             None => "视频合并进程被系统终止".to_string(),
@@ -1934,11 +2737,7 @@ where
     })
 }
 
-fn emit_merge_progress<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    progress: f64,
-    stage: &str,
-) {
+fn emit_merge_progress<R: tauri::Runtime>(app: &tauri::AppHandle<R>, progress: f64, stage: &str) {
     let _ = app.emit(
         "merge-progress",
         MergeProgressPayload {
@@ -2067,7 +2866,10 @@ fn spawn_cancel_watchdog(app: tauri::AppHandle, pid: u32) {
 }
 
 #[tauri::command]
-fn list_reports(app: tauri::AppHandle, request: OutputDirRequest) -> Result<Vec<ReportSummary>, String> {
+fn list_reports(
+    app: tauri::AppHandle,
+    request: OutputDirRequest,
+) -> Result<Vec<ReportSummary>, String> {
     let output_dir = PathBuf::from(request.output_dir);
     if !output_dir.exists() {
         return Ok(Vec::new());
@@ -2440,7 +3242,10 @@ fn comparison_frame_cache_path(
         .map(|value| value.as_nanos())
         .unwrap_or_default();
     let mut hasher = DefaultHasher::new();
-    video_path.to_string_lossy().to_lowercase().hash(&mut hasher);
+    video_path
+        .to_string_lossy()
+        .to_lowercase()
+        .hash(&mut hasher);
     metadata.len().hash(&mut hasher);
     modified.hash(&mut hasher);
     request.timestamp.to_bits().hash(&mut hasher);
@@ -2479,6 +3284,109 @@ fn delete_report(request: ReportPathRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn update_report_entries(
+    request: UpdateReportEntriesRequest,
+) -> Result<UpdateReportEntriesResult, String> {
+    if request.pairs.is_empty() {
+        return Ok(UpdateReportEntriesResult {
+            removed_count: 0,
+            remaining_count: 0,
+            updated_files: Vec::new(),
+        });
+    }
+
+    let path = PathBuf::from(request.path.trim());
+    let stem = path.with_extension("");
+    let json_path = stem.with_extension("json");
+    let csv_path = stem.with_extension("csv");
+    let html_path = stem.with_extension("html");
+    let mut updated_files = Vec::new();
+
+    if json_path.exists() {
+        let content = fs::read_to_string(&json_path)
+            .map_err(|e| format!("读取 JSON 报告失败 {}: {e}", json_path.display()))?;
+        let mut report: Value = serde_json::from_str(&content)
+            .map_err(|e| format!("解析 JSON 报告失败 {}: {e}", json_path.display()))?;
+        let pairs = report
+            .get_mut("video_pairs")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| "JSON 报告中没有可修改的 video_pairs 数据".to_string())?;
+        let before = pairs.len();
+        pairs.retain(|pair| {
+            !request
+                .pairs
+                .iter()
+                .any(|target| report_pair_matches(pair, target))
+        });
+        let removed_count = before.saturating_sub(pairs.len());
+        let remaining_count = pairs.len();
+        if removed_count == 0 {
+            return Err("报告中未找到要删除的结果条目".to_string());
+        }
+        if let Some(object) = report.as_object_mut() {
+            object.insert("num_pairs".to_string(), Value::from(remaining_count as u64));
+        }
+        write_json_atomic(&json_path, &report)?;
+        updated_files.push(path_to_string(&json_path));
+
+        if csv_path.exists() {
+            write_text_atomic(&csv_path, &report_pairs_csv(&report))?;
+            updated_files.push(path_to_string(&csv_path));
+        }
+        if html_path.exists() {
+            write_text_atomic(&html_path, &report_pairs_html(&report))?;
+            updated_files.push(path_to_string(&html_path));
+        }
+        return Ok(UpdateReportEntriesResult {
+            removed_count,
+            remaining_count,
+            updated_files,
+        });
+    }
+
+    if csv_path.exists() {
+        let content = fs::read_to_string(&csv_path)
+            .map_err(|e| format!("读取 CSV 报告失败 {}: {e}", csv_path.display()))?;
+        let mut reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_reader(content.as_bytes());
+        let headers = reader
+            .headers()
+            .map_err(|e| format!("读取 CSV 表头失败: {e}"))?
+            .clone();
+        let mut rows = reader
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("解析 CSV 报告失败: {e}"))?;
+        let before = rows.len();
+        rows.retain(|row| {
+            !request
+                .pairs
+                .iter()
+                .any(|target| csv_pair_matches(&headers, row, target))
+        });
+        let removed_count = before.saturating_sub(rows.len());
+        let remaining_count = rows.len();
+        if removed_count == 0 {
+            return Err("报告中未找到要删除的结果条目".to_string());
+        }
+        write_text_atomic(&csv_path, &serialize_csv_report(&headers, &rows)?)?;
+        updated_files.push(path_to_string(&csv_path));
+        if html_path.exists() {
+            write_text_atomic(&html_path, &csv_rows_html(&headers, &rows))?;
+            updated_files.push(path_to_string(&html_path));
+        }
+        return Ok(UpdateReportEntriesResult {
+            removed_count,
+            remaining_count,
+            updated_files,
+        });
+    }
+
+    Err(format!("报告文件不存在: {}", path.display()))
+}
+
+#[tauri::command]
 fn delete_files(request: DeleteFilesRequest) -> Result<DeleteFilesResult, String> {
     let mut deleted_paths = Vec::new();
     let mut failed = Vec::new();
@@ -2513,7 +3421,11 @@ fn delete_files(request: DeleteFilesRequest) -> Result<DeleteFilesResult, String
     let message = if failed.is_empty() {
         format!("已删除 {} 个文件", deleted_paths.len())
     } else {
-        format!("已删除 {} 个文件，{} 个文件删除失败", deleted_paths.len(), failed.len())
+        format!(
+            "已删除 {} 个文件，{} 个文件删除失败",
+            deleted_paths.len(),
+            failed.len()
+        )
     };
 
     Ok(DeleteFilesResult {
@@ -2570,7 +3482,14 @@ fn clear_cache_impl(
     }
 
     let mut removed_entries = 0usize;
-    for name in ["video_cache", "embeddings", "frames", "cache", ".runtime", ".resume"] {
+    for name in [
+        "video_cache",
+        "embeddings",
+        "frames",
+        "cache",
+        ".runtime",
+        ".resume",
+    ] {
         removed_entries += remove_cache_entry(&cache_dir.join(name))?;
     }
     removed_entries += remove_cache_entry(&cache_dir.join("reports").join(".resume"))?;
@@ -2680,13 +3599,21 @@ fn scan_cache_impl(
         }
     }
 
-    items.sort_by(|left, right| left.category.cmp(&right.category).then(left.name.cmp(&right.name)));
+    items.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then(left.name.cmp(&right.name))
+    });
     let total_size_bytes = items.iter().map(|item| item.size_bytes).sum();
     let total_entries = items.iter().map(|item| item.entry_count).sum();
     let message = if items.is_empty() {
         "没有发现可清理的缓存项".to_string()
     } else {
-        format!("发现 {} 类缓存，共 {} 个文件或目录", items.len(), total_entries)
+        format!(
+            "发现 {} 类缓存，共 {} 个文件或目录",
+            items.len(),
+            total_entries
+        )
     };
 
     Ok(CacheScanResult {
@@ -2762,7 +3689,10 @@ fn remove_cache_entry(path: &Path) -> Result<usize, String> {
     Ok(1)
 }
 
-fn build_video_cache_entries(cache_dir: &Path, video_cache_dir: &Path) -> Result<Vec<CacheEntry>, String> {
+fn build_video_cache_entries(
+    cache_dir: &Path,
+    video_cache_dir: &Path,
+) -> Result<Vec<CacheEntry>, String> {
     if !video_cache_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -2798,7 +3728,9 @@ fn build_video_cache_entries(cache_dir: &Path, video_cache_dir: &Path) -> Result
             format!("视频：{video_name}；抽帧与特征缓存")
         };
 
-        if let Some(mut cache_entry) = build_cache_entry(cache_dir, &path, "视频缓存", &description)? {
+        if let Some(mut cache_entry) =
+            build_cache_entry(cache_dir, &path, "视频缓存", &description)?
+        {
             cache_entry.name = video_name;
             entries.push(cache_entry);
         }
@@ -2869,8 +3801,14 @@ fn cache_path_stats(path: &Path) -> Result<(u64, usize), String> {
     Ok((size_bytes, entry_count.max(1)))
 }
 
-fn collect_path_stats(path: &Path, size_bytes: &mut u64, entry_count: &mut usize) -> Result<(), String> {
-    for entry in fs::read_dir(path).map_err(|e| format!("读取缓存目录失败 {}: {e}", path.display()))? {
+fn collect_path_stats(
+    path: &Path,
+    size_bytes: &mut u64,
+    entry_count: &mut usize,
+) -> Result<(), String> {
+    for entry in
+        fs::read_dir(path).map_err(|e| format!("读取缓存目录失败 {}: {e}", path.display()))?
+    {
         let entry = entry.map_err(|e| format!("读取缓存项失败: {e}"))?;
         let child = entry.path();
         *entry_count += 1;
@@ -2998,9 +3936,7 @@ fn close_window(
 ) -> Result<(), String> {
     if request.minimize_to_tray {
         set_tray_visible(&app, true);
-        window
-            .hide()
-            .map_err(|e| format!("最小化到托盘失败: {e}"))
+        window.hide().map_err(|e| format!("最小化到托盘失败: {e}"))
     } else {
         set_tray_visible(&app, false);
         app.exit(0);
@@ -3119,6 +4055,14 @@ fn main() {
             probe_video_metadata,
             check_python_env,
             check_environment,
+            list_config_templates,
+            save_config_template,
+            delete_config_template,
+            list_analysis_tasks,
+            create_analysis_task,
+            update_analysis_task,
+            delete_analysis_task,
+            scan_analysis_task_cache,
             run_batch_compare,
             run_video_merge,
             cancel_video_merge,
@@ -3131,6 +4075,7 @@ fn main() {
             capture_video_frame,
             capture_comparison_frame,
             delete_report,
+            update_report_entries,
             delete_files,
             clear_cache,
             scan_cache,
@@ -3285,6 +4230,12 @@ fn collect_videos(dir: &Path, recursive: bool, videos: &mut Vec<VideoFile>) -> R
             extension,
             size_bytes: metadata.len(),
             size_mb: metadata.len() as f64 / 1024.0 / 1024.0,
+            modified_at_ms: metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis() as u64)
+                .unwrap_or(0),
         });
     }
     Ok(())
@@ -3383,9 +4334,26 @@ where
 {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
+        let mut decoder_warnings = DecoderWarningAccumulator::default();
         for line in reader.lines().map_while(Result::ok) {
             last_activity.store(timestamp_millis_u64(), Ordering::Relaxed);
             let cleaned_line = strip_ansi_sequences(&line);
+            if let Some(context) = parse_analysis_video_context(&cleaned_line) {
+                if let Some(summary) = decoder_warnings.switch_context(context) {
+                    emit_log(&app, stream_name, &summary);
+                }
+                continue;
+            }
+            if is_h264_decoder_log_line(&cleaned_line) {
+                if let Some(summary) = decoder_warnings.record(&cleaned_line) {
+                    emit_log(&app, stream_name, &summary);
+                }
+                continue;
+            }
+            if let Some(payload) = parse_analysis_video_quarantined(&cleaned_line) {
+                let _ = app.emit("analysis-video-quarantined", payload);
+                continue;
+            }
             if let Some(parsed) = progress_from_line(&cleaned_line) {
                 let previous_progress = centi_to_progress(current_progress.load(Ordering::Relaxed));
                 let progress = if parsed.progress >= 100.0 {
@@ -3415,7 +4383,38 @@ where
                 },
             );
         }
+        if let Some(summary) = decoder_warnings.finish() {
+            emit_log(&app, stream_name, &summary);
+        }
     })
+}
+
+fn parse_analysis_video_context(line: &str) -> Option<AnalysisVideoContext> {
+    let payload = line.trim().strip_prefix(ANALYSIS_VIDEO_CONTEXT_PREFIX)?;
+    let context = serde_json::from_str::<AnalysisVideoContext>(payload).ok()?;
+    if context.path.trim().is_empty() {
+        return None;
+    }
+    Some(context)
+}
+
+fn parse_analysis_video_quarantined(line: &str) -> Option<AnalysisVideoQuarantinedPayload> {
+    let payload = line
+        .trim()
+        .strip_prefix(ANALYSIS_VIDEO_QUARANTINED_PREFIX)?;
+    serde_json::from_str::<AnalysisVideoQuarantinedPayload>(payload).ok()
+}
+
+fn decoder_phase_label(phase: &str) -> &str {
+    match phase {
+        "probe" => "读取视频信息",
+        "index" => "动态抽帧与索引",
+        _ => phase,
+    }
+}
+
+fn is_h264_decoder_log_line(line: &str) -> bool {
+    line.contains("[h264 @")
 }
 
 fn should_hide_analysis_log_line(line: &str) -> bool {
@@ -3428,6 +4427,8 @@ fn should_hide_analysis_log_line(line: &str) -> bool {
     }
 
     trimmed.starts_with("Loading weights:")
+        || trimmed.starts_with(ANALYSIS_VIDEO_CONTEXT_PREFIX)
+        || trimmed.starts_with(ANALYSIS_VIDEO_QUARANTINED_PREFIX)
         || trimmed.starts_with("[transformers]")
         || trimmed.starts_with("Key")
         || trimmed.starts_with("----")
@@ -3437,6 +4438,7 @@ fn should_hide_analysis_log_line(line: &str) -> bool {
         || trimmed.contains("requires torchvision")
         || trimmed.contains("HF_TOKEN")
         || trimmed.contains("unauthenticated requests to the HF Hub")
+        || is_decord_seek_warning_line(trimmed)
         || is_ffmpeg_noise_line(trimmed)
 }
 
@@ -3459,6 +4461,12 @@ fn is_important_analysis_log_line(line: &str) -> bool {
 fn is_ffmpeg_noise_line(line: &str) -> bool {
     (line.contains("swscaler") && line.contains("Slice parameters") && line.contains("invalid"))
         || (line.contains("deprecated pixel format used") && line.contains("swscaler"))
+}
+
+fn is_decord_seek_warning_line(line: &str) -> bool {
+    line.contains("video_reader.cc:711")
+        && line.contains("Failed to skip frames effectively")
+        && line.contains("Decoder did not respond after 10000 attempts")
 }
 
 fn strip_ansi_sequences(input: &str) -> String {
@@ -3651,20 +4659,18 @@ fn file_fingerprint(path: &Path) -> Result<String, String> {
 }
 
 fn duplicate_report_csv(report: &Value) -> String {
-    let mut rows = vec![
-        [
-            "completed_at",
-            "video_a",
-            "video_b",
-            "video_a_path",
-            "video_b_path",
-            "file_size_bytes",
-            "fingerprint",
-            "relation",
-            "symmetric_similarity",
-        ]
-        .join(","),
-    ];
+    let mut rows = vec![[
+        "completed_at",
+        "video_a",
+        "video_b",
+        "video_a_path",
+        "video_b_path",
+        "file_size_bytes",
+        "fingerprint",
+        "relation",
+        "symmetric_similarity",
+    ]
+    .join(",")];
 
     for pair in report
         .get("video_pairs")
@@ -3733,6 +4739,221 @@ fn csv_cell(value: String) -> String {
     }
 }
 
+fn report_pair_matches(pair: &Value, target: &ReportPairIdentity) -> bool {
+    let left = report_pair_side(pair, "video_a_path", "video_a");
+    let right = report_pair_side(pair, "video_b_path", "video_b");
+    let target_left = preferred_pair_identity(&target.video_a_path, &target.video_a);
+    let target_right = preferred_pair_identity(&target.video_b_path, &target.video_b);
+    unordered_pair_matches(&left, &right, &target_left, &target_right)
+}
+
+fn report_pair_side(pair: &Value, path_key: &str, name_key: &str) -> String {
+    preferred_pair_identity(&json_text(pair, path_key), &json_text(pair, name_key))
+}
+
+fn preferred_pair_identity(path: &str, name: &str) -> String {
+    let value = if path.trim().is_empty() { name } else { path };
+    normalize_pair_identity(value)
+}
+
+fn normalize_pair_identity(value: &str) -> String {
+    normalize_display_path(value.trim())
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+fn unordered_pair_matches(left: &str, right: &str, target_left: &str, target_right: &str) -> bool {
+    (left == target_left && right == target_right) || (left == target_right && right == target_left)
+}
+
+fn csv_pair_matches(
+    headers: &csv::StringRecord,
+    row: &csv::StringRecord,
+    target: &ReportPairIdentity,
+) -> bool {
+    let path_a_index = csv_header_index(headers, "video_a_path");
+    let path_b_index = csv_header_index(headers, "video_b_path");
+    let name_a_index = csv_header_index(headers, "video_a");
+    let name_b_index = csv_header_index(headers, "video_b");
+    let left = path_a_index
+        .and_then(|index| row.get(index))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| name_a_index.and_then(|index| row.get(index)))
+        .unwrap_or_default();
+    let right = path_b_index
+        .and_then(|index| row.get(index))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| name_b_index.and_then(|index| row.get(index)))
+        .unwrap_or_default();
+    let target_left = if path_a_index.is_some() {
+        preferred_pair_identity(&target.video_a_path, &target.video_a)
+    } else {
+        normalize_pair_identity(&target.video_a)
+    };
+    let target_right = if path_b_index.is_some() {
+        preferred_pair_identity(&target.video_b_path, &target.video_b)
+    } else {
+        normalize_pair_identity(&target.video_b)
+    };
+    unordered_pair_matches(
+        &normalize_pair_identity(left),
+        &normalize_pair_identity(right),
+        &target_left,
+        &target_right,
+    )
+}
+
+fn csv_header_index(headers: &csv::StringRecord, name: &str) -> Option<usize> {
+    headers.iter().position(|header| header == name)
+}
+
+fn serialize_csv_report(
+    headers: &csv::StringRecord,
+    rows: &[csv::StringRecord],
+) -> Result<String, String> {
+    let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
+    writer
+        .write_record(headers)
+        .map_err(|e| format!("写入 CSV 表头失败: {e}"))?;
+    for row in rows {
+        writer
+            .write_record(row)
+            .map_err(|e| format!("写入 CSV 数据失败: {e}"))?;
+    }
+    let bytes = writer
+        .into_inner()
+        .map_err(|e| format!("生成 CSV 报告失败: {}", e.error()))?;
+    String::from_utf8(bytes).map_err(|e| format!("生成 CSV 文本失败: {e}"))
+}
+
+fn report_pairs_csv(report: &Value) -> String {
+    let headers = [
+        "completed_at",
+        "video_a",
+        "video_b",
+        "video_a_path",
+        "video_b_path",
+        "a_in_b",
+        "b_in_a",
+        "symmetric_similarity",
+        "avg_similarity_a_to_b",
+        "avg_similarity_b_to_a",
+        "relation",
+        "total_frames_a",
+        "total_frames_b",
+        "duration_a",
+        "duration_b",
+        "raw_similarity_max",
+        "raw_similarity_p95",
+        "matched_segment_count",
+    ];
+    let mut rows = vec![headers.join(",")];
+    for pair in report
+        .get("video_pairs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        rows.push(
+            headers
+                .map(|header| csv_cell(json_text(pair, header)))
+                .join(","),
+        );
+    }
+    rows.join("\n")
+}
+
+fn report_pairs_html(report: &Value) -> String {
+    let timestamp = html_escape(&json_text(report, "timestamp"));
+    let pairs = report
+        .get("video_pairs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rows = pairs
+        .iter()
+        .enumerate()
+        .map(|(index, pair)| {
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                index + 1,
+                html_escape(&json_text(pair, "video_a")),
+                html_escape(&json_text(pair, "video_b")),
+                html_escape(&json_text(pair, "a_in_b")),
+                html_escape(&json_text(pair, "b_in_a")),
+                html_escape(&json_text(pair, "relation")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    report_html_document(&timestamp, pairs.len(), &rows)
+}
+
+fn csv_rows_html(headers: &csv::StringRecord, rows: &[csv::StringRecord]) -> String {
+    let video_a = csv_header_index(headers, "video_a");
+    let video_b = csv_header_index(headers, "video_b");
+    let a_in_b = csv_header_index(headers, "a_in_b");
+    let b_in_a = csv_header_index(headers, "b_in_a");
+    let relation = csv_header_index(headers, "relation");
+    let rendered = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let cell = |column: Option<usize>| {
+                html_escape(column.and_then(|value| row.get(value)).unwrap_or_default())
+            };
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                index + 1,
+                cell(video_a),
+                cell(video_b),
+                cell(a_in_b),
+                cell(b_in_a),
+                cell(relation),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    report_html_document("", rows.len(), &rendered)
+}
+
+fn report_html_document(timestamp: &str, pair_count: usize, rows: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>视频相似度分析报告</title>
+  <style>
+    body {{ font-family: sans-serif; margin: 24px; color: #1d2433; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 8px 10px; border: 1px solid #d9deea; text-align: left; }}
+    th {{ background: #eef3ff; }}
+  </style>
+</head>
+<body>
+  <h1>视频相似度分析报告</h1>
+  <p>生成时间：{timestamp}</p>
+  <p>当前结果：{pair_count} 对</p>
+  <table>
+    <thead><tr><th>#</th><th>视频 A</th><th>视频 B</th><th>A 在 B 中</th><th>B 在 A 中</th><th>关系</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</body>
+</html>"#
+    )
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn open_os_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("路径不存在: {}", path.display()));
@@ -3785,6 +5006,86 @@ fn kill_process_tree(pid: u32) -> Result<(), String> {
     }
 }
 
+fn config_template_dir(root: &Path, kind: &str) -> Result<PathBuf, String> {
+    if !matches!(kind, "analysis" | "error_tolerance") {
+        return Err("不支持的配置模板类型".to_string());
+    }
+    Ok(root.join("data").join("templates").join(kind))
+}
+
+fn analysis_tasks_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("cache").join("tasks")
+}
+
+fn default_analysis_task_stages() -> Vec<AnalysisTaskStage> {
+    [
+        ("scan", "扫描与码流校验", 12.0),
+        ("cache", "检查可复用缓存", 8.0),
+        ("features", "动态抽帧与特征提取", 35.0),
+        ("candidate", "候选视频粗筛", 8.0),
+        ("compare", "视频两两比较", 30.0),
+        ("report", "生成分析报告", 7.0),
+    ]
+    .into_iter()
+    .map(|(id, label, weight)| AnalysisTaskStage {
+        id: id.to_string(),
+        label: label.to_string(),
+        status: "pending".to_string(),
+        progress: 0.0,
+        weight,
+        started_at: String::new(),
+        completed_at: String::new(),
+        elapsed_ms: 0,
+        message: "等待前置阶段完成".to_string(),
+    })
+    .collect()
+}
+
+fn is_safe_storage_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 120
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn storage_record_id(seed: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    seed.hash(&mut hasher);
+    timestamp_millis().hash(&mut hasher);
+    format!("template-{}-{:x}", timestamp_millis(), hasher.finish())
+}
+
+fn write_json_atomic<T: Serialize>(target: &Path, value: &T) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    }
+    let pending = target.with_extension(format!("json.{}.pending", timestamp_millis()));
+    let content =
+        serde_json::to_string_pretty(value).map_err(|e| format!("序列化数据失败: {e}"))?;
+    fs::write(&pending, content).map_err(|e| format!("写入临时数据失败: {e}"))?;
+    if target.exists() {
+        fs::remove_file(target).map_err(|e| format!("替换旧数据失败: {e}"))?;
+    }
+    fs::rename(&pending, target).map_err(|e| format!("保存数据失败: {e}"))
+}
+
+fn write_text_atomic(target: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    }
+    let extension = target
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("tmp");
+    let pending = target.with_extension(format!("{extension}.{}.pending", timestamp_millis()));
+    fs::write(&pending, content).map_err(|e| format!("写入临时数据失败: {e}"))?;
+    if target.exists() {
+        fs::remove_file(target).map_err(|e| format!("替换旧数据失败: {e}"))?;
+    }
+    fs::rename(&pending, target).map_err(|e| format!("保存数据失败: {e}"))
+}
+
 fn system_time_to_string(time: SystemTime) -> Option<String> {
     let duration = time.duration_since(UNIX_EPOCH).ok()?;
     Some(duration.as_secs().to_string())
@@ -3820,7 +5121,12 @@ fn sanitize_report_name(value: &str) -> String {
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
             result.push(ch);
-        } else if ch.is_whitespace() || matches!(ch, '.' | ':' | '/' | '\\' | '|' | '?' | '*' | '"' | '<' | '>') {
+        } else if ch.is_whitespace()
+            || matches!(
+                ch,
+                '.' | ':' | '/' | '\\' | '|' | '?' | '*' | '"' | '<' | '>'
+            )
+        {
             result.push('_');
         } else {
             result.push(ch);
@@ -3943,4 +5249,168 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
     }
 
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_decord_seek_warning_line, is_h264_decoder_log_line, parse_analysis_video_context,
+        parse_analysis_video_quarantined, update_report_entries, AnalysisVideoContext,
+        AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator, ReportPairIdentity,
+        UpdateReportEntriesRequest,
+    };
+    use serde_json::json;
+    use std::fs;
+
+    #[test]
+    fn parses_unicode_video_context_marker() {
+        let marker = r#"ANALYSIS_VIDEO_CONTEXT|{"path":"D:\\视频\\损坏.mp4","phase":"index"}"#;
+
+        assert_eq!(
+            parse_analysis_video_context(marker),
+            Some(AnalysisVideoContext {
+                path: r"D:\视频\损坏.mp4".to_string(),
+                phase: "index".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn aggregates_h264_warnings_with_video_path() {
+        let mut warnings = DecoderWarningAccumulator::default();
+        warnings.switch_context(AnalysisVideoContext {
+            path: r"D:\videos\broken.mp4".to_string(),
+            phase: "index".to_string(),
+        });
+
+        assert!(warnings
+            .record("[h264 @ 0001] Invalid NAL unit size (12 > 3).")
+            .is_none());
+        warnings.record("[h264 @ 0001] missing picture in access unit with size 3");
+        for _ in 0..19 {
+            warnings.record("[h264 @ 0001] Invalid NAL unit size (12 > 3).");
+        }
+        let summary = warnings.finish().expect("severe warning summary");
+        assert!(summary.contains(r"D:\videos\broken.mp4"));
+        assert!(summary.contains("动态抽帧与索引"));
+        assert!(summary.contains("NAL 长度错误 20 次"));
+        assert!(summary.contains("缺失画面 1 次"));
+        assert!(summary.contains("合计 21 条"));
+    }
+
+    #[test]
+    fn recognizes_only_h264_decoder_lines() {
+        assert!(is_h264_decoder_log_line(
+            "[h264 @ 0001] missing picture in access unit with size 5"
+        ));
+        assert!(!is_h264_decoder_log_line(
+            "Warning: Failed to index video: path=broken.mp4"
+        ));
+    }
+
+    #[test]
+    fn recognizes_decord_sparse_seek_noise() {
+        assert!(is_decord_seek_warning_line(
+            r"[22:42:25] D:\a\decord2\decord2\src\video\video_reader.cc:711: [F:\video.mp4] Failed to skip frames effectively at frame 291. Decoder did not respond after 10000 attempts. Video might be corrupted or seeking failed."
+        ));
+    }
+
+    #[test]
+    fn parses_quarantined_video_event() {
+        let marker = r#"ANALYSIS_VIDEO_QUARANTINED|{"originalPath":"F:\\broken.mp4","destinationPath":"D:\\app\\data\\error_videos\\broken.mp4","remainingVideos":7,"removedVideos":2,"moved":true}"#;
+
+        assert_eq!(
+            parse_analysis_video_quarantined(marker),
+            Some(AnalysisVideoQuarantinedPayload {
+                original_path: r"F:\broken.mp4".to_string(),
+                destination_path: r"D:\app\data\error_videos\broken.mp4".to_string(),
+                remaining_videos: 7,
+                removed_videos: 2,
+                moved: true,
+            })
+        );
+    }
+
+    #[test]
+    fn collapses_thousands_of_decoder_lines_into_a_few_summaries() {
+        let mut warnings = DecoderWarningAccumulator::default();
+        warnings.switch_context(AnalysisVideoContext {
+            path: r"D:\videos\very-broken.mp4".to_string(),
+            phase: "index".to_string(),
+        });
+
+        let emitted = (0..2_500)
+            .filter_map(|_| warnings.record("[h264 @ 0001] Invalid NAL unit size (120 > 3)."))
+            .count();
+        let final_summary = warnings.finish().expect("final warning summary");
+
+        assert_eq!(emitted, 3);
+        assert!(final_summary.contains("NAL 长度错误 2500 次"));
+        assert!(final_summary.contains(r"D:\videos\very-broken.mp4"));
+    }
+
+    #[test]
+    fn removes_selected_pair_from_all_report_formats() {
+        let directory = std::env::temp_dir().join(format!(
+            "video-similarity-report-delete-{}",
+            super::timestamp_millis()
+        ));
+        fs::create_dir_all(&directory).expect("create temp report directory");
+        let json_path = directory.join("batch_report.json");
+        let csv_path = directory.join("batch_report.csv");
+        let html_path = directory.join("batch_report.html");
+        let report = json!({
+            "timestamp": "2026-06-23T10:00:00",
+            "num_pairs": 2,
+            "video_pairs": [
+                {
+                    "video_a": "a.mp4",
+                    "video_b": "b.mp4",
+                    "video_a_path": "D:/videos/a.mp4",
+                    "video_b_path": "D:/videos/b.mp4",
+                    "relation": "partial_overlap"
+                },
+                {
+                    "video_a": "c.mp4",
+                    "video_b": "d.mp4",
+                    "video_a_path": "D:/videos/c.mp4",
+                    "video_b_path": "D:/videos/d.mp4",
+                    "relation": "different"
+                }
+            ]
+        });
+        fs::write(
+            &json_path,
+            serde_json::to_string_pretty(&report).expect("serialize report"),
+        )
+        .expect("write json report");
+        fs::write(&csv_path, "video_a,video_b\na.mp4,b.mp4\nc.mp4,d.mp4\n")
+            .expect("write csv report");
+        fs::write(&html_path, "<html>old report</html>").expect("write html report");
+
+        let result = update_report_entries(UpdateReportEntriesRequest {
+            path: json_path.to_string_lossy().into_owned(),
+            pairs: vec![ReportPairIdentity {
+                video_a: "b.mp4".to_string(),
+                video_b: "a.mp4".to_string(),
+                video_a_path: "D:/videos/b.mp4".to_string(),
+                video_b_path: "D:/videos/a.mp4".to_string(),
+            }],
+        })
+        .expect("delete selected report pair");
+
+        assert_eq!(result.removed_count, 1);
+        assert_eq!(result.remaining_count, 1);
+        let json_content = fs::read_to_string(&json_path).expect("read updated json");
+        let csv_content = fs::read_to_string(&csv_path).expect("read updated csv");
+        let html_content = fs::read_to_string(&html_path).expect("read updated html");
+        assert!(!json_content.contains("a.mp4"));
+        assert!(!csv_content.contains("a.mp4"));
+        assert!(!html_content.contains("a.mp4"));
+        assert!(json_content.contains("c.mp4"));
+        assert!(csv_content.contains("c.mp4"));
+        assert!(html_content.contains("c.mp4"));
+
+        fs::remove_dir_all(directory).expect("remove temp report directory");
+    }
 }

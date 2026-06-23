@@ -2,9 +2,17 @@ export type ResizeMode = 'center_crop' | 'letterbox'
 export type DeviceMode = 'cpu' | 'cuda' | 'auto'
 export type PortraitRotation = 'left_90' | 'right_90'
 export type AnalysisMode = 'video_similarity' | 'duplicate_file'
-export type EditableAnalysisPresetId = 'ultra_fast' | 'fast' | 'normal' | 'precise' | 'perfect'
+export type ErrorTolerancePreset = 'strict' | 'balanced' | 'lenient' | 'failure_only' | 'custom'
+export type BuiltInAnalysisPresetId = 'ultra_fast' | 'fast' | 'normal' | 'precise' | 'perfect'
+export type EditableAnalysisPresetId = BuiltInAnalysisPresetId | 'custom'
 export type AnalysisPresetId = EditableAnalysisPresetId | 'duplicate_file'
 export type CloseBehavior = 'ask' | 'tray' | 'exit'
+
+export interface ErrorToleranceConfig {
+  errorToleranceSevereLimit: number
+  errorToleranceMissingPictureLimit: number
+  errorTolerancePreflightValidation: boolean
+}
 
 export interface SettingsSnapshot {
   pythonPath: string
@@ -28,12 +36,18 @@ export interface SettingsSnapshot {
   defaultPortraitRotation: PortraitRotation
   defaultForce: boolean
   defaultDevice: DeviceMode
+  errorTolerancePreset: ErrorTolerancePreset
+  errorToleranceSevereLimit: number
+  errorToleranceMissingPictureLimit: number
+  errorTolerancePreflightValidation: boolean
   checkEnvOnStartup: boolean
   openMaximized: boolean
   closeBehavior: CloseBehavior
   analysisMode: AnalysisMode
   selectedAnalysisPreset: AnalysisPresetId
+  customAnalysisPresetSource: BuiltInAnalysisPresetId
   customAnalysisPresets: Record<EditableAnalysisPresetId, AnalysisPresetConfig>
+  customErrorTolerance: ErrorToleranceConfig
 }
 
 export interface AnalysisConfig {
@@ -54,6 +68,10 @@ export interface AnalysisConfig {
   inputSize: number
   portraitRotation: PortraitRotation
   force: boolean
+  errorTolerancePreset: ErrorTolerancePreset
+  errorToleranceSevereLimit: number
+  errorToleranceMissingPictureLimit: number
+  errorTolerancePreflightValidation: boolean
   mode: AnalysisMode
 }
 
@@ -160,6 +178,9 @@ export const analysisPresets: Record<AnalysisPresetId, AnalysisPresetConfig> = {
     ...normalAnalysisPreset,
     analysisMode: 'duplicate_file',
   },
+  custom: {
+    ...normalAnalysisPreset,
+  },
 }
 
 export function cloneEditableAnalysisPresets(
@@ -171,6 +192,7 @@ export function cloneEditableAnalysisPresets(
     normal: { ...analysisPresets.normal, ...source.normal },
     precise: { ...analysisPresets.precise, ...source.precise },
     perfect: { ...analysisPresets.perfect, ...source.perfect },
+    custom: { ...analysisPresets.custom, ...source.custom },
   }
 }
 
@@ -181,11 +203,21 @@ export const defaultSettings: SettingsSnapshot = {
   cacheDir: 'data',
   reportDir: 'data/reports',
   ...normalAnalysisPreset,
+  errorTolerancePreset: 'balanced',
+  errorToleranceSevereLimit: 20,
+  errorToleranceMissingPictureLimit: 100,
+  errorTolerancePreflightValidation: true,
   checkEnvOnStartup: true,
   openMaximized: true,
   closeBehavior: 'ask',
   selectedAnalysisPreset: 'normal',
+  customAnalysisPresetSource: 'normal',
   customAnalysisPresets: cloneEditableAnalysisPresets(),
+  customErrorTolerance: {
+    errorToleranceSevereLimit: 20,
+    errorToleranceMissingPictureLimit: 100,
+    errorTolerancePreflightValidation: true,
+  },
 }
 
 export function analysisConfigFromSettings(settings: SettingsSnapshot): AnalysisConfig {
@@ -207,6 +239,10 @@ export function analysisConfigFromSettings(settings: SettingsSnapshot): Analysis
     inputSize: settings.defaultInputSize,
     portraitRotation: settings.defaultPortraitRotation,
     force: settings.defaultForce,
+    errorTolerancePreset: settings.errorTolerancePreset,
+    errorToleranceSevereLimit: settings.errorToleranceSevereLimit,
+    errorToleranceMissingPictureLimit: settings.errorToleranceMissingPictureLimit,
+    errorTolerancePreflightValidation: settings.errorTolerancePreflightValidation,
     mode: settings.analysisMode,
   }
 }

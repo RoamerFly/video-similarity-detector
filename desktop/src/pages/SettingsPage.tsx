@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
+  BookOpen,
   CheckCircle2,
   Download,
   ExternalLink,
@@ -16,6 +17,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  X,
 } from 'lucide-react'
 import {
   GlassPanel,
@@ -26,31 +28,43 @@ import {
   TextInput,
   Toggle,
 } from '@/components/DesignSystem'
+import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
 import {
   checkPythonEnv,
   checkForUpdates,
   clearCacheItems,
+  deleteConfigTemplate,
   downloadAndInstallUpdate,
   formatBytes,
   getAppInfo,
+  listConfigTemplates,
   listenUpdateDownloadProgress,
   normalizeBackendError,
   openReleasePage,
   scanCache,
+  saveConfigTemplate,
   selectOutputDirectory,
   selectPythonExecutable,
   selectVideoDirectory,
   type AppInfo,
   type CacheScanResult,
+  type ConfigTemplateRecord,
   type UpdateDownloadProgress,
   type UpdateInfo,
 } from '@/services/backend'
 import { useEnvironmentStore } from '@/stores/environmentStore'
-import { useSettingsStore } from '@/stores/settingsStore'
-import type { AnalysisPresetConfig, AnalysisPresetId, CloseBehavior, DeviceMode, PortraitRotation, ResizeMode, SettingsSnapshot } from '@/types/config'
+import { analysisPresetFromSettings, settingsSnapshotFromState, useSettingsStore } from '@/stores/settingsStore'
+import type { AnalysisPresetConfig, AnalysisPresetId, CloseBehavior, DeviceMode, ErrorTolerancePreset, PortraitRotation, ResizeMode, SettingsSnapshot } from '@/types/config'
 import { parameterHints, withEnglish } from '@/utils/parameterHints'
 
-type SettingsTab = 'base' | 'analysis'
+type SettingsTab = 'base' | 'analysis' | 'error_tolerance'
+
+interface ErrorToleranceTemplateConfig {
+  errorTolerancePreset: ErrorTolerancePreset
+  errorToleranceSevereLimit: number
+  errorToleranceMissingPictureLimit: number
+  errorTolerancePreflightValidation: boolean
+}
 
 const analysisPresetOptions: Array<{
   id: AnalysisPresetId
@@ -95,11 +109,56 @@ const analysisPresetOptions: Array<{
     tip: '完美：逐帧检查并使用最高候选量，适合少量关键视频的最终核验。',
   },
   {
+    id: 'custom',
+    name: '自定义',
+    description: '保存你临时调整后的参数。',
+    summary: '用户自定义参数',
+    tip: '自定义：选择任意预设后修改参数，都会先保存到这里；点击“保存到当前来源预设”才会覆盖对应预设。',
+  },
+  {
     id: 'duplicate_file',
     name: '对比相同文件',
     description: '只查文件内容是否完全一致。',
     summary: '不抽帧 / 不用 GPU / 不跑分析程序',
     tip: '对比相同文件：直接扫描相同大小的视频并计算文件指纹，只判断是不是完全同一个文件，不进行抽帧和相似度分析。',
+  },
+]
+
+const errorToleranceOptions: Array<{
+  id: ErrorTolerancePreset
+  name: string
+  description: string
+  effect: string
+}> = [
+  {
+    id: 'strict',
+    name: '严格',
+    description: '连续 5 条严重码流错误或 20 条缺失画面即隔离。',
+    effect: '结果最干净，但部分还能播放的视频可能被移出。',
+  },
+  {
+    id: 'balanced',
+    name: '标准',
+    description: '连续 20 条严重错误或 100 条缺失画面才隔离。',
+    effect: '推荐设置，在完整性和可用性之间保持平衡。',
+  },
+  {
+    id: 'lenient',
+    name: '宽松',
+    description: '允许最多 200 条严重错误或 1000 条缺失画面。',
+    effect: '尽量保留可播放视频，少量画面可能被跳过。',
+  },
+  {
+    id: 'failure_only',
+    name: '仅失败时',
+    description: '忽略可恢复码流告警，只在无法打开或抽不出有效画面时隔离。',
+    effect: '容忍度最高，适合视觉影响不明显的视频库。',
+  },
+  {
+    id: 'custom',
+    name: '自定义',
+    description: '使用手动调整后的错误容忍数值。',
+    effect: '选择任意容忍预设后修改数值，会先保存到这里。',
   },
 ]
 
@@ -123,14 +182,19 @@ export function SettingsPage() {
   const checkedEnvironmentKey = useEnvironmentStore((state) => state.configKey)
   const [clearingCache, setClearingCache] = useState(false)
   const [cacheDialogOpen, setCacheDialogOpen] = useState(false)
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
   const [cacheScan, setCacheScan] = useState<CacheScanResult | null>(null)
   const [selectedCachePaths, setSelectedCachePaths] = useState<Set<string>>(() => new Set())
   const [savedMessage, setSavedMessage] = useState('')
   const [error, setError] = useState('')
   const saveMessageTimer = useRef<number | null>(null)
-  const didMountSettings = useRef(false)
+  const saveFeedbackTimer = useRef<number | null>(null)
+  const savedSettingsRef = useRef<SettingsSnapshot>(settingsSnapshotFromState(useSettingsStore.getState()))
+  const [savedSignature, setSavedSignature] = useState(() => buildSettingsSignature(savedSettingsRef.current))
+  const [saveFeedback, setSaveFeedback] = useState<'idle' | 'saving' | 'saved'>('idle')
   const environmentConfigKey = buildEnvironmentConfigKey(settings.pythonPath, settings.projectRoot, settings.reportDir)
   const settingsSignature = buildSettingsSignature(settings)
+  const hasUnsavedChanges = settingsSignature !== savedSignature
 
   const executeEnvironmentCheck = useCallback(async (quickCheck = false) => {
     useEnvironmentStore.getState().setChecking(true)
@@ -191,18 +255,14 @@ export function SettingsPage() {
     }
   }, [checkedEnvironmentKey, environment, environmentConfigKey, executeEnvironmentCheck, settings.checkEnvOnStartup])
 
-  useEffect(() => {
-    if (!didMountSettings.current) {
-      didMountSettings.current = true
-      return undefined
-    }
-
-    setSavedMessage('设置更新成功')
+  useEffect(() => () => {
     if (saveMessageTimer.current) window.clearTimeout(saveMessageTimer.current)
-    saveMessageTimer.current = window.setTimeout(() => setSavedMessage(''), 1600)
-
-    return undefined
-  }, [settingsSignature])
+    if (saveFeedbackTimer.current) window.clearTimeout(saveFeedbackTimer.current)
+    const current = useSettingsStore.getState()
+    if (buildSettingsSignature(current) !== buildSettingsSignature(savedSettingsRef.current)) {
+      current.replaceSettings(savedSettingsRef.current)
+    }
+  }, [])
 
   const environmentRows = useMemo(() => [
     {
@@ -247,8 +307,7 @@ export function SettingsPage() {
       const selected = await selectPythonExecutable()
       if (selected) {
         settings.setPythonPath(selected)
-        setSavedMessage('Python 路径已更新')
-        window.setTimeout(() => setSavedMessage(''), 1800)
+        showSettingsMessage('Python 路径已选择，请点击“保存设置”应用。')
       }
     } catch (err) {
       setError(normalizeBackendError(err))
@@ -257,8 +316,7 @@ export function SettingsPage() {
 
   function useBundledPython() {
     settings.setPythonPath('python')
-    setSavedMessage('已切换为内置 env 环境')
-    window.setTimeout(() => setSavedMessage(''), 1800)
+    showSettingsMessage('已选择内置 env 环境，请点击“保存设置”应用。')
   }
 
   async function chooseCacheDir() {
@@ -279,9 +337,25 @@ export function SettingsPage() {
     }
   }
 
-  function handleSave() {
-    setSavedMessage('设置更新成功')
-    window.setTimeout(() => setSavedMessage(''), 1800)
+  function showSettingsMessage(message: string, duration = 2200) {
+    setSavedMessage(message)
+    if (saveMessageTimer.current) window.clearTimeout(saveMessageTimer.current)
+    saveMessageTimer.current = window.setTimeout(() => setSavedMessage(''), duration)
+  }
+
+  function handleSave(message = '设置已保存，后续任务将使用新配置。') {
+    if (saveFeedbackTimer.current) window.clearTimeout(saveFeedbackTimer.current)
+    setSaveFeedback('saving')
+    const current = useSettingsStore.getState()
+    current.saveSettings()
+    const snapshot = settingsSnapshotFromState(current)
+    savedSettingsRef.current = snapshot
+    setSavedSignature(buildSettingsSignature(snapshot))
+    saveFeedbackTimer.current = window.setTimeout(() => {
+      setSaveFeedback('saved')
+      showSettingsMessage(message)
+      saveFeedbackTimer.current = window.setTimeout(() => setSaveFeedback('idle'), 1200)
+    }, 140)
   }
 
   async function handleClearCache() {
@@ -333,8 +407,12 @@ export function SettingsPage() {
   function handleReset() {
     if (activeTab === 'analysis') {
       settings.resetAnalysisSettings()
-      setSavedMessage('已恢复默认分析配置')
-      window.setTimeout(() => setSavedMessage(''), 1800)
+      showSettingsMessage('已恢复默认分析配置，请点击“保存设置”应用。')
+      return
+    }
+    if (activeTab === 'error_tolerance') {
+      settings.resetErrorToleranceSettings()
+      showSettingsMessage('已恢复默认错误容忍设置，请点击“保存设置”应用。')
       return
     }
 
@@ -345,69 +423,47 @@ export function SettingsPage() {
       reportDir: appInfo?.defaultOutputDir || settings.reportDir,
     })
     useEnvironmentStore.getState().resetEnvironment()
-    setSavedMessage('已恢复默认基础设置')
-    window.setTimeout(() => setSavedMessage(''), 1800)
+    showSettingsMessage('已恢复默认基础设置，请点击“保存设置”应用。')
   }
 
   return (
     <div className="route-fill settings-shell">
-      <GlassPanel className="environment-status-panel">
-        <div className="environment-status-head">
-          <div>
-            <h2 className="section-title">
-              <ShieldCheck />
-              环境状态
-            </h2>
-            <p className="section-subtitle">进入设置页后自动检测 Python、脚本、报告目录和 GPU 加速。</p>
-          </div>
-          <NeonButton variant="outline" type="button" onClick={() => void handleCheckEnvironment()} disabled={checking}>
-            <RefreshCw size={20} className={checking ? 'spin-slow' : ''} />
-            {checking ? '检测中' : '重新检测'}
-          </NeonButton>
-        </div>
-
-        <div className="environment-summary-grid">
-          {environmentRows.map((row) => (
-            <div className={`environment-summary-item ${row.ok === false ? 'is-failed' : ''}`} key={row.label}>
-              <span>{row.label}</span>
-              <strong title={row.value}>
-                {row.ok === false || row.ok == null ? <AlertCircle size={17} /> : <CheckCircle2 size={17} fill="currentColor" />}
-                {row.value}
-              </strong>
-            </div>
-          ))}
-        </div>
-
-        {(environment?.message || environmentError || error) && (
-          <p className={environment?.ok && !environmentError && !error ? 'settings-note compact' : 'inline-error settings-note compact'}>
-            {error || environmentError || environment?.message}
-          </p>
-        )}
-        {environment?.resolvedPythonPath && (
-          <p className="environment-path compact" title={environment.resolvedPythonPath}>
-            实际路径：{environment.resolvedPythonPath}
-          </p>
-        )}
-      </GlassPanel>
-
       <GlassPanel className="settings-tab-panel">
-        <div className="settings-tabs" role="tablist" aria-label="设置分类">
-          <button
-            type="button"
-            className={activeTab === 'base' ? 'active' : ''}
-            onClick={() => setActiveTab('base')}
-          >
-            <Settings size={18} />
-            基础设置
-          </button>
-          <button
-            type="button"
-            className={activeTab === 'analysis' ? 'active' : ''}
-            onClick={() => setActiveTab('analysis')}
-          >
-            <SlidersHorizontal size={18} />
-            分析配置
-          </button>
+        <div className="settings-tab-toolbar">
+          <div className="settings-tabs" role="tablist" aria-label="设置分类">
+            <button
+              type="button"
+              className={activeTab === 'base' ? 'active' : ''}
+              onClick={() => setActiveTab('base')}
+            >
+              <Settings size={18} />
+              基础设置
+            </button>
+            <button
+              type="button"
+              className={activeTab === 'analysis' ? 'active' : ''}
+              onClick={() => setActiveTab('analysis')}
+            >
+              <SlidersHorizontal size={18} />
+              分析配置
+            </button>
+            <button
+              type="button"
+              className={activeTab === 'error_tolerance' ? 'active' : ''}
+              onClick={() => setActiveTab('error_tolerance')}
+            >
+              <ShieldCheck size={18} />
+              错误容忍设置
+            </button>
+          </div>
+          <div className="settings-fixed-actions">
+            <NeonButton variant="outline" type="button" onClick={() => setUpdateDialogOpen(true)}>
+              检查更新
+            </NeonButton>
+            <NeonButton className="cache-check-button" tone="red" variant="outline" type="button" onClick={() => void handleClearCache()} disabled={clearingCache}>
+              {clearingCache ? '检查中' : '检查缓存'}
+            </NeonButton>
+          </div>
         </div>
 
         <div className="settings-tab-content">
@@ -419,13 +475,17 @@ export function SettingsPage() {
               onChooseVideoDir={chooseVideoDir}
               onChooseCacheDir={chooseCacheDir}
               onChooseReportDir={chooseReportDir}
-              onClearCache={handleClearCache}
-              clearingCache={clearingCache}
             />
-          ) : (
+          ) : activeTab === 'analysis' ? (
             <AnalysisSettings
               onPresetSaved={(presetName) => {
-                setSavedMessage(`已保存“${presetName}”自定义预设`)
+                handleSave(`已保存到“${presetName}”预设。`)
+              }}
+            />
+          ) : (
+            <ErrorToleranceSettings
+              onMessage={(message) => {
+                setSavedMessage(message)
                 window.setTimeout(() => setSavedMessage(''), 1800)
               }}
             />
@@ -435,7 +495,9 @@ export function SettingsPage() {
         <div className="settings-actions">
           <div>
             <p className="settings-note compact">
-              设置会自动保存；正在运行的分析任务不会被中途改配置，下一次开始分析时生效。
+              {hasUnsavedChanges
+                ? '有尚未保存的修改；离开本页会撤销这些修改。'
+                : '设置已保存；正在运行的任务不会被中途改配置。'}
             </p>
             {(savedMessage || error) && (
               <p className={error ? 'inline-error settings-note' : 'settings-note'}>
@@ -446,14 +508,54 @@ export function SettingsPage() {
           </div>
           <NeonButton variant="outline" type="button" onClick={handleReset}>
             <RotateCcw size={20} />
-            {activeTab === 'analysis' ? '恢复当前预设默认' : '恢复基础默认'}
+            {activeTab === 'analysis'
+              ? '恢复当前预设默认'
+              : activeTab === 'error_tolerance'
+                ? '恢复错误容忍默认'
+                : '恢复基础默认'}
           </NeonButton>
-          <NeonButton type="button" onClick={handleSave}>
-            <Save size={21} />
-            保存设置
+          <NeonButton
+            className={`settings-save-button ${saveFeedback === 'saving' ? 'is-saving' : saveFeedback === 'saved' ? 'is-saved' : ''}`}
+            type="button"
+            onClick={() => handleSave()}
+          >
+            {saveFeedback === 'saved' ? <CheckCircle2 size={21} /> : <Save size={21} />}
+            {saveFeedback === 'saving' ? '正在保存' : saveFeedback === 'saved' ? '保存成功' : '保存设置'}
+          </NeonButton>
+        </div>
+        {saveFeedback === 'saved' && (
+          <div className="settings-save-toast" role="status" aria-live="polite">
+            <CheckCircle2 size={18} />
+            设置保存成功
+          </div>
+        )}
+      </GlassPanel>
+      <GlassPanel className="environment-status-panel compact">
+        <div className="environment-status-inline">
+          <strong>
+            <ShieldCheck size={17} />
+            环境状态
+          </strong>
+          {environmentRows.map((row) => (
+            <span className={row.ok === false ? 'is-failed' : ''} title={`${row.label}：${row.value}`} key={row.label}>
+              {row.ok === false || row.ok == null ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
+              {row.label}：{row.value}
+            </span>
+          ))}
+          <span className="environment-inline-message" title={error || environmentError || environment?.message || environment?.resolvedPythonPath || ''}>
+            {error || environmentError || environment?.message || environment?.resolvedPythonPath || '等待检测'}
+          </span>
+          <NeonButton variant="ghost" type="button" onClick={() => void handleCheckEnvironment()} disabled={checking}>
+            <RefreshCw size={16} className={checking ? 'spin-slow' : ''} />
+            {checking ? '检测中' : '重新检测'}
           </NeonButton>
         </div>
       </GlassPanel>
+      <UpdateDialog
+        open={updateDialogOpen}
+        appInfo={appInfo}
+        onClose={() => setUpdateDialogOpen(false)}
+      />
       <CacheCleanupDialog
         open={cacheDialogOpen}
         scan={cacheScan}
@@ -483,8 +585,6 @@ function BaseSettings({
   onChooseVideoDir,
   onChooseCacheDir,
   onChooseReportDir,
-  onClearCache,
-  clearingCache,
 }: {
   appInfo: AppInfo | null
   onChoosePythonPath: () => Promise<void>
@@ -492,8 +592,6 @@ function BaseSettings({
   onChooseVideoDir: () => Promise<void>
   onChooseCacheDir: () => Promise<void>
   onChooseReportDir: () => Promise<void>
-  onClearCache: () => Promise<void>
-  clearingCache: boolean
 }) {
   const settings = useSettingsStore()
 
@@ -527,14 +625,6 @@ function BaseSettings({
         />
         <PathSetting label="视频目录" tip={parameterHints.videoDir} value={settings.videoDir} onChange={settings.setVideoDir} onChoose={onChooseVideoDir} />
         <PathSetting label="缓存目录" tip={parameterHints.cacheDir} value={settings.cacheDir} onChange={settings.setCacheDir} onChoose={onChooseCacheDir} />
-        <div className="settings-cache-clean-row">
-          <ParameterHint label="缓存清理" tip={parameterHints.clearCache} />
-          <p title="删除抽帧、特征和断点缓存，保留报告文件。">删除抽帧、特征和断点缓存，保留报告文件。</p>
-          <NeonButton tone="red" variant="outline" type="button" onClick={() => void onClearCache()} disabled={clearingCache}>
-            <Trash2 size={17} />
-            {clearingCache ? '检查中' : '检查缓存'}
-          </NeonButton>
-        </div>
         <PathSetting label="报告目录" tip={parameterHints.reportDir} value={settings.reportDir} onChange={settings.setReportDir} onChoose={onChooseReportDir} />
 
         <label className="settings-toggle-row">
@@ -555,7 +645,6 @@ function BaseSettings({
       </div>
 
       <div className="settings-side-stack">
-        <UpdateSettingsCard appInfo={appInfo} />
         <div className="settings-about-card">
           <div className="about-title">
             <Info size={24} />
@@ -589,12 +678,34 @@ function BaseSettings({
   )
 }
 
-function UpdateSettingsCard({ appInfo }: { appInfo: AppInfo | null }) {
+function UpdateDialog({
+  open,
+  appInfo,
+  onClose,
+}: {
+  open: boolean
+  appInfo: AppInfo | null
+  onClose: () => void
+}) {
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [progress, setProgress] = useState<UpdateDownloadProgress | null>(null)
   const [error, setError] = useState('')
+
+  const handleCheckUpdate = useCallback(async () => {
+    setChecking(true)
+    setError('')
+    setUpdate(null)
+    setProgress(null)
+    try {
+      setUpdate(await checkForUpdates())
+    } catch (err) {
+      setError(normalizeBackendError(err))
+    } finally {
+      setChecking(false)
+    }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -616,18 +727,11 @@ function UpdateSettingsCard({ appInfo }: { appInfo: AppInfo | null }) {
     }
   }, [])
 
-  async function handleCheckUpdate() {
-    setChecking(true)
-    setError('')
-    setProgress(null)
-    try {
-      setUpdate(await checkForUpdates())
-    } catch (err) {
-      setError(normalizeBackendError(err))
-    } finally {
-      setChecking(false)
-    }
-  }
+  useEffect(() => {
+    if (!open) return undefined
+    const timer = window.setTimeout(() => void handleCheckUpdate(), 0)
+    return () => window.clearTimeout(timer)
+  }, [handleCheckUpdate, open])
 
   async function handleInstallUpdate() {
     if (!update?.canAutoInstall) return
@@ -651,17 +755,28 @@ function UpdateSettingsCard({ appInfo }: { appInfo: AppInfo | null }) {
     }
   }
 
-  const statusText = error || update?.message || '点击检查 GitHub Releases 中的最新稳定版本。'
+  const statusText = checking
+    ? '正在连接 GitHub Releases，请稍候...'
+    : error || update?.message || '打开窗口后会自动检查，也可以点击下方按钮重试。'
   const currentVersion = update?.currentVersion || appInfo?.version || '0.1.0'
   const targetVersion = update?.latestVersion || currentVersion
   const installProgress = Math.max(0, Math.min(100, progress?.progress || 0))
 
-  return (
-    <div className="settings-update-card">
-      <div className="about-title">
-        <Download size={24} />
-        <h3>检查更新</h3>
-      </div>
+  if (!open) return null
+
+  return createPortal(
+    <div className="modal-backdrop cache-cleanup-backdrop settings-update-backdrop" role="presentation">
+      <section className="cache-cleanup-dialog settings-update-dialog" role="dialog" aria-modal="true" aria-label="检查更新">
+        <div className="cache-cleanup-head settings-update-dialog-head">
+          <div className="about-title">
+            <Download size={24} />
+            <h3>检查更新</h3>
+          </div>
+          <button type="button" onClick={onClose} disabled={installing} aria-label="关闭检查更新">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="settings-update-card">
       <div className="update-version-line">
         <span>当前 v{currentVersion}</span>
         <strong>{update?.updateAvailable ? `可更新至 v${targetVersion}` : `${appInfo?.buildFlavor === 'gpu' ? 'GPU' : 'CPU'} 版`}</strong>
@@ -709,7 +824,10 @@ function UpdateSettingsCard({ appInfo }: { appInfo: AppInfo | null }) {
         ) : null}
       </div>
       <small className="update-preserve-note">覆盖升级仅替换程序文件，保留 data、videos、embeddings、报告和界面设置。</small>
-    </div>
+        </div>
+      </section>
+    </div>,
+    document.body,
   )
 }
 
@@ -717,6 +835,56 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
   const settings = useSettingsStore()
   const activePreset = settings.selectedAnalysisPreset
   const activePresetOption = analysisPresetOptions.find((preset) => preset.id === activePreset)
+  const saveTargetPreset = activePreset === 'custom' ? settings.customAnalysisPresetSource : activePreset
+  const saveTargetOption = analysisPresetOptions.find((preset) => preset.id === saveTargetPreset)
+  const [analysisTemplates, setAnalysisTemplates] = useState<ConfigTemplateRecord<AnalysisPresetConfig>[]>([])
+  const [selectedAnalysisTemplate, setSelectedAnalysisTemplate] = useState('')
+  const [templateMessage, setTemplateMessage] = useState('')
+
+  const refreshTemplates = useCallback(async () => {
+    try {
+      const analysis = await listConfigTemplates<AnalysisPresetConfig>('analysis', settings.projectRoot)
+      setAnalysisTemplates(analysis)
+      setSelectedAnalysisTemplate((current) => analysis.some((item) => item.id === current) ? current : (analysis[0]?.id ?? ''))
+    } catch (error) {
+      setTemplateMessage(normalizeBackendError(error))
+    }
+  }, [settings.projectRoot])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshTemplates(), 0)
+    return () => window.clearTimeout(timer)
+  }, [refreshTemplates])
+
+  async function saveAnalysisTemplate(template?: ConfigTemplateRecord<AnalysisPresetConfig>) {
+    const name = template?.name ?? window.prompt('请输入分析配置模板名称：')?.trim()
+    if (!name) return
+    try {
+      const saved = await saveConfigTemplate(
+        'analysis',
+        name,
+        analysisPresetFromSettings(useSettingsStore.getState()),
+        settings.projectRoot,
+        template?.id,
+      )
+      await refreshTemplates()
+      setSelectedAnalysisTemplate(saved.id)
+      setTemplateMessage(`已保存分析模板“${saved.name}”`)
+    } catch (error) {
+      setTemplateMessage(normalizeBackendError(error))
+    }
+  }
+
+  async function removeTemplate(kind: 'analysis' | 'error_tolerance', id: string, name: string) {
+    if (!id || !window.confirm(`确认删除模板“${name}”吗？`)) return
+    try {
+      await deleteConfigTemplate(kind, id, settings.projectRoot)
+      await refreshTemplates()
+      setTemplateMessage(`已删除模板“${name}”`)
+    } catch (error) {
+      setTemplateMessage(normalizeBackendError(error))
+    }
+  }
 
   return (
     <div className="settings-panel-grid analysis">
@@ -743,7 +911,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
         </div>
         <div className="analysis-preset-actions">
           <p>
-            五档相似度预设可自定义。修改下方参数后保存到当前预设；恢复默认只重置当前选中的一档。
+            选择预设后修改参数会先进入“自定义”。需要覆盖某个预设时，再点击右侧保存按钮。
           </p>
           <NeonButton
             variant="outline"
@@ -751,13 +919,37 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
             disabled={activePreset === 'duplicate_file'}
             onClick={() => {
               settings.saveCurrentAnalysisPreset()
-              onPresetSaved(activePresetOption?.name ?? '当前')
+              onPresetSaved(saveTargetOption?.name ?? activePresetOption?.name ?? '当前')
             }}
           >
             <Save size={17} />
-            保存到“{activePresetOption?.name ?? '当前'}”
+            保存到“{saveTargetOption?.name ?? activePresetOption?.name ?? '当前'}”
           </NeonButton>
         </div>
+        <TemplateToolbar
+          label="分析配置模板"
+          templates={analysisTemplates}
+          selectedId={selectedAnalysisTemplate}
+          onSelect={setSelectedAnalysisTemplate}
+          onSave={() => void saveAnalysisTemplate()}
+          onOverwrite={() => {
+            const template = analysisTemplates.find((item) => item.id === selectedAnalysisTemplate)
+            if (template && window.confirm(`使用当前分析配置覆盖模板“${template.name}”吗？`)) {
+              void saveAnalysisTemplate(template)
+            }
+          }}
+          onLoad={() => {
+            const template = analysisTemplates.find((item) => item.id === selectedAnalysisTemplate)
+            if (!template) return
+            settings.applyAnalysisTemplate(template.config)
+            setTemplateMessage(`已读取分析模板“${template.name}”`)
+          }}
+          onDelete={() => {
+            const template = analysisTemplates.find((item) => item.id === selectedAnalysisTemplate)
+            if (template) void removeTemplate('analysis', template.id, template.name)
+          }}
+        />
+        {templateMessage && <p className="settings-note template-message">{templateMessage}</p>}
       </div>
 
       {settings.analysisMode === 'duplicate_file' ? (
@@ -783,12 +975,12 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
 
         <NumberSetting label="时间窗口" tip={parameterHints.windowSize} value={settings.defaultWindowSize} onChange={settings.setDefaultWindowSize} suffix="秒" />
         <NumberSetting label="候选数(Top-K)" tip={parameterHints.topK} value={settings.defaultTopK} onChange={settings.setDefaultTopK} />
-        <NumberSetting label="精确比较候选数" tip={parameterHints.candidateLimit} value={settings.defaultCandidateLimit} min={0} max={500} onChange={settings.setDefaultCandidateLimit} />
+        <NumberSetting label="精确比较候选数" tip={parameterHints.candidateLimit} value={settings.defaultCandidateLimit} min={0} onChange={settings.setDefaultCandidateLimit} />
         <NumberSetting label="最大间隔" tip={parameterHints.maxGapSec} value={settings.defaultMaxGapSec} onChange={settings.setDefaultMaxGapSec} suffix="秒" />
-        <NumberSetting label="扫描步长" tip={parameterHints.frameStep} value={settings.defaultFrameStep} min={1} max={30} onChange={settings.setDefaultFrameStep} />
-        <NumberSetting label="最短片段" tip={parameterHints.minSegmentDuration} value={settings.defaultMinSegmentDuration} min={1} max={120} onChange={settings.setDefaultMinSegmentDuration} suffix="秒" />
-        <NumberSetting label="最少匹配点" tip={parameterHints.minSegmentMatches} value={settings.defaultMinSegmentMatches} min={1} max={50} onChange={settings.setDefaultMinSegmentMatches} />
-        <NumberSetting label="偏移容忍" tip={parameterHints.offsetTolerance} value={settings.defaultOffsetTolerance} min={1} max={60} onChange={settings.setDefaultOffsetTolerance} suffix="秒" />
+        <NumberSetting label="扫描步长" tip={parameterHints.frameStep} value={settings.defaultFrameStep} min={1} onChange={settings.setDefaultFrameStep} />
+        <NumberSetting label="最短片段" tip={parameterHints.minSegmentDuration} value={settings.defaultMinSegmentDuration} min={1} onChange={settings.setDefaultMinSegmentDuration} suffix="秒" />
+        <NumberSetting label="最少匹配点" tip={parameterHints.minSegmentMatches} value={settings.defaultMinSegmentMatches} min={1} onChange={settings.setDefaultMinSegmentMatches} />
+        <NumberSetting label="偏移容忍" tip={parameterHints.offsetTolerance} value={settings.defaultOffsetTolerance} min={1} onChange={settings.setDefaultOffsetTolerance} suffix="秒" />
 
         <label className="param-input-row">
           <ParameterHint label="运行设备" tip={parameterHints.device} />
@@ -805,7 +997,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
             <option value="letterbox">{withEnglish('等比留边', 'letterbox')}</option>
           </SelectInput>
         </label>
-        <NumberSetting label="匹配分辨率" tip={parameterHints.inputSize} value={settings.defaultInputSize} min={128} max={768} onChange={settings.setDefaultInputSize} />
+        <NumberSetting label="匹配分辨率" tip={parameterHints.inputSize} value={settings.defaultInputSize} min={1} onChange={settings.setDefaultInputSize} />
         <label className="param-input-row">
           <ParameterHint label="竖屏旋转" tip={parameterHints.portraitRotation} />
           <SelectInput value={settings.defaultPortraitRotation} onChange={(event) => settings.setDefaultPortraitRotation(event.target.value as PortraitRotation)}>
@@ -824,6 +1016,213 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
         </label>
       </div>
       )}
+    </div>
+  )
+}
+
+function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) => void }) {
+  const settings = useSettingsStore()
+  const [templates, setTemplates] = useState<ConfigTemplateRecord<ErrorToleranceTemplateConfig>[]>([])
+  const [selectedTemplate, setSelectedTemplate] = useState('')
+  const [templateMessage, setTemplateMessage] = useState('')
+
+  const refreshTemplates = useCallback(async () => {
+    try {
+      const records = await listConfigTemplates<ErrorToleranceTemplateConfig>('error_tolerance', settings.projectRoot)
+      setTemplates(records)
+      setSelectedTemplate((current) => records.some((item) => item.id === current) ? current : (records[0]?.id ?? ''))
+    } catch (error) {
+      setTemplateMessage(normalizeBackendError(error))
+    }
+  }, [settings.projectRoot])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshTemplates(), 0)
+    return () => window.clearTimeout(timer)
+  }, [refreshTemplates])
+
+  function snapshot(): ErrorToleranceTemplateConfig {
+    const current = useSettingsStore.getState()
+    return {
+      errorTolerancePreset: current.errorTolerancePreset,
+      errorToleranceSevereLimit: current.errorToleranceSevereLimit,
+      errorToleranceMissingPictureLimit: current.errorToleranceMissingPictureLimit,
+      errorTolerancePreflightValidation: current.errorTolerancePreflightValidation,
+    }
+  }
+
+  async function saveTemplate(template?: ConfigTemplateRecord<ErrorToleranceTemplateConfig>) {
+    const name = template?.name ?? window.prompt('请输入错误容忍模板名称：')?.trim()
+    if (!name) return
+    try {
+      const saved = await saveConfigTemplate(
+        'error_tolerance',
+        name,
+        snapshot(),
+        settings.projectRoot,
+        template?.id,
+      )
+      await refreshTemplates()
+      setSelectedTemplate(saved.id)
+      setTemplateMessage(`已保存错误容忍模板“${saved.name}”`)
+      onMessage(`已保存错误容忍模板“${saved.name}”`)
+    } catch (error) {
+      setTemplateMessage(normalizeBackendError(error))
+    }
+  }
+
+  async function removeTemplate() {
+    const template = templates.find((item) => item.id === selectedTemplate)
+    if (!template || !window.confirm(`确认删除模板“${template.name}”吗？`)) return
+    try {
+      await deleteConfigTemplate('error_tolerance', template.id, settings.projectRoot)
+      await refreshTemplates()
+      setTemplateMessage(`已删除模板“${template.name}”`)
+    } catch (error) {
+      setTemplateMessage(normalizeBackendError(error))
+    }
+  }
+
+  return (
+    <div className="settings-panel-grid error-tolerance-page">
+      <div className="error-tolerance-heading">
+        <div>
+          <strong>错误容忍设置</strong>
+          <p>控制码流异常达到什么程度时隔离视频。数值为 0 表示忽略该类可恢复告警；无法打开或没有有效画面仍会移出任务。</p>
+        </div>
+        <ParameterHint label="隔离策略" tip={parameterHints.errorTolerance} />
+      </div>
+
+      <div className="error-tolerance-options">
+        {errorToleranceOptions.map((option) => (
+          <button
+            type="button"
+            key={option.id}
+            className={settings.errorTolerancePreset === option.id ? 'error-tolerance-card active' : 'error-tolerance-card'}
+            aria-pressed={settings.errorTolerancePreset === option.id}
+            title={`${option.description} ${option.effect}`}
+            onClick={() => settings.setErrorTolerancePreset(option.id)}
+          >
+            <span>{option.name}</span>
+            <strong>{option.description}</strong>
+            <small>{option.effect}</small>
+          </button>
+        ))}
+      </div>
+
+      <div className="error-tolerance-parameter-grid">
+        <NumberSetting
+          label="严重码流错误上限"
+          tip="Invalid NAL、NAL 单元拆分失败等严重错误累计达到该值后隔离；0 表示不按此类告警隔离。"
+          value={settings.errorToleranceSevereLimit}
+          min={0}
+          onChange={settings.setErrorToleranceSevereLimit}
+          suffix="条"
+        />
+        <NumberSetting
+          label="缺失画面上限"
+          tip="missing picture 告警累计达到该值后隔离；0 表示不按缺失画面告警隔离。"
+          value={settings.errorToleranceMissingPictureLimit}
+          min={0}
+          onChange={settings.setErrorToleranceMissingPictureLimit}
+          suffix="条"
+        />
+        <label className="settings-toggle-row">
+          <ParameterHint label="分析前完整码流校验" tip="开启时先用 FFmpeg 完整读取视频码流，能更早发现损坏；关闭可加快启动，但错误可能在抽帧阶段才被发现。" />
+          <Toggle checked={settings.errorTolerancePreflightValidation} onChange={settings.setErrorTolerancePreflightValidation} />
+        </label>
+        <div className="error-tolerance-live-summary">
+          <span>当前模式</span>
+          <strong>{settings.errorTolerancePreset === 'custom' ? '自定义' : errorToleranceOptions.find((item) => item.id === settings.errorTolerancePreset)?.name}</strong>
+          <small>
+            严重错误 {settings.errorToleranceSevereLimit || '忽略'} · 缺失画面 {settings.errorToleranceMissingPictureLimit || '忽略'} ·
+            {settings.errorTolerancePreflightValidation ? ' 完整校验' : ' 跳过预检'}
+          </small>
+        </div>
+      </div>
+
+      <TemplateToolbar
+        label="错误容忍模板"
+        templates={templates}
+        selectedId={selectedTemplate}
+        onSelect={setSelectedTemplate}
+        onSave={() => void saveTemplate()}
+        onOverwrite={() => {
+          const template = templates.find((item) => item.id === selectedTemplate)
+          if (template && window.confirm(`使用当前错误容忍设置覆盖模板“${template.name}”吗？`)) {
+            void saveTemplate(template)
+          }
+        }}
+        onLoad={() => {
+          const template = templates.find((item) => item.id === selectedTemplate)
+          if (!template) return
+          settings.setErrorTolerancePreset(template.config.errorTolerancePreset)
+          const presetValues = useSettingsStore.getState()
+          settings.applyErrorToleranceTemplate({
+            errorTolerancePreset: template.config.errorTolerancePreset,
+            errorToleranceSevereLimit: Number.isFinite(template.config.errorToleranceSevereLimit)
+              ? template.config.errorToleranceSevereLimit
+              : presetValues.errorToleranceSevereLimit,
+            errorToleranceMissingPictureLimit: Number.isFinite(template.config.errorToleranceMissingPictureLimit)
+              ? template.config.errorToleranceMissingPictureLimit
+              : presetValues.errorToleranceMissingPictureLimit,
+            errorTolerancePreflightValidation: typeof template.config.errorTolerancePreflightValidation === 'boolean'
+              ? template.config.errorTolerancePreflightValidation
+              : presetValues.errorTolerancePreflightValidation,
+          })
+          setTemplateMessage(`已读取错误容忍模板“${template.name}”`)
+        }}
+        onDelete={() => void removeTemplate()}
+      />
+      {templateMessage && <p className="settings-note template-message">{templateMessage}</p>}
+    </div>
+  )
+}
+
+function TemplateToolbar<T>({
+  label,
+  templates,
+  selectedId,
+  onSelect,
+  onSave,
+  onOverwrite,
+  onLoad,
+  onDelete,
+}: {
+  label: string
+  templates: ConfigTemplateRecord<T>[]
+  selectedId: string
+  onSelect: (id: string) => void
+  onSave: () => void
+  onOverwrite: () => void
+  onLoad: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="config-template-toolbar">
+      <span>
+        <BookOpen size={16} />
+        {label}
+      </span>
+      <SelectInput value={selectedId} onChange={(event) => onSelect(event.target.value)}>
+        <option value="">{templates.length ? '选择模板' : '暂无自定义模板'}</option>
+        {templates.map((template) => (
+          <option value={template.id} key={template.id}>{template.name}</option>
+        ))}
+      </SelectInput>
+      <NeonButton variant="outline" type="button" onClick={onSave}>
+        <Save size={16} />
+        存为模板
+      </NeonButton>
+      <NeonButton variant="ghost" type="button" disabled={!selectedId} onClick={onLoad}>
+        读取
+      </NeonButton>
+      <NeonButton variant="ghost" type="button" disabled={!selectedId} onClick={onOverwrite}>
+        覆盖
+      </NeonButton>
+      <button className="template-delete-button" type="button" disabled={!selectedId} onClick={onDelete} title="删除所选模板">
+        <Trash2 size={16} />
+      </button>
     </div>
   )
 }
@@ -868,100 +1267,6 @@ function ReadOnlyPathSetting({
       <TextInput value={value || '未检测到项目目录'} readOnly title={value} />
       <span className="readonly-path-tag" title="项目目录由程序运行位置决定，不能手动编辑。">自动</span>
     </label>
-  )
-}
-
-function CacheCleanupDialog({
-  open,
-  scan,
-  selectedPaths,
-  busy,
-  onTogglePath,
-  onSelectAll,
-  onClearSelection,
-  onClose,
-  onConfirm,
-}: {
-  open: boolean
-  scan: CacheScanResult | null
-  selectedPaths: Set<string>
-  busy: boolean
-  onTogglePath: (path: string, checked: boolean) => void
-  onSelectAll: () => void
-  onClearSelection: () => void
-  onClose: () => void
-  onConfirm: (paths: string[]) => void
-}) {
-  if (!open) return null
-
-  const items = scan?.items ?? []
-  const selectedCount = items.filter((item) => selectedPaths.has(item.path)).length
-  const selectedSize = items
-    .filter((item) => selectedPaths.has(item.path))
-    .reduce((sum, item) => sum + item.sizeBytes, 0)
-
-  return createPortal(
-    <div className="modal-backdrop cache-cleanup-backdrop" role="presentation">
-      <section className="cache-cleanup-dialog" role="dialog" aria-modal="true" aria-label="缓存清理">
-        <div className="cache-cleanup-head">
-          <div>
-            <h3>缓存清理</h3>
-            <p title={scan?.cacheDir || ''}>{scan?.message || '正在检查缓存目录...'}</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="关闭缓存清理" disabled={busy}>
-            ×
-          </button>
-        </div>
-
-        <div className="cache-cleanup-summary">
-          <span title={scan?.cacheDir || '-'}>目录：{scan?.cacheDir || '-'}</span>
-          <strong>总大小：{formatBytes(scan?.totalSizeBytes ?? 0)}</strong>
-          <strong>已选：{selectedCount} 项 / {formatBytes(selectedSize)}</strong>
-        </div>
-
-        <div className="cache-cleanup-toolbar">
-          <button type="button" onClick={onSelectAll} disabled={busy || items.length === 0}>全选</button>
-          <button type="button" onClick={onClearSelection} disabled={busy || selectedCount === 0}>取消选择</button>
-        </div>
-
-        <div className="cache-cleanup-list">
-          {items.length > 0 ? items.map((item) => (
-            <label className="cache-cleanup-item" key={item.id} title={item.path}>
-              <input
-                type="checkbox"
-                checked={selectedPaths.has(item.path)}
-                onChange={(event) => onTogglePath(item.path, event.target.checked)}
-                disabled={busy}
-              />
-              <div>
-                <strong>{item.category}</strong>
-                <span>{item.name}</span>
-                <small title={item.description}>{item.description}</small>
-                <em title={item.path}>{item.path}</em>
-              </div>
-              <b>{formatBytes(item.sizeBytes)}</b>
-              <i>{item.entryCount} 项</i>
-            </label>
-          )) : (
-            <div className="cache-cleanup-empty">
-              <CheckCircle2 size={22} />
-              <span>没有发现可清理的缓存项目。</span>
-            </div>
-          )}
-        </div>
-
-        <div className="cache-cleanup-actions">
-          <NeonButton variant="outline" type="button" onClick={onClose} disabled={busy}>
-            取消
-          </NeonButton>
-          <NeonButton tone="red" type="button" disabled={busy || selectedCount === 0} onClick={() => onConfirm(Array.from(selectedPaths))}>
-            <Trash2 size={18} />
-            {busy ? '清理中' : `清理选中(${selectedCount})`}
-          </NeonButton>
-        </div>
-      </section>
-    </div>,
-    document.body,
   )
 }
 
@@ -1037,11 +1342,17 @@ function buildSettingsSignature(settings: SettingsSnapshot) {
     defaultPortraitRotation: settings.defaultPortraitRotation,
     defaultForce: settings.defaultForce,
     defaultDevice: settings.defaultDevice,
+    errorTolerancePreset: settings.errorTolerancePreset,
+    errorToleranceSevereLimit: settings.errorToleranceSevereLimit,
+    errorToleranceMissingPictureLimit: settings.errorToleranceMissingPictureLimit,
+    errorTolerancePreflightValidation: settings.errorTolerancePreflightValidation,
     checkEnvOnStartup: settings.checkEnvOnStartup,
     openMaximized: settings.openMaximized,
     closeBehavior: settings.closeBehavior,
     analysisMode: settings.analysisMode,
     selectedAnalysisPreset: settings.selectedAnalysisPreset,
+    customAnalysisPresetSource: settings.customAnalysisPresetSource,
     customAnalysisPresets: settings.customAnalysisPresets,
+    customErrorTolerance: settings.customErrorTolerance,
   })
 }

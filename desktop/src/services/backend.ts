@@ -44,6 +44,7 @@ export interface VideoFile {
   extension: string
   sizeBytes: number
   sizeMb: number
+  modifiedAtMs: number
 }
 
 export interface VideoMetadata {
@@ -133,9 +134,81 @@ export interface RunBatchCompareConfig {
   portraitRotation: string
   force: boolean
   device: string
+  errorTolerancePreset: string
+  errorToleranceSevereLimit: number
+  errorToleranceMissingPictureLimit: number
+  errorTolerancePreflightValidation: boolean
+  analysisMode?: string
   minSegmentDuration?: number
   minSegmentMatches?: number
   offsetTolerance?: number
+  taskId?: string
+  taskMatchKey?: string
+  executionStage?: AnalysisTaskStageId
+  redoStage?: boolean
+}
+
+export type ConfigTemplateKind = 'analysis' | 'error_tolerance'
+
+export interface ConfigTemplateRecord<T = unknown> {
+  id: string
+  kind: ConfigTemplateKind
+  name: string
+  createdAt: string
+  updatedAt: string
+  config: T
+}
+
+export interface AnalysisTaskVideo {
+  path: string
+  size?: number | null
+  mtimeMs?: number | null
+}
+
+export type AnalysisTaskStageId = 'scan' | 'cache' | 'features' | 'candidate' | 'compare' | 'report'
+
+export interface AnalysisTaskStage {
+  id: AnalysisTaskStageId
+  label: string
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | string
+  progress: number
+  weight: number
+  startedAt: string
+  completedAt: string
+  elapsedMs: number
+  message: string
+}
+
+export interface AnalysisTaskCacheArtifact {
+  path: string
+  category: string
+  description: string
+  createdAt: string
+}
+
+export interface AnalysisTaskRecord {
+  version: number
+  id: string
+  status: 'created' | 'preparing' | 'running' | 'paused' | 'failed' | 'completed' | string
+  createdAt: string
+  updatedAt: string
+  videoDir: string
+  videoCount: number
+  totalPairs: number
+  completedPairs: number
+  progress: number
+  stage: string
+  matchKey: string
+  videos: AnalysisTaskVideo[]
+  config: RunBatchCompareConfig
+  reportJson: string
+  reportCsv: string
+  reportHtml: string
+  activeStage: AnalysisTaskStageId | ''
+  stages: AnalysisTaskStage[]
+  cacheArtifacts: AnalysisTaskCacheArtifact[]
+  reusedVideoCaches: number
+  generatedVideoCaches: number
 }
 
 export interface DuplicateFileCheckConfig {
@@ -199,8 +272,21 @@ export interface AnalysisProgressPayload {
   subProgress?: number | null
 }
 
+export interface AnalysisStageFinishedPayload {
+  taskId: string
+  stageId: AnalysisTaskStageId
+}
+
 export interface AnalysisErrorPayload {
   message: string
+}
+
+export interface AnalysisVideoQuarantinedPayload {
+  originalPath: string
+  destinationPath: string
+  remainingVideos: number
+  removedVideos: number
+  moved: boolean
 }
 
 export interface PathStatus {
@@ -244,6 +330,19 @@ export interface DeleteFilesResult {
   deletedPaths: string[]
   failed: Array<{ path: string; error: string }>
   message: string
+}
+
+export interface ReportPairIdentity {
+  videoA: string
+  videoB: string
+  videoAPath: string
+  videoBPath: string
+}
+
+export interface UpdateReportEntriesResult {
+  removedCount: number
+  remainingCount: number
+  updatedFiles: string[]
 }
 
 interface RuntimeWindow extends Window {
@@ -361,6 +460,142 @@ export async function scanVideos(inputDir: string, recursive = true) {
   })
 }
 
+export async function listConfigTemplates<T>(
+  kind: ConfigTemplateKind,
+  projectRoot?: string,
+) {
+  if (!hasTauriRuntime()) return []
+  return invoke<ConfigTemplateRecord<T>[]>('list_config_templates', {
+    request: { kind, projectRoot },
+  })
+}
+
+export async function saveConfigTemplate<T>(
+  kind: ConfigTemplateKind,
+  name: string,
+  config: T,
+  projectRoot?: string,
+  id?: string,
+) {
+  if (!hasTauriRuntime()) throw new Error('配置模板需要在桌面应用中保存。')
+  return invoke<ConfigTemplateRecord<T>>('save_config_template', {
+    request: { kind, name, config, projectRoot, id },
+  })
+}
+
+export async function deleteConfigTemplate(
+  kind: ConfigTemplateKind,
+  id: string,
+  projectRoot?: string,
+) {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('delete_config_template', {
+    request: { kind, id, projectRoot },
+  })
+}
+
+export async function listAnalysisTasks(cacheDir: string, projectRoot?: string) {
+  if (!hasTauriRuntime()) return []
+  return invoke<AnalysisTaskRecord[]>('list_analysis_tasks', {
+    request: { cacheDir, projectRoot },
+  })
+}
+
+export async function createAnalysisTask(
+  config: RunBatchCompareConfig,
+  taskMatchKey: string,
+) {
+  if (!hasTauriRuntime()) {
+    const now = new Date().toISOString()
+    return {
+      version: 1,
+      id: `analysis-${Date.now()}`,
+      status: 'created',
+      createdAt: now,
+      updatedAt: now,
+      videoDir: config.videoDir,
+      videoCount: 0,
+      totalPairs: 0,
+      completedPairs: 0,
+      progress: 0,
+      stage: '等待启动',
+      matchKey: taskMatchKey,
+      videos: [],
+      config,
+      reportJson: '',
+      reportCsv: '',
+      reportHtml: '',
+      activeStage: '',
+      stages: [],
+      cacheArtifacts: [],
+      reusedVideoCaches: 0,
+      generatedVideoCaches: 0,
+    } satisfies AnalysisTaskRecord
+  }
+  return invoke<AnalysisTaskRecord>('create_analysis_task', {
+    request: {
+      cacheDir: config.cacheDir,
+      projectRoot: config.projectRoot,
+      config,
+      taskMatchKey,
+    },
+  })
+}
+
+export async function updateAnalysisTask(
+  taskId: string,
+  cacheDir: string,
+  projectRoot: string | undefined,
+  patch: {
+    status?: string
+    stage?: string
+    progress?: number
+    totalPairs?: number
+    completedPairs?: number
+    videos?: VideoFile[]
+    reportJson?: string
+    reportCsv?: string
+    reportHtml?: string
+  },
+) {
+  if (!hasTauriRuntime()) return
+  return invoke<AnalysisTaskRecord>('update_analysis_task', {
+    request: {
+      taskId,
+      cacheDir,
+      projectRoot,
+      ...patch,
+      videos: patch.videos?.map((video) => ({
+        path: video.path,
+        size: video.sizeBytes,
+        mtimeMs: video.modifiedAtMs,
+      })),
+    },
+  })
+}
+
+export async function deleteAnalysisTask(taskId: string, cacheDir: string, projectRoot?: string, deleteCache = false) {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('delete_analysis_task', {
+    request: { taskId, cacheDir, projectRoot, deleteCache },
+  })
+}
+
+export async function scanAnalysisTaskCache(taskId: string, cacheDir: string, projectRoot?: string) {
+  if (!hasTauriRuntime()) {
+    return {
+      cacheDir,
+      items: [],
+      totalSizeBytes: 0,
+      totalEntries: 0,
+      message: '任务缓存检查需要在 Tauri 应用中运行。',
+    } satisfies CacheScanResult
+  }
+  return invoke<CacheScanResult>('scan_analysis_task_cache', {
+    request: { taskId, cacheDir, projectRoot },
+  })
+}
+
 export async function probeVideoMetadata(paths: string[], projectRoot?: string, pythonPath?: string) {
   if (!hasTauriRuntime()) return []
   return invoke<VideoMetadata[]>('probe_video_metadata', {
@@ -386,6 +621,48 @@ export async function checkPythonEnv(config: PythonEnvConfig) {
 export async function runBatchCompare(config: RunBatchCompareConfig) {
   if (!hasTauriRuntime()) throw new Error('当前环境不可用：需要在 Tauri 应用中运行分析。')
   return invoke<ReportPathsPayload>('run_batch_compare', { config })
+}
+
+export function buildAnalysisTaskMatchKey(config: RunBatchCompareConfig) {
+  return JSON.stringify({
+    version: 1,
+    videoDir: normalizeTaskPath(config.videoDir),
+    skipThreshold: config.skipThreshold,
+    matchThreshold: config.matchThreshold,
+    windowSize: config.windowSize,
+    topK: config.topK,
+    candidateLimit: config.candidateLimit,
+    maxGapSec: config.maxGapSec,
+    frameStep: config.frameStep,
+    cropBlackBorders: config.cropBlackBorders,
+    resizeMode: config.resizeMode,
+    inputSize: config.inputSize,
+    portraitRotation: config.portraitRotation,
+    force: config.force,
+    device: config.device,
+    errorTolerancePreset: config.errorTolerancePreset,
+    errorToleranceSevereLimit: config.errorToleranceSevereLimit,
+    errorToleranceMissingPictureLimit: config.errorToleranceMissingPictureLimit,
+    errorTolerancePreflightValidation: config.errorTolerancePreflightValidation,
+    analysisMode: config.analysisMode,
+    minSegmentDuration: config.minSegmentDuration,
+    minSegmentMatches: config.minSegmentMatches,
+    offsetTolerance: config.offsetTolerance,
+  })
+}
+
+export function analysisTaskMatchesVideos(task: AnalysisTaskRecord, videos: VideoFile[]) {
+  if (task.videoCount !== videos.length || task.videos.length !== videos.length) return false
+  const expected = new Map(
+    task.videos.map((video) => [
+      normalizeTaskPath(video.path),
+      `${video.size ?? ''}:${video.mtimeMs ?? ''}`,
+    ]),
+  )
+  return videos.every((video) => (
+    expected.get(normalizeTaskPath(video.path))
+    === `${video.sizeBytes}:${video.modifiedAtMs || ''}`
+  ))
 }
 
 export async function runDuplicateFileCheck(config: DuplicateFileCheckConfig) {
@@ -468,6 +745,19 @@ export async function deleteReport(path: string) {
   if (!hasTauriRuntime()) return
   return invoke<void>('delete_report', {
     request: { path },
+  })
+}
+
+export async function updateReportEntries(path: string, pairs: ReportPairIdentity[]) {
+  if (!hasTauriRuntime()) {
+    return {
+      removedCount: pairs.length,
+      remainingCount: 0,
+      updatedFiles: [],
+    } satisfies UpdateReportEntriesResult
+  }
+  return invoke<UpdateReportEntriesResult>('update_report_entries', {
+    request: { path, pairs },
   })
 }
 
@@ -568,7 +858,9 @@ export async function isWindowMaximized() {
 export async function listenAnalysisEvents(handlers: {
   onLog?: (payload: AnalysisLogPayload) => void
   onProgress?: (payload: AnalysisProgressPayload) => void
+  onVideoQuarantined?: (payload: AnalysisVideoQuarantinedPayload) => void
   onFinished?: (payload: ReportPathsPayload) => void
+  onStageFinished?: (payload: AnalysisStageFinishedPayload) => void
   onError?: (payload: AnalysisErrorPayload) => void
 }) {
   if (!hasTauriRuntime()) return () => undefined
@@ -577,7 +869,9 @@ export async function listenAnalysisEvents(handlers: {
   try {
     unlisten.push(await listen<AnalysisLogPayload>('analysis-log', (event) => handlers.onLog?.(event.payload)))
     unlisten.push(await listen<AnalysisProgressPayload>('analysis-progress', (event) => handlers.onProgress?.(event.payload)))
+    unlisten.push(await listen<AnalysisVideoQuarantinedPayload>('analysis-video-quarantined', (event) => handlers.onVideoQuarantined?.(event.payload)))
     unlisten.push(await listen<ReportPathsPayload>('analysis-finished', (event) => handlers.onFinished?.(event.payload)))
+    unlisten.push(await listen<AnalysisStageFinishedPayload>('analysis-stage-finished', (event) => handlers.onStageFinished?.(event.payload)))
     unlisten.push(await listen<AnalysisErrorPayload>('analysis-error', (event) => handlers.onError?.(event.payload)))
   } catch (error) {
     unlisten.forEach((stop) => stop())
@@ -660,6 +954,11 @@ export function buildRunBatchCompareConfig(
     portraitRotation: analysisConfig.portraitRotation || settings.defaultPortraitRotation,
     force: analysisConfig.force,
     device: settings.defaultDevice,
+    errorTolerancePreset: analysisConfig.errorTolerancePreset,
+    errorToleranceSevereLimit: analysisConfig.errorToleranceSevereLimit,
+    errorToleranceMissingPictureLimit: analysisConfig.errorToleranceMissingPictureLimit,
+    errorTolerancePreflightValidation: analysisConfig.errorTolerancePreflightValidation,
+    analysisMode: analysisConfig.mode,
   }
 }
 
@@ -703,4 +1002,8 @@ export function formatDateTime(value?: string) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function normalizeTaskPath(path: string) {
+  return path.replaceAll('\\', '/').replace(/\/+$/, '').toLocaleLowerCase()
 }

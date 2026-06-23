@@ -22,6 +22,7 @@ export const parameterHints = {
   inputSize: '参与匹配前统一缩放或裁剪到的像素尺寸。',
   portraitRotation: '竖屏视频裁剪后按这个方向转成横屏再比较。',
   device: '自动选择 CPU 或 CUDA，也可以手动指定。',
+  errorTolerance: '决定检测到多少坏帧或码流异常后才隔离视频；宽松设置可能跳过少量受损画面，但可保留更多能正常播放的视频。',
   checkEnvOnStartup: '打开设置页时自动检查 Python、脚本、报告目录和 GPU 状态。',
   openMaximized: '启动应用后自动最大化窗口，减少页面拥挤和滚动。',
   closeBehavior: '设置点击关闭按钮时是每次询问、进入托盘，还是直接退出。',

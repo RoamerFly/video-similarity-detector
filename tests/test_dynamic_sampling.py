@@ -272,6 +272,47 @@ class TestDynamicFrameSamplerBasic:
         with pytest.raises(FileNotFoundError):
             sampler.sample(tmp_path / "nonexistent.mp4")
 
+    def test_sparse_sampling_prefers_sequential_opencv(self, tmp_path):
+        video_path = tmp_path / "sparse.mp4"
+        video_path.touch()
+        sampler = DynamicFrameSampler(
+            skip_threshold=0.90,
+            max_gap_sec=1.0,
+            frame_step=30,
+            cache_dir=tmp_path,
+        )
+        expected = [MagicMock()]
+
+        with (
+            patch.object(sampler, "_sample_with_opencv", return_value=expected) as opencv,
+            patch.object(sampler, "_sample_with_decord") as decord,
+        ):
+            retained = sampler.sample(video_path)
+
+        assert retained is expected
+        opencv.assert_called_once()
+        decord.assert_not_called()
+
+    def test_sparse_sampling_falls_back_to_decord(self, tmp_path):
+        video_path = tmp_path / "fallback.mp4"
+        video_path.touch()
+        sampler = DynamicFrameSampler(
+            skip_threshold=0.90,
+            max_gap_sec=1.0,
+            frame_step=30,
+            cache_dir=tmp_path,
+        )
+        expected = [MagicMock()]
+
+        with (
+            patch.object(sampler, "_sample_with_opencv", side_effect=ValueError("open failed")),
+            patch.object(sampler, "_sample_with_decord", return_value=expected) as decord,
+        ):
+            retained = sampler.sample(video_path)
+
+        assert retained is expected
+        decord.assert_called_once()
+
     def _create_test_video(self, video_path: Path, num_frames: int):
         """Helper to create a test video."""
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")

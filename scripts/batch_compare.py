@@ -24,7 +24,9 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -36,6 +38,40 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def emit_video_context(video_path: Path, phase: str) -> None:
+    """Tell the desktop stderr reader which video native decoder logs belong to."""
+    payload = json.dumps(
+        {
+            "path": display_path(video_path),
+            "phase": str(phase),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    print(f"ANALYSIS_VIDEO_CONTEXT|{payload}", file=sys.stderr, flush=True)
+
+
+def emit_video_quarantined(
+    original_path: Path,
+    destination_path: Path,
+    remaining_videos: int,
+    removed_videos: int,
+    moved: bool = True,
+) -> None:
+    payload = json.dumps(
+        {
+            "originalPath": display_path(original_path),
+            "destinationPath": display_path(destination_path),
+            "remainingVideos": max(0, int(remaining_videos)),
+            "removedVideos": max(1, int(removed_videos)),
+            "moved": bool(moved),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    log(f"ANALYSIS_VIDEO_QUARANTINED|{payload}")
 
 
 def display_path(path: Path) -> str:
@@ -54,6 +90,387 @@ def compact_error(value: str) -> str:
     if not text:
         return "未知错误"
     return text[:160] + ("..." if len(text) > 160 else "")
+
+
+def resolve_ffmpeg(project_root: Path) -> str:
+    executable_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    candidates = [
+        os.environ.get("VIDEO_SIM_FFMPEG", "").strip(),
+        str(project_root / "env" / executable_name),
+        str(project_root / "tools" / executable_name),
+        str(project_root / "desktop" / "env_gpu" / executable_name),
+        str(project_root / "desktop" / "env" / executable_name),
+        str(Path(sys.executable).resolve().parent.parent.parent / "env" / executable_name),
+        shutil.which("ffmpeg") or "",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+    raise FileNotFoundError("FFmpeg executable was not found for video validation")
+
+
+ERROR_TOLERANCE_POLICIES = {
+    "strict": {"severe_errors": 5, "missing_pictures": 20},
+    "balanced": {"severe_errors": 20, "missing_pictures": 100},
+    "lenient": {"severe_errors": 200, "missing_pictures": 1000},
+    "failure_only": {"severe_errors": None, "missing_pictures": None},
+}
+
+
+def validate_video_stream(
+    ffmpeg: str,
+    video_path: Path,
+    error_tolerance: str = "balanced",
+    severe_error_limit: int | None = None,
+    missing_picture_limit: int | None = None,
+) -> str | None:
+    policy = ERROR_TOLERANCE_POLICIES.get(
+        error_tolerance,
+        ERROR_TOLERANCE_POLICIES["balanced"],
+    )
+    severe_limit = policy["severe_errors"] if severe_error_limit is None else (
+        max(1, severe_error_limit) if severe_error_limit > 0 else None
+    )
+    missing_limit = policy["missing_pictures"] if missing_picture_limit is None else (
+        max(1, missing_picture_limit) if missing_picture_limit > 0 else None
+    )
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-err_detect",
+        "explode",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-c:v",
+        "copy",
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    first_severe_error = ""
+    fatal_error = ""
+    severe_errors = 0
+    missing_pictures = 0
+    fatal_patterns = (
+        "Error opening input",
+        "Invalid data found when processing input",
+        "moov atom not found",
+        "does not contain any stream",
+        "matches no streams",
+    )
+    severe_patterns = (
+        "Invalid NAL unit size",
+        "Error splitting the input into NAL units",
+    )
+    try:
+        if process.stderr is not None:
+            for raw_line in process.stderr:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if any(pattern in line for pattern in fatal_patterns):
+                    fatal_error = line
+                    first_severe_error = line
+                    severe_errors = max(severe_errors, severe_limit or 1)
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                    break
+                elif any(pattern in line for pattern in severe_patterns):
+                    severe_errors += 1
+                    if not first_severe_error:
+                        first_severe_error = line
+                elif "missing picture in access unit" in line:
+                    missing_pictures += 1
+
+                if (
+                    (severe_limit is not None and severe_errors >= severe_limit)
+                    or (missing_limit is not None and missing_pictures >= missing_limit)
+                ):
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                    break
+        try:
+            return_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return_code = process.wait(timeout=5)
+    finally:
+        if process.stderr is not None:
+            process.stderr.close()
+
+    if fatal_error:
+        return compact_error(fatal_error)
+    if severe_limit is not None and severe_errors >= severe_limit:
+        return (
+            f"{compact_error(first_severe_error)}；"
+            f"连续检测到 {severe_errors} 条严重码流错误"
+        )
+    if missing_limit is not None and missing_pictures >= missing_limit:
+        return f"连续检测到 {missing_pictures} 条缺失画面错误"
+    if return_code != 0:
+        if severe_limit is None and missing_limit is None and (severe_errors or missing_pictures):
+            return None
+        return f"FFmpeg 视频流校验失败，退出码 {return_code}"
+    return None
+
+
+def unique_quarantine_path(directory: Path, file_name: str) -> Path:
+    candidate = directory / file_name
+    if not candidate.exists():
+        return candidate
+    stem = Path(file_name).stem
+    suffix = Path(file_name).suffix
+    for index in range(1, 10_000):
+        candidate = directory / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise OSError(f"无法为错误视频生成唯一文件名: {file_name}")
+
+
+def quarantine_video(video_path: Path, error_dir: Path) -> Path:
+    error_dir.mkdir(parents=True, exist_ok=True)
+    destination = unique_quarantine_path(error_dir, video_path.name)
+    return Path(shutil.move(str(video_path), str(destination))).resolve()
+
+
+def record_quarantine(
+    error_dir: Path,
+    original_path: Path,
+    destination_path: Path,
+    reason: str,
+) -> None:
+    manifest = error_dir / "quarantine_manifest.jsonl"
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "original_path": display_path(original_path),
+        "destination_path": display_path(destination_path),
+        "reason": compact_error(reason),
+    }
+    with manifest.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def is_video_decode_failure(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in (
+            "cannot open video",
+            "decoded no usable frames",
+            "no frames retained",
+            "error splitting the input",
+            "invalid nal unit",
+            "failed to decode",
+            "unable to decode",
+            "decord",
+        )
+    )
+
+
+TASK_STAGE_DEFINITIONS = (
+    ("scan", "扫描与码流校验", 12.0),
+    ("cache", "检查可复用缓存", 8.0),
+    ("features", "动态抽帧与特征提取", 35.0),
+    ("candidate", "候选视频粗筛", 8.0),
+    ("compare", "视频两两比较", 30.0),
+    ("report", "生成分析报告", 7.0),
+)
+TASK_STAGE_IDS = tuple(stage_id for stage_id, _, _ in TASK_STAGE_DEFINITIONS)
+PHASE_TO_TASK_STAGE = {
+    "scan": "scan",
+    "model": "cache",
+    "index": "features",
+    "candidate": "candidate",
+    "compare": "compare",
+    "report": "report",
+}
+
+
+def default_task_stages() -> list[dict]:
+    return [
+        {
+            "id": stage_id,
+            "label": label,
+            "status": "pending",
+            "progress": 0.0,
+            "weight": weight,
+            "startedAt": "",
+            "completedAt": "",
+            "elapsedMs": 0,
+            "message": "等待前置阶段完成",
+        }
+        for stage_id, label, weight in TASK_STAGE_DEFINITIONS
+    ]
+
+
+def merge_task_stages(existing_stages) -> list[dict]:
+    existing = {
+        str(stage.get("id")): stage
+        for stage in (existing_stages or [])
+        if isinstance(stage, dict) and stage.get("id")
+    }
+    stages = default_task_stages()
+    for stage in stages:
+        stage.update(existing.get(stage["id"], {}))
+    return stages
+
+
+def task_stage_index(stage_id: str) -> int:
+    try:
+        return TASK_STAGE_IDS.index(stage_id)
+    except ValueError:
+        return -1
+
+
+def task_stage_progress(stages: list[dict]) -> float:
+    total_weight = sum(max(0.0, float(stage.get("weight") or 0.0)) for stage in stages)
+    if total_weight <= 0:
+        return 0.0
+    completed = sum(
+        max(0.0, float(stage.get("weight") or 0.0))
+        * min(100.0, max(0.0, float(stage.get("progress") or 0.0)))
+        / 100.0
+        for stage in stages
+    )
+    return round(completed / total_weight * 100.0, 2)
+
+
+def parse_iso_time(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def update_task_stage(
+    stage_id: str,
+    status: str,
+    progress: float,
+    message: str,
+) -> None:
+    if globals().get("ACTIVE_TASK_MANIFEST_PATH") is None:
+        return
+    stages = merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages"))
+    stage = next((item for item in stages if item["id"] == stage_id), None)
+    if stage is None:
+        return
+
+    now = datetime.now()
+    previous_status = str(stage.get("status") or "pending")
+    if status == "running" and previous_status != "running":
+        stage["startedAt"] = now.isoformat()
+        stage["completedAt"] = ""
+    if status in {"paused", "completed", "failed"} and previous_status == "running":
+        started_at = parse_iso_time(stage.get("startedAt", ""))
+        if started_at is not None:
+            stage["elapsedMs"] = max(0, int(stage.get("elapsedMs") or 0)) + max(
+                0,
+                int((now - started_at).total_seconds() * 1000),
+            )
+        stage["startedAt"] = ""
+    if status == "completed":
+        stage["completedAt"] = now.isoformat()
+        progress = 100.0
+
+    stage["status"] = status
+    stage["progress"] = round(min(100.0, max(0.0, float(progress))), 2)
+    stage["message"] = message
+    active_stage = stage_id if status in {"running", "paused"} else ""
+    update_task_manifest(
+        status="running" if status == "running" else ACTIVE_TASK_MANIFEST.get("status", "running"),
+        stages=stages,
+        activeStage=active_stage,
+        progress=task_stage_progress(stages),
+        stage=message,
+    )
+
+
+def reset_task_stage_and_downstream(stage_id: str) -> None:
+    stages = merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages"))
+    index = task_stage_index(stage_id)
+    if index < 0:
+        return
+    for stage in stages[index:]:
+        stage.update({
+            "status": "pending",
+            "progress": 0.0,
+            "startedAt": "",
+            "completedAt": "",
+            "elapsedMs": 0,
+            "message": "等待前置阶段完成",
+        })
+    update_task_manifest(
+        stages=stages,
+        activeStage="",
+        progress=task_stage_progress(stages),
+        completedPairs=0 if stage_id in {"scan", "cache", "features", "candidate", "compare"} else ACTIVE_TASK_MANIFEST.get("completedPairs", 0),
+    )
+
+
+def validate_stage_prerequisites(stage_id: str) -> None:
+    index = task_stage_index(stage_id)
+    if index < 0:
+        raise ValueError(f"Unknown task stage: {stage_id}")
+    stages = merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages"))
+    incomplete = [
+        stage["label"]
+        for stage in stages[:index]
+        if stage.get("status") != "completed"
+    ]
+    if incomplete:
+        raise RuntimeError(f"请先完成前置阶段：{'、'.join(incomplete)}")
+
+
+def finish_stage_only(stage_id: str) -> bool:
+    target_stage = str(globals().get("TARGET_TASK_STAGE") or "")
+    if target_stage != stage_id:
+        return False
+    stages = merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages"))
+    label = next((stage["label"] for stage in stages if stage["id"] == stage_id), stage_id)
+    update_task_manifest(
+        status="staged",
+        activeStage="",
+        progress=task_stage_progress(stages),
+        stage=f"{label}完成，可继续下一阶段",
+    )
+    return True
+
+
+def record_task_cache_artifact(path: Path, description: str) -> None:
+    artifacts = [
+        item
+        for item in (ACTIVE_TASK_MANIFEST.get("cacheArtifacts") or [])
+        if isinstance(item, dict) and item.get("path")
+    ]
+    normalized = str(path.resolve(strict=False))
+    if any(str(item.get("path")) == normalized for item in artifacts):
+        return
+    artifacts.append({
+        "path": normalized,
+        "category": "任务生成缓存",
+        "description": description,
+        "createdAt": datetime.now().isoformat(),
+    })
+    update_task_manifest(cacheArtifacts=artifacts, generatedVideoCaches=len(artifacts))
 
 
 def emit_progress(
@@ -79,6 +496,18 @@ def emit_progress(
             progress_text(sub_label),
         ])
     log("|".join(parts))
+    if globals().get("ACTIVE_TASK_MANIFEST_PATH") is not None:
+        ratio = min(1.0, max(0.0, float(current) / max(float(total), 1.0)))
+        stage_id = PHASE_TO_TASK_STAGE.get(phase)
+        if stage_id and (not TARGET_TASK_STAGE or stage_id == TARGET_TASK_STAGE):
+            update_task_stage(
+                stage_id,
+                "completed" if ratio >= 1.0 else "running",
+                ratio * 100.0,
+                message,
+            )
+        elif phase == "done":
+            update_task_manifest(status="completed", progress=100.0, stage=message, activeStage="")
 
 
 def emit_candidate_progress(
@@ -102,23 +531,56 @@ def emit_candidate_progress(
     )
 
 
-def probe_video_frame_count(video_path: Path) -> int:
-    try:
-        from decord import VideoReader, cpu
-
-        return max(1, int(len(VideoReader(str(video_path), ctx=cpu(0), num_threads=1))))
-    except Exception:
+def probe_video_frame_count(video_path: Path, ffmpeg: str = "") -> int:
+    ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    ffprobe = Path(ffmpeg).with_name(ffprobe_name) if ffmpeg else None
+    if ffprobe and ffprobe.is_file():
         try:
-            import cv2
+            result = subprocess.run(
+                [
+                    str(ffprobe),
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=nb_frames,avg_frame_rate,duration",
+                    "-of",
+                    "json",
+                    str(video_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            stream = (json.loads(result.stdout or "{}").get("streams") or [{}])[0]
+            frame_count = int(stream.get("nb_frames") or 0)
+            if frame_count > 0:
+                return frame_count
+            duration = float(stream.get("duration") or 0)
+            numerator, denominator = str(stream.get("avg_frame_rate") or "0/1").split("/", 1)
+            fps = float(numerator) / max(float(denominator), 1.0)
+            if duration > 0 and fps > 0:
+                return max(1, int(round(duration * fps)))
+        except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
 
-            capture = cv2.VideoCapture(str(video_path))
-            if not capture.isOpened():
-                return 1
-            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            capture.release()
-            return max(1, frame_count)
-        except Exception:
+    try:
+        import cv2
+
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
             return 1
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        capture.release()
+        return max(1, frame_count)
+    except Exception:
+        return 1
 
 
 class AnalysisCancelled(Exception):
@@ -144,8 +606,7 @@ def file_fingerprint(path: Path) -> dict:
 
 def build_resume_signature(videos: list[Path], args, preprocess_config, resolved_device: str) -> dict:
     return {
-        "containment_scoring_version": 3,
-        "videos": [file_fingerprint(path) for path in videos],
+        "containment_scoring_version": 4,
         "skip_threshold": args.skip_threshold,
         "max_gap_sec": args.max_gap_sec,
         "frame_step": max(1, int(args.frame_step)),
@@ -156,6 +617,10 @@ def build_resume_signature(videos: list[Path], args, preprocess_config, resolved
         "min_segment_matches": args.min_segment_matches,
         "offset_tolerance": args.offset_tolerance,
         "force": bool(args.force),
+        "error_tolerance": args.error_tolerance,
+        "error_severe_limit": args.error_severe_limit,
+        "error_missing_limit": args.error_missing_limit,
+        "preflight_validation": not args.skip_stream_validation,
         "crop_black_borders": preprocess_config.crop_black_borders,
         "resize_mode": preprocess_config.resize_mode.value,
         "input_size": preprocess_config.input_size,
@@ -165,8 +630,27 @@ def build_resume_signature(videos: list[Path], args, preprocess_config, resolved
 
 
 def pair_key(video_a: Path, video_b: Path) -> str:
-    left, right = sorted([str(video_a.resolve()), str(video_b.resolve())])
+    identities = []
+    for path in (video_a, video_b):
+        fingerprint = file_fingerprint(path)
+        identities.append(
+            f"{fingerprint.get('path', '')}|{fingerprint.get('size')}|{fingerprint.get('mtime_ns')}"
+        )
+    left, right = sorted(identities)
     return f"{left}||{right}"
+
+
+def task_video_records(videos: list[Path]) -> list[dict]:
+    records = []
+    for video_path in videos:
+        fingerprint = file_fingerprint(video_path)
+        mtime_ns = fingerprint.get("mtime_ns")
+        records.append({
+            "path": fingerprint.get("path", ""),
+            "size": fingerprint.get("size"),
+            "mtimeMs": int(mtime_ns // 1_000_000) if isinstance(mtime_ns, int) else None,
+        })
+    return records
 
 
 def resume_state_path(report_dir: Path, input_dir: Path, signature: dict) -> Path:
@@ -332,6 +816,179 @@ def save_resume_pairs(
     raise OSError(f"SQLite resume checkpoint is unavailable: {last_error}")
 
 
+ACTIVE_TASK_MANIFEST_PATH: Path | None = None
+ACTIVE_TASK_MANIFEST: dict = {}
+TARGET_TASK_STAGE = ""
+
+
+def task_state_path(cache_dir: Path, task_id: str) -> Path:
+    safe_task_id = "".join(
+        character
+        for character in str(task_id)
+        if character.isascii() and (character.isalnum() or character in {"-", "_"})
+    )
+    if not safe_task_id:
+        safe_task_id = f"analysis-{int(time.time() * 1000)}"
+    return cache_dir / "cache" / "tasks" / safe_task_id / "resume.state.json"
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f"{path.name}.{os.getpid()}.pending")
+    with open(pending, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(pending, path)
+
+
+def parse_task_config(raw_value: str) -> dict:
+    if not raw_value:
+        return {}
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def start_task_manifest(
+    manifest_path: Path,
+    task_id: str,
+    input_dir: Path,
+    videos: list[Path],
+    total_pairs: int,
+    completed_pairs: int,
+    match_key: str,
+    config: dict,
+    output_base: Path,
+) -> None:
+    global ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST
+    existing = {}
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+
+    now = datetime.now().isoformat()
+    video_records = task_video_records(videos)
+    ACTIVE_TASK_MANIFEST_PATH = manifest_path
+    ACTIVE_TASK_MANIFEST = {
+        **existing,
+        "version": 1,
+        "id": task_id,
+        "status": "running",
+        "createdAt": existing.get("createdAt") or now,
+        "updatedAt": now,
+        "videoDir": display_path(input_dir),
+        "videoCount": len(video_records),
+        "totalPairs": max(0, int(total_pairs)),
+        "completedPairs": max(0, int(completed_pairs)),
+        "progress": task_stage_progress(merge_task_stages(existing.get("stages"))),
+        "stage": "正在恢复历史进度" if completed_pairs else "准备比较视频对",
+        "matchKey": match_key,
+        "videos": video_records,
+        "config": config,
+        "reportJson": str(output_base.with_suffix(".json")),
+        "reportCsv": str(output_base.with_suffix(".csv")),
+        "reportHtml": str(output_base.with_suffix(".html")),
+        "activeStage": existing.get("activeStage") or "",
+        "stages": merge_task_stages(existing.get("stages")),
+        "cacheArtifacts": existing.get("cacheArtifacts") or [],
+        "reusedVideoCaches": int(existing.get("reusedVideoCaches") or 0),
+        "generatedVideoCaches": int(existing.get("generatedVideoCaches") or 0),
+    }
+    write_json_atomic(manifest_path, ACTIVE_TASK_MANIFEST)
+
+
+def activate_task_manifest(
+    cache_dir: Path,
+    task_id: str,
+    input_dir: Path,
+    videos: list[Path],
+    match_key: str,
+    config: dict,
+) -> None:
+    global ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST
+    manifest_path = task_state_path(cache_dir, task_id).parent / "task.json"
+    existing = {}
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+
+    now = datetime.now().isoformat()
+    fingerprints = task_video_records(videos)
+    previous_fingerprints = {
+        (item.get("path"), item.get("size"), item.get("mtimeMs"))
+        for item in (existing.get("videos") or [])
+        if isinstance(item, dict)
+    }
+    current_fingerprints = {
+        (item.get("path"), item.get("size"), item.get("mtimeMs"))
+        for item in fingerprints
+    }
+    directory_changed = bool(previous_fingerprints) and previous_fingerprints != current_fingerprints
+    stages = merge_task_stages(existing.get("stages"))
+    if directory_changed:
+        for stage in stages:
+            stage.update({
+                "status": "pending",
+                "progress": 0.0,
+                "startedAt": "",
+                "completedAt": "",
+                "elapsedMs": 0,
+                "message": "视频目录已变化，等待重新处理",
+            })
+    total_pairs = max(0, len(videos) * (len(videos) - 1) // 2)
+    ACTIVE_TASK_MANIFEST_PATH = manifest_path
+    ACTIVE_TASK_MANIFEST = {
+        **existing,
+        "version": 1,
+        "id": task_id,
+        "status": "running",
+        "createdAt": existing.get("createdAt") or now,
+        "updatedAt": now,
+        "videoDir": display_path(input_dir),
+        "videoCount": len(videos),
+        "totalPairs": total_pairs,
+        "completedPairs": 0 if directory_changed else max(0, int(existing.get("completedPairs") or 0)),
+        "progress": task_stage_progress(stages),
+        "stage": "检测到增量视频，正在重新校验并复用未变化缓存" if directory_changed else "正在校验视频码流",
+        "matchKey": match_key,
+        "videos": fingerprints,
+        "config": config or existing.get("config") or {},
+        "reportJson": existing.get("reportJson") or "",
+        "reportCsv": existing.get("reportCsv") or "",
+        "reportHtml": existing.get("reportHtml") or "",
+        "activeStage": existing.get("activeStage") or "",
+        "stages": stages,
+        "cacheArtifacts": existing.get("cacheArtifacts") or [],
+        "reusedVideoCaches": int(existing.get("reusedVideoCaches") or 0),
+        "generatedVideoCaches": int(existing.get("generatedVideoCaches") or 0),
+    }
+    write_json_atomic(manifest_path, ACTIVE_TASK_MANIFEST)
+
+
+def update_task_manifest(**patch) -> None:
+    if ACTIVE_TASK_MANIFEST_PATH is None or not ACTIVE_TASK_MANIFEST:
+        return
+    ACTIVE_TASK_MANIFEST.update(patch)
+    ACTIVE_TASK_MANIFEST["updatedAt"] = datetime.now().isoformat()
+    try:
+        write_json_atomic(ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST)
+    except OSError as error:
+        log(f"Warning: Failed to update task history: {compact_error(error)}")
+
+
 def resume_pair_database_path(state_path: Path, signature: dict) -> Path:
     signature_json = json.dumps(signature, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     signature_hash = hashlib.sha256(signature_json.encode("utf-8")).hexdigest()[:16]
@@ -342,6 +999,19 @@ def resume_pair_store_dir(state_path: Path, signature: dict) -> Path:
     signature_json = json.dumps(signature, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     signature_hash = hashlib.sha256(signature_json.encode("utf-8")).hexdigest()[:16]
     return state_path.with_name(f"{state_path.stem}.pairs-{signature_hash}")
+
+
+def clear_resume_pairs(state_path: Path, signature: dict) -> None:
+    database_path = resume_pair_database_path(state_path, signature)
+    for path in (
+        database_path,
+        database_path.with_name(f"{database_path.name}-wal"),
+        database_path.with_name(f"{database_path.name}-shm"),
+    ):
+        path.unlink(missing_ok=True)
+    pair_dir = resume_pair_store_dir(state_path, signature)
+    if pair_dir.exists():
+        shutil.rmtree(pair_dir)
 
 
 def add_preprocess_args(parser: argparse.ArgumentParser) -> None:
@@ -572,14 +1242,70 @@ def main():
         help="Force re-extraction of embeddings, ignoring existing cache",
     )
     parser.add_argument(
+        "--error-tolerance",
+        type=str,
+        default="balanced",
+        choices=["strict", "balanced", "lenient", "failure_only", "custom"],
+        help="Video decode error tolerance preset (default: balanced)",
+    )
+    parser.add_argument(
+        "--error-severe-limit",
+        type=int,
+        default=-1,
+        help="Custom severe stream error threshold; 0 disables this threshold",
+    )
+    parser.add_argument(
+        "--error-missing-limit",
+        type=int,
+        default=-1,
+        help="Custom missing-picture threshold; 0 disables this threshold",
+    )
+    parser.add_argument(
+        "--skip-stream-validation",
+        action="store_true",
+        help="Skip the full FFmpeg preflight stream validation pass",
+    )
+    parser.add_argument(
         "--cancel-file",
         type=str,
         default="",
         help="Path to a cancellation flag file created by the desktop app",
     )
+    parser.add_argument(
+        "--task-id",
+        type=str,
+        default="",
+        help="Persistent desktop task id used for comparison resume history",
+    )
+    parser.add_argument(
+        "--task-match-key",
+        type=str,
+        default="",
+        help="Desktop-generated key for matching the same directory and analysis configuration",
+    )
+    parser.add_argument(
+        "--task-config-json",
+        type=str,
+        default="",
+        help="Serialized desktop run configuration stored with task history",
+    )
+    parser.add_argument(
+        "--target-stage",
+        type=str,
+        default="",
+        choices=["", *TASK_STAGE_IDS],
+        help="Run through one task stage and stop after it completes",
+    )
+    parser.add_argument(
+        "--redo-stage",
+        action="store_true",
+        help="Reset the target stage and all downstream task stages before running",
+    )
     # Add preprocessing arguments
     add_preprocess_args(parser)
     args = parser.parse_args()
+    global TARGET_TASK_STAGE
+    TARGET_TASK_STAGE = args.target_stage
 
     emit_progress("scan", 0, 1, "加载视频扫描模块")
     from video_sim.preprocess import PreprocessConfig
@@ -597,39 +1323,140 @@ def main():
         log(f"Error: Input directory not found: {input_dir}")
         sys.exit(1)
 
-    # Scan for videos
+    # Scan and validate videos before Decord opens them. Native decoder errors
+    # are captured here so a damaged file can be quarantined after the first
+    # error instead of flooding the desktop stderr log.
     emit_progress("scan", 0, 1, "扫描视频目录")
     log(f"Scanning for videos in: {input_dir}")
-    videos = scan_videos(input_dir, recursive=True)
+    project_root = Path.cwd().resolve()
+    error_video_dir = project_root / "data" / "error_videos"
+    scanned_videos = [
+        path
+        for path in scan_videos(input_dir, recursive=True)
+        if error_video_dir not in path.resolve().parents
+    ]
     raise_if_cancelled(cancel_file)
 
-    if len(videos) < 2:
-        log(f"Error: Need at least 2 videos for comparison, found {len(videos)}")
+    if len(scanned_videos) < 2:
+        log(f"Error: Need at least 2 videos for comparison, found {len(scanned_videos)}")
         sys.exit(1)
 
-    log(f"Found {len(videos)} videos")
+    log(f"Found {len(scanned_videos)} videos")
+    task_id = args.task_id or f"analysis-{int(time.time() * 1000)}"
+    activate_task_manifest(
+        cache_dir,
+        task_id,
+        input_dir,
+        scanned_videos,
+        args.task_match_key,
+        parse_task_config(args.task_config_json),
+    )
+    if args.target_stage:
+        validate_stage_prerequisites(args.target_stage)
+        if args.redo_stage:
+            reset_task_stage_and_downstream(args.target_stage)
+    ffmpeg = resolve_ffmpeg(project_root)
+    videos = []
     video_frame_counts = {}
-    for probe_index, video_path in enumerate(videos, start=1):
+    removed_videos = 0
+    original_video_count = len(scanned_videos)
+    for probe_index, video_path in enumerate(scanned_videos, start=1):
         raise_if_cancelled(cancel_file)
         emit_progress(
             "scan",
             probe_index - 1,
-            len(videos),
-            f"读取视频信息 {probe_index}/{len(videos)}：{video_path.name}",
+            original_video_count,
+            f"校验视频 {probe_index}/{original_video_count}：{video_path.name}",
             probe_index - 1,
-            len(videos),
-            "读取视频帧数",
+            original_video_count,
+            "校验视频码流",
         )
-        video_frame_counts[video_path] = probe_video_frame_count(video_path)
+        validation_error = None
+        if not args.skip_stream_validation:
+            validation_error = validate_video_stream(
+                ffmpeg,
+                video_path,
+                args.error_tolerance,
+                None if args.error_severe_limit < 0 else args.error_severe_limit,
+                None if args.error_missing_limit < 0 else args.error_missing_limit,
+            )
+        if validation_error:
+            original_path = video_path.resolve()
+            emit_progress(
+                "scan",
+                probe_index - 1,
+                original_video_count,
+                f"正在隔离错误视频：{video_path.name}",
+                probe_index - 1,
+                original_video_count,
+                "移动到 data/error_videos",
+            )
+            destination_path = None
+            move_error = ""
+            try:
+                destination_path = quarantine_video(video_path, error_video_dir)
+                record_quarantine(
+                    error_video_dir,
+                    original_path,
+                    destination_path,
+                    validation_error,
+                )
+            except OSError as error:
+                move_error = compact_error(error)
+
+            removed_videos += 1
+            remaining_videos = original_video_count - removed_videos
+            emit_video_quarantined(
+                original_path,
+                destination_path or error_video_dir,
+                remaining_videos,
+                removed_videos,
+                moved=destination_path is not None,
+            )
+            if destination_path is not None:
+                print(
+                    f"错误视频：{original_path}；原因：{validation_error}；"
+                    f"已移动到data/error_videos目录：{destination_path}；"
+                    f"已移出比较列表，剩余 {remaining_videos} 个视频。",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"错误视频：{original_path}；原因：{validation_error}；"
+                    f"移动到data/error_videos目录失败：{move_error}；"
+                    f"已移出比较列表，剩余 {remaining_videos} 个视频。",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            continue
+
+        video_frame_counts[video_path] = probe_video_frame_count(video_path, ffmpeg)
+        videos.append(video_path)
+
+    if len(videos) < 2:
+        log(
+            "Error: Need at least 2 valid videos for comparison after quarantining "
+            f"{removed_videos} damaged video(s), found {len(videos)}"
+        )
+        sys.exit(1)
+
     emit_progress(
         "scan",
-        len(videos),
-        len(videos),
-        f"扫描完成：找到 {len(videos)} 个视频",
-        len(videos),
-        len(videos),
+        original_video_count,
+        original_video_count,
+        f"扫描完成：可比较 {len(videos)} 个视频，已隔离 {removed_videos} 个错误视频",
+        original_video_count,
+        original_video_count,
         "视频信息读取完成",
     )
+    update_task_manifest(
+        videos=task_video_records(videos),
+        videoCount=len(videos),
+        totalPairs=max(0, len(videos) * (len(videos) - 1) // 2),
+    )
+    if finish_stage_only("scan"):
+        return
 
     # Resolve device
     emit_progress("model", 0, 1, "准备运行设备")
@@ -650,17 +1477,54 @@ def main():
         f"竖屏旋转(portrait_rotation)={preprocess_config.portrait_rotation.value}, "
         f"扫描步长(frame_step)={max(1, int(args.frame_step))}"
     )
+    log(
+        "错误容忍(error_tolerance)="
+        f"{args.error_tolerance}, severe_limit={args.error_severe_limit}, "
+        f"missing_limit={args.error_missing_limit}, "
+        f"preflight_validation={not args.skip_stream_validation}"
+    )
 
-    # Load CLIP lazily. Valid caches can skip model initialization entirely.
-    emit_progress("model", 0, 1, "检查视频缓存，必要时按需加载 CLIP 模型")
-    log("Model loading is lazy: valid cached videos skip CLIP initialization.")
-    embedder = None
-    emit_progress("model", 1, 1, "缓存检查准备完成")
+    # Audit exact-profile caches before extraction. Cache hits are retained in
+    # memory so the feature stage does not load the same NPZ twice.
+    emit_progress("model", 0, max(1, len(videos)), "检查可复用视频特征缓存")
+    from video_sim.embedder import FrameEmbeddingCache
+
+    video_caches = {}
+    cache_hits = 0
+    cache_misses = []
+    force_feature_redo = args.target_stage == "features" and args.redo_stage
+    for cache_index, video_path in enumerate(videos, start=1):
+        raise_if_cancelled(cancel_file)
+        cache = None if args.force or force_feature_redo else FrameEmbeddingCache.load_valid(
+            video_path,
+            cache_dir,
+            preprocess_config,
+            skip_threshold=args.skip_threshold,
+            max_gap_sec=args.max_gap_sec,
+            frame_step=args.frame_step,
+        )
+        if cache is None:
+            cache_misses.append(video_path)
+        else:
+            video_caches[video_path] = cache
+            cache_hits += 1
+        emit_progress(
+            "model",
+            cache_index,
+            max(1, len(videos)),
+            f"缓存检查 {cache_index}/{len(videos)}：{video_path.name}",
+            cache_index,
+            max(1, len(videos)),
+            f"可复用 {cache_hits} 个，需处理 {len(cache_misses)} 个",
+        )
+    update_task_manifest(reusedVideoCaches=cache_hits)
+    log(f"Cache audit: {cache_hits} reusable, {len(cache_misses)} require extraction.")
+    if finish_stage_only("cache"):
+        return
 
     # Index all videos
     log("\nIndexing videos...")
-    video_caches = {}
-    cache_hits = 0
+    embedder = None
     cache_rebuilds = 0
     warnings = []
     index_video_units = {
@@ -669,11 +1533,24 @@ def main():
     }
     index_units_total = max(1.0, sum(index_video_units.values()))
     index_units_done = 0.0
+    index_quarantined = set()
 
     for index, video_path in enumerate(videos, start=1):
         raise_if_cancelled(cancel_file)
         video_units = index_video_units[video_path]
         video_total_frames = max(1, int(video_frame_counts.get(video_path, 1)))
+        if video_path in video_caches:
+            index_units_done += video_units
+            emit_progress(
+                "index",
+                index_units_done,
+                index_units_total,
+                f"复用特征缓存 {index}/{len(videos)}：{video_path.name}",
+                1,
+                1,
+                f"当前视频：{video_path.name} · 已复用缓存",
+            )
+            continue
         sample_started = False
         sample_completed = False
         sample_log_emitted = False
@@ -688,6 +1565,8 @@ def main():
             1,
             f"当前视频：{video_path.name}",
         )
+        log(f"  Indexing video {index}/{len(videos)}: {display_path(video_path)}")
+        emit_video_context(video_path, "index")
 
         def emit_sample_log(success: bool, reason: str = ""):
             nonlocal sample_log_emitted
@@ -747,7 +1626,7 @@ def main():
                 args.frame_step,
                 resolved_device,
                 embedder,
-                args.force,
+                args.force or force_feature_redo,
                 preprocess_config,
                 on_sample_progress,
                 on_embed_progress,
@@ -758,6 +1637,18 @@ def main():
             else:
                 cache_rebuilds += 1
                 emit_sample_log(True)
+                cache_path = FrameEmbeddingCache.get_cache_path(
+                    video_path,
+                    cache_dir,
+                    preprocess_config,
+                    skip_threshold=args.skip_threshold,
+                    max_gap_sec=args.max_gap_sec,
+                    frame_step=args.frame_step,
+                )
+                record_task_cache_artifact(
+                    cache_path,
+                    f"视频 {video_path.name} 的抽帧与特征缓存；同配置增量任务可以复用",
+                )
             index_units_done += video_units
             emit_progress(
                 "index",
@@ -771,6 +1662,48 @@ def main():
         except AnalysisCancelled:
             raise
         except Exception as e:
+            if is_video_decode_failure(e):
+                original_path = video_path.resolve()
+                destination_path = None
+                move_error = ""
+                try:
+                    destination_path = quarantine_video(video_path, error_video_dir)
+                    record_quarantine(
+                        error_video_dir,
+                        original_path,
+                        destination_path,
+                        str(e),
+                    )
+                except OSError as error:
+                    move_error = compact_error(error)
+                index_quarantined.add(video_path)
+                removed_videos += 1
+                remaining_videos = len(videos) - len(index_quarantined)
+                emit_video_quarantined(
+                    original_path,
+                    destination_path or error_video_dir,
+                    remaining_videos,
+                    removed_videos,
+                    moved=destination_path is not None,
+                )
+                if destination_path is not None:
+                    print(
+                        f"错误视频：{original_path}；原因：{compact_error(e)}；"
+                        f"已移动到data/error_videos目录：{destination_path}；"
+                        f"已移出比较列表，剩余 {remaining_videos} 个视频。",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"错误视频：{original_path}；原因：{compact_error(e)}；"
+                        f"移动到data/error_videos目录失败：{move_error}；"
+                        f"已移出比较列表，剩余 {remaining_videos} 个视频。",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                index_units_done += video_units
+                continue
             if not sample_log_emitted:
                 if sample_completed:
                     emit_sample_log(True)
@@ -790,8 +1723,19 @@ def main():
                 f"当前视频：{video_path.name} · 处理失败",
             )
 
+    if index_quarantined:
+        videos = [video_path for video_path in videos if video_path not in index_quarantined]
+
     log(f"\nSuccessfully indexed {len(video_caches)}/{len(videos)} videos")
+    if len(video_caches) < 2:
+        log(
+            "Error: Fewer than 2 valid videos remain after decoding and indexing; "
+            "comparison cannot continue."
+        )
+        sys.exit(1)
     raise_if_cancelled(cancel_file)
+    if finish_stage_only("features"):
+        return
 
     # Generate output path if not specified
     if args.output:
@@ -804,7 +1748,9 @@ def main():
 
     output_base.parent.mkdir(parents=True, exist_ok=True)
     resume_signature = build_resume_signature(videos, args, preprocess_config, resolved_device)
-    state_path = resume_state_path(output_base.parent, input_dir, resume_signature)
+    state_path = task_state_path(cache_dir, task_id)
+    if args.target_stage == "compare" and args.redo_stage:
+        clear_resume_pairs(state_path, resume_signature)
     resume_state = load_resume_state(state_path, resume_signature)
     resumed_pair_count = len(resume_state.get("pairs", {}))
     if resumed_pair_count:
@@ -857,11 +1803,33 @@ def main():
         )
     else:
         log(f"Candidate screening disabled: comparing all {total_pairs} video pairs")
+    candidate_pair_keys = {
+        pair_key(video_a, video_b)
+        for video_a, video_b in video_pairs
+    }
+    resumed_candidate_pairs = {
+        key
+        for key in resume_state.get("pairs", {})
+        if key in candidate_pair_keys
+    }
+    start_task_manifest(
+        state_path.parent / "task.json",
+        task_id,
+        input_dir,
+        indexed_videos,
+        total_pairs,
+        len(resumed_candidate_pairs),
+        args.task_match_key,
+        parse_task_config(args.task_config_json),
+        output_base,
+    )
     emit_candidate_progress(
         max(1, len(indexed_videos)),
         max(1, len(indexed_videos)),
         f"候选粗筛完成：保留 {total_pairs}/{candidate_selection.all_pair_count} 对",
     )
+    if finish_stage_only("candidate"):
+        return
     log(f"\nComparing {total_pairs} video pairs...")
     log(f"Cache hits: {cache_hits}, rebuilt: {cache_rebuilds}")
 
@@ -881,7 +1849,22 @@ def main():
         for video_a, video_b in video_pairs
     }
     compare_units_total = max(1.0, sum(pair_units.values()))
-    compare_units_done = 0.0
+    compare_units_done = sum(
+        pair_units[key]
+        for key in resumed_candidate_pairs
+        if key in pair_units
+    )
+    completed_pair_count = len(resumed_candidate_pairs)
+    if completed_pair_count:
+        emit_progress(
+            "compare",
+            compare_units_done,
+            compare_units_total,
+            f"已恢复 {completed_pair_count}/{total_pairs} 个视频对，继续分析",
+            completed_pair_count,
+            max(1, total_pairs),
+            "恢复历史比较进度",
+        )
 
     for pair_index, (video_a, video_b) in enumerate(video_pairs, start=1):
         raise_if_cancelled(cancel_file)
@@ -901,16 +1884,6 @@ def main():
         if cached_pair:
             report_data.video_pairs.append(cached_pair)
             log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
-            compare_units_done += current_pair_units
-            emit_progress(
-                "compare",
-                compare_units_done,
-                compare_units_total,
-                f"跳过已完成视频对 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
-                1,
-                1,
-                f"{pair_sub_label} · 已完成缓存",
-            )
             continue
 
         try:
@@ -991,6 +1964,12 @@ def main():
                 except OSError as checkpoint_error:
                     log(f"Warning: Failed to save resume checkpoint: {compact_error(checkpoint_error)}")
             compare_units_done += current_pair_units
+            completed_pair_count += 1
+            update_task_manifest(
+                completedPairs=completed_pair_count,
+                progress=round(completed_pair_count / max(1, total_pairs) * 100.0, 2),
+                stage=f"已完成视频对 {completed_pair_count}/{total_pairs}",
+            )
             emit_progress(
                 "compare",
                 compare_units_done,
@@ -1022,6 +2001,18 @@ def main():
                 1,
                 f"{pair_sub_label} · 比较失败",
             )
+
+    emit_progress(
+        "compare",
+        compare_units_total,
+        compare_units_total,
+        f"两两比较完成：{len(report_data.video_pairs)}/{total_pairs} 对",
+        len(report_data.video_pairs),
+        max(1, total_pairs),
+        "比较断点已保存",
+    )
+    if finish_stage_only("compare"):
+        return
 
     # Write reports
     emit_progress("report", 0, 1, "写入分析报告")
@@ -1066,6 +2057,15 @@ def main():
         log(f"  {rel}: {count}")
 
     log("=" * 60)
+    update_task_manifest(
+        status="completed",
+        completedPairs=total_pairs,
+        progress=100.0,
+        stage="分析完成",
+        reportJson=str(json_path),
+        reportCsv=str(csv_path),
+        reportHtml=str(html_path),
+    )
     emit_progress("done", 1, 1, "分析完成")
 
 
@@ -1073,5 +2073,33 @@ if __name__ == "__main__":
     try:
         main()
     except AnalysisCancelled as exc:
+        active_stage = str(ACTIVE_TASK_MANIFEST.get("activeStage") or "")
+        if active_stage:
+            stage = next(
+                (item for item in merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages")) if item["id"] == active_stage),
+                None,
+            )
+            update_task_stage(
+                active_stage,
+                "paused",
+                float(stage.get("progress") or 0.0) if stage else 0.0,
+                "阶段已暂停，可继续执行",
+            )
+        update_task_manifest(status="paused", stage="任务已暂停，可从历史任务继续")
         log(str(exc))
         sys.exit(130)
+    except Exception:
+        active_stage = str(ACTIVE_TASK_MANIFEST.get("activeStage") or "")
+        if active_stage:
+            stage = next(
+                (item for item in merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages")) if item["id"] == active_stage),
+                None,
+            )
+            update_task_stage(
+                active_stage,
+                "failed",
+                float(stage.get("progress") or 0.0) if stage else 0.0,
+                "阶段执行失败，可检查日志后重试",
+            )
+        update_task_manifest(status="failed", stage="任务异常中断，可检查日志后继续")
+        raise

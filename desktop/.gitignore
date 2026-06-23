@@ -12,6 +12,7 @@ dist
 dist-ssr
 dist_windows
 dist_windows_gpu
+dist_windows_gpu_quick
 env
 env_gpu
 runtime

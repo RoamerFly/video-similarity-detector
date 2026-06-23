@@ -59,3 +59,19 @@ dist_windows/
 ```
 
 `env/python` 是运行所需的最小 Python 环境，不默认包含 pytest。模型权重不单独复制进 `dist_windows`；离线部署前请先预热 Hugging Face 模型缓存。
+
+## Windows GPU 快速测试构建
+
+已经运行过一次完整 GPU 构建、且 `env_gpu/` 与 `node_modules/` 可用时，可以只增量编译前端和 Tauri EXE：
+
+```powershell
+.\build-windows-gpu-fast.ps1
+
+# 构建完成后立即启动
+.\build-windows-gpu-fast.ps1 -Launch
+
+# 仅修改 Rust/Python、前端 dist 没有变化时
+.\build-windows-gpu-fast.ps1 -SkipFrontendBuild
+```
+
+也可以双击 `build-windows-gpu-fast.bat`。默认输出到 `dist_windows_gpu_quick/`，其中 `env`、`scripts` 和 `video_sim` 使用目录链接复用本地现有内容，不会再次复制完整 CUDA/Python 环境。构建后运行 `run-gpu-test.bat` 即可。该目录仅用于本机快速测试，不适合发送给其他电脑。

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { AlertCircle, ArrowLeft, CheckCircle2, Clapperboard, ExternalLink, Film, FolderOpen, Images, ListPlus, Maximize2, Minimize2, Pause, PlaySquare, RotateCcw, Trash2 } from 'lucide-react'
+import { AlertCircle, ArrowLeft, CheckCircle2, Clapperboard, ExternalLink, Film, FolderOpen, Images, ListPlus, Pause, PlaySquare, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { Badge, GlassPanel, MetricBar, NeonButton, SelectInput } from '@/components/DesignSystem'
 import { captureComparisonFrame, captureVideoFrame, deleteFiles, fileName, formatBytes, localFileSrc, normalizeBackendError, openFile, pathStatus, revealInFolder, type ComparisonFrameOptions, type PathStatus } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
@@ -27,7 +27,8 @@ export function ComparePage() {
   const videoDir = settings.videoDir
   const [direction, setDirection] = useState<DirectionFilter>('all')
   const [frameViewMode, setFrameViewMode] = useState<FrameViewMode>('original')
-  const [previewExpanded, setPreviewExpanded] = useState(false)
+  const [previewRefreshKey, setPreviewRefreshKey] = useState(0)
+  const [previewHeight, setPreviewHeight] = useState(460)
   const [playbackFocus, setPlaybackFocus] = useState<PlaybackFocus>('sync')
   const [syncPlaying, setSyncPlaying] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -67,6 +68,7 @@ export function ComparePage() {
 
   const safeSelectedIndex = Math.min(selectedIndex, Math.max(0, matches.length - 1))
   const selectedMatch = matches[safeSelectedIndex]
+  const fixedMatch = useMemo(() => selectedMatch ? fixedPairFrame(selectedMatch) : null, [selectedMatch])
   const totalFrameMatches = selectedPair
     ? selectedPair.matchesAToBTotal + selectedPair.matchesBToATotal || selectedPair.frameMatches.length
     : 0
@@ -92,11 +94,26 @@ export function ComparePage() {
   ])
 
   const seekBothToSelectedFrame = useCallback(() => {
-    if (!selectedMatch) return
+    if (!fixedMatch) return
     setPlaybackFocus('sync')
-    seekVideoTo(sourceVideoRef.current, selectedMatch.sourceTimestamp)
-    seekVideoTo(targetVideoRef.current, selectedMatch.targetTimestamp)
-  }, [selectedMatch])
+    seekVideoTo(sourceVideoRef.current, fixedMatch.aTimestamp)
+    seekVideoTo(targetVideoRef.current, fixedMatch.bTimestamp)
+  }, [fixedMatch])
+
+  function handlePreviewResizePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    const startY = event.clientY
+    const startHeight = previewHeight
+    const onMove = (moveEvent: PointerEvent) => {
+      setPreviewHeight(Math.max(320, Math.min(window.innerHeight - 230, startHeight + moveEvent.clientY - startY)))
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   const toggleSyncPlayback = useCallback(async () => {
     const source = sourceVideoRef.current
@@ -380,8 +397,8 @@ export function ComparePage() {
     )
   }
 
-  const sourceVideoPath = selectedMatch ? resolveFrameVideoPath(selectedPair, selectedMatch, 'source', videoDir) : ''
-  const targetVideoPath = selectedMatch ? resolveFrameVideoPath(selectedPair, selectedMatch, 'target', videoDir) : ''
+  const sourceVideoPath = selectedMatch ? resolveFixedVideoPath(selectedPair, selectedMatch, 'A', videoDir) : ''
+  const targetVideoPath = selectedMatch ? resolveFixedVideoPath(selectedPair, selectedMatch, 'B', videoDir) : ''
 
   function openVideoContextMenu(event: React.MouseEvent, side: CompareContextSide) {
     event.preventDefault()
@@ -437,7 +454,7 @@ export function ComparePage() {
   }
 
   return (
-    <div className={previewExpanded ? 'route-fill compare-page preview-expanded' : 'route-fill compare-page'}>
+    <div className="route-fill compare-page">
       <GlassPanel className="compare-toolbar-panel">
         <div className="compare-title">
           <button type="button" onClick={() => navigate('/results')} aria-label="返回结果总览">
@@ -475,15 +492,19 @@ export function ComparePage() {
         </div>
       )}
 
-      <GlassPanel className={previewExpanded ? 'compare-preview-panel expanded' : 'compare-preview-panel'}>
+      <GlassPanel
+        className="compare-preview-panel resizable"
+        style={{ height: `${previewHeight}px` }}
+      >
         {selectedMatch ? (
           <>
             <VideoPreview
-              title="源视频(Source)-A"
+              key={`A-${previewRefreshKey}-${selectedMatchKey}`}
+              title="视频 A(Video A)"
               video={formatMatchVideoName(sourceVideoPath, selectedPair.videoA)}
               path={sourceVideoPath}
-              frameIndex={selectedMatch.sourceFrameIndex}
-              timestamp={selectedMatch.sourceTimestamp}
+              frameIndex={fixedMatch?.aFrameIndex ?? null}
+              timestamp={fixedMatch?.aTimestamp ?? null}
               viewMode={frameViewMode}
               side="source"
               comparisonOptions={comparisonFrameOptions}
@@ -535,17 +556,18 @@ export function ComparePage() {
                   显示预处理后的比对画面
                 </em>
               )}
-              <button type="button" className="preview-size-button" onClick={() => setPreviewExpanded((value) => !value)}>
-                {previewExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-                {previewExpanded ? '恢复布局' : '放大视频框'}
+              <button type="button" className="preview-size-button" onClick={() => setPreviewRefreshKey((value) => value + 1)}>
+                <RefreshCw size={15} />
+                刷新
               </button>
             </div>
             <VideoPreview
-              title="目标视频(Target)-B"
+              key={`B-${previewRefreshKey}-${selectedMatchKey}`}
+              title="视频 B(Video B)"
               video={formatMatchVideoName(targetVideoPath, selectedPair.videoB)}
               path={targetVideoPath}
-              frameIndex={selectedMatch.targetFrameIndex}
-              timestamp={selectedMatch.targetTimestamp}
+              frameIndex={fixedMatch?.bFrameIndex ?? null}
+              timestamp={fixedMatch?.bTimestamp ?? null}
               viewMode={frameViewMode}
               side="target"
               comparisonOptions={comparisonFrameOptions}
@@ -562,6 +584,13 @@ export function ComparePage() {
             <p>请重新运行分析，生成包含 matches_a_to_b / matches_b_to_a 时间戳的新报告。</p>
           </div>
         )}
+        <button
+          type="button"
+          className="compare-preview-resize-handle"
+          title="拖动调整视频窗口高度"
+          aria-label="拖动调整视频窗口高度"
+          onPointerDown={handlePreviewResizePointerDown}
+        />
       </GlassPanel>
 
       <div className="compare-detail-grid">
@@ -975,14 +1004,30 @@ function VideoPreview({
   )
 }
 
-function resolveFrameVideoPath(pair: ReportPair, match: ReportFrameMatch, role: 'source' | 'target', videoDir: string) {
-  const isSource = role === 'source'
-  const candidate = isSource ? match.sourceVideo : match.targetVideo
-
+function fixedPairFrame(match: ReportFrameMatch) {
   if (match.direction === 'A_to_B') {
-    return resolveVideoPath(candidate, isSource ? pair.videoAPath : pair.videoBPath, isSource ? pair.videoA : pair.videoB, videoDir)
+    return {
+      aFrameIndex: match.sourceFrameIndex,
+      aTimestamp: match.sourceTimestamp,
+      bFrameIndex: match.targetFrameIndex,
+      bTimestamp: match.targetTimestamp,
+    }
   }
-  return resolveVideoPath(candidate, isSource ? pair.videoBPath : pair.videoAPath, isSource ? pair.videoB : pair.videoA, videoDir)
+  return {
+    aFrameIndex: match.targetFrameIndex,
+    aTimestamp: match.targetTimestamp,
+    bFrameIndex: match.sourceFrameIndex,
+    bTimestamp: match.sourceTimestamp,
+  }
+}
+
+function resolveFixedVideoPath(pair: ReportPair, match: ReportFrameMatch, side: 'A' | 'B', videoDir: string) {
+  const candidate = match.direction === 'A_to_B'
+    ? (side === 'A' ? match.sourceVideo : match.targetVideo)
+    : (side === 'A' ? match.targetVideo : match.sourceVideo)
+  return side === 'A'
+    ? resolveVideoPath(candidate, pair.videoAPath, pair.videoA, videoDir)
+    : resolveVideoPath(candidate, pair.videoBPath, pair.videoB, videoDir)
 }
 
 function getDuplicateGroupPaths(pair: ReportPair | null) {
