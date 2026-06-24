@@ -10,3 +10,5 @@ __pycache__/
 
 video_meta.txt
 faiss_video_index.bin
+
+/clip-vit-base-patch32.zip

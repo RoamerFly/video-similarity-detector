@@ -25,6 +25,7 @@ interface SettingsActions {
   setDefaultWindowSize: (value: number) => void
   setDefaultTopK: (value: number) => void
   setDefaultCandidateLimit: (value: number) => void
+  setDefaultCompareWorkers: (value: number) => void
   setDefaultMaxGapSec: (value: number) => void
   setDefaultFrameStep: (value: number) => void
   setDefaultMinSegmentDuration: (value: number) => void
@@ -88,6 +89,9 @@ export const useSettingsStore = create<SettingsState>()(
       setDefaultTopK: (defaultTopK) => updateAnalysis({ defaultTopK }),
       setDefaultCandidateLimit: (defaultCandidateLimit) => updateAnalysis({
         defaultCandidateLimit: clampMin(defaultCandidateLimit, 0),
+      }),
+      setDefaultCompareWorkers: (defaultCompareWorkers) => set({
+        defaultCompareWorkers: clampMin(defaultCompareWorkers, 1),
       }),
       setDefaultMaxGapSec: (defaultMaxGapSec) => updateAnalysis({ defaultMaxGapSec }),
       setDefaultFrameStep: (defaultFrameStep) => updateAnalysis({ defaultFrameStep: clampMin(defaultFrameStep, 1) }),
@@ -247,6 +251,7 @@ export const useSettingsStore = create<SettingsState>()(
           checkEnvOnStartup: defaultSettings.checkEnvOnStartup,
           openMaximized: defaultSettings.openMaximized,
           closeBehavior: defaultSettings.closeBehavior,
+          defaultCompareWorkers: defaultSettings.defaultCompareWorkers,
         }),
       resetAnalysisSettings: () =>
         set((state) => {
@@ -295,6 +300,7 @@ export function settingsSnapshotFromState(settings: SettingsSnapshot): SettingsS
     defaultWindowSize: settings.defaultWindowSize,
     defaultTopK: settings.defaultTopK,
     defaultCandidateLimit: settings.defaultCandidateLimit,
+    defaultCompareWorkers: settings.defaultCompareWorkers,
     defaultMaxGapSec: settings.defaultMaxGapSec,
     defaultFrameStep: settings.defaultFrameStep,
     defaultMinSegmentDuration: settings.defaultMinSegmentDuration,
@@ -406,6 +412,7 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
   const minSegmentMatches = Number(snapshot.defaultMinSegmentMatches)
   const offsetTolerance = Number(snapshot.defaultOffsetTolerance)
   const candidateLimit = Number(snapshot.defaultCandidateLimit)
+  const compareWorkers = Number(snapshot.defaultCompareWorkers)
   const legacyCloseToBackground = (snapshot as { closeToBackground?: unknown }).closeToBackground
   const closeBehavior: CloseBehavior = snapshot.closeBehavior === 'tray' || snapshot.closeBehavior === 'exit' || snapshot.closeBehavior === 'ask'
     ? snapshot.closeBehavior
@@ -441,6 +448,7 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
     defaultInputSize: Number.isFinite(inputSize) ? clampMin(inputSize, 1) : defaultSettings.defaultInputSize,
     defaultFrameStep: Number.isFinite(frameStep) ? clampMin(frameStep, 1) : defaultSettings.defaultFrameStep,
     defaultCandidateLimit: Number.isFinite(candidateLimit) ? clampMin(candidateLimit, 0) : defaultSettings.defaultCandidateLimit,
+    defaultCompareWorkers: Number.isFinite(compareWorkers) ? clampMin(compareWorkers, 1) : defaultSettings.defaultCompareWorkers,
     defaultMinSegmentDuration: Number.isFinite(minSegmentDuration) ? clampMin(minSegmentDuration, 1) : defaultSettings.defaultMinSegmentDuration,
     defaultMinSegmentMatches: Number.isFinite(minSegmentMatches) ? clampMin(minSegmentMatches, 1) : defaultSettings.defaultMinSegmentMatches,
     defaultOffsetTolerance: Number.isFinite(offsetTolerance) ? clampMin(offsetTolerance, 1) : defaultSettings.defaultOffsetTolerance,

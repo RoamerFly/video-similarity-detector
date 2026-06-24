@@ -495,6 +495,11 @@ jobs:
       - windows
       - macos
     steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
@@ -524,6 +529,35 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare offline CLIP model asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_dir="$RUNNER_TEMP/clip-model/clip-vit-base-patch32"
+          mkdir -p "$model_dir" model-assets
+          base_url="https://huggingface.co/openai/clip-vit-base-patch32/resolve/main"
+          files=(
+            "config.json"
+            "preprocessor_config.json"
+            "pytorch_model.bin"
+          )
+          for file in "${files[@]}"; do
+            curl --fail --location --retry 4 --retry-delay 5 --connect-timeout 20 \
+              --output "$model_dir/$file" \
+              "$base_url/$file?download=true"
+            test -s "$model_dir/$file" || {
+              echo "Downloaded model file is empty: $file" >&2
+              exit 1
+            }
+          done
+          (
+            cd "$RUNNER_TEMP/clip-model"
+            zip -0 -r "$GITHUB_WORKSPACE/model-assets/clip-vit-base-patch32.zip" \
+              clip-vit-base-patch32
+          )
+          test -s model-assets/clip-vit-base-patch32.zip
+          unzip -l model-assets/clip-vit-base-patch32.zip
+
       - name: Verify release asset names
         shell: bash
         env:
@@ -543,13 +577,52 @@ jobs:
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-installer.exe"
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-portable.zip"
           )
+          test -f "model-assets/clip-vit-base-patch32.zip" || {
+            echo "Missing model asset: clip-vit-base-patch32.zip" >&2
+            exit 1
+          }
           for asset in "${expected[@]}"; do
             test -f "release-assets/$asset" || {
               echo "Missing release asset: $asset" >&2
               exit 1
             }
           done
+          ls -lh model-assets
           ls -lh release-assets
+
+      - name: Generate release body
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags
+          range_end="$TAG_NAME"
+          if ! git rev-parse -q --verify "${TAG_NAME}^{commit}" >/dev/null; then
+            range_end="HEAD"
+          fi
+          previous_tag="$(
+            git tag --sort=-version:refname |
+              awk -v current="$TAG_NAME" '$0 != current { print; exit }'
+          )"
+          {
+            echo "新版本内容"
+            echo "- 第一行资源：\`clip-vit-base-patch32.zip\` 已随本次 Release 上传，可用于离线部署 CLIP 模型。"
+            echo
+            if [ -n "$previous_tag" ] && git rev-parse -q --verify "${previous_tag}^{commit}" >/dev/null; then
+              echo "相较于 ${previous_tag} 的更新："
+              log_output="$(git log --pretty=format:'- %s (%h)' --no-merges "${previous_tag}..${range_end}" || true)"
+              if [ -n "$log_output" ]; then
+                echo "$log_output"
+              else
+                echo "- 本次发布包含构建产物刷新与发布资源更新。"
+              fi
+            else
+              echo "相较于上个 Release 的更新："
+              echo "- 本次发布包含构建产物刷新与发布资源更新。"
+            fi
+          } > release_body.md
+          cat release_body.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -557,8 +630,10 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag_name }}
           name: ${{ steps.meta.outputs.release_name }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: release_body.md
           draft: ${{ steps.meta.outputs.draft == 'true' }}
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          files: release-assets/*
+          files: |
+            model-assets/clip-vit-base-patch32.zip
+            release-assets/*
           fail_on_unmatched_files: true

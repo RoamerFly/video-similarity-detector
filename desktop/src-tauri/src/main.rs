@@ -31,6 +31,10 @@ const CLOSE_BEHAVIOR_TRAY: u8 = 1;
 const CLOSE_BEHAVIOR_EXIT: u8 = 2;
 const RELEASES_API_URL: &str =
     "https://api.github.com/repos/RoamerFly/video-similarity-detector/releases/latest";
+const RELEASES_LATEST_PAGE_URL: &str =
+    "https://github.com/RoamerFly/video-similarity-detector/releases/latest";
+const RELEASES_ATOM_URL: &str =
+    "https://github.com/RoamerFly/video-similarity-detector/releases.atom";
 const RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/download/";
 const ANALYSIS_VIDEO_CONTEXT_PREFIX: &str = "ANALYSIS_VIDEO_CONTEXT|";
@@ -77,7 +81,7 @@ struct GithubRelease {
     assets: Vec<GithubReleaseAsset>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct GithubReleaseAsset {
     name: String,
     browser_download_url: String,
@@ -520,6 +524,7 @@ struct RunBatchCompareConfig {
     window_size: f64,
     top_k: u32,
     candidate_limit: Option<u32>,
+    compare_workers: Option<u32>,
     max_gap_sec: f64,
     frame_step: Option<u32>,
     crop_black_borders: bool,
@@ -660,6 +665,8 @@ struct AnalysisTaskStage {
 struct AnalysisTaskCacheArtifact {
     #[serde(default)]
     path: String,
+    #[serde(default)]
+    path_base: String,
     #[serde(default)]
     category: String,
     #[serde(default)]
@@ -848,37 +855,23 @@ fn check_for_updates_impl(app: &tauri::AppHandle) -> Result<UpdateInfo, String> 
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("创建更新请求失败: {e}"))?;
-    let release = client
-        .get(RELEASES_API_URL)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .and_then(|response| response.error_for_status())
-        .map_err(|e| format!("连接 GitHub Releases 失败: {e}"))?
-        .json::<GithubRelease>()
-        .map_err(|e| format!("解析 GitHub 最新版本失败: {e}"))?;
+    let (release, used_fallback) = fetch_latest_release(&client)?;
 
     let latest_version = release.tag_name.trim_start_matches('v').to_string();
     let update_available = compare_versions(&latest_version, &current_version).is_gt();
-    let expected_suffix = update_asset_suffix(&build_flavor);
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name.to_ascii_lowercase().ends_with(&expected_suffix))
-        .or_else(|| {
-            release.assets.iter().find(|asset| {
-                asset
-                    .name
-                    .to_ascii_lowercase()
-                    .ends_with("-windows-x64-cpu-installer.exe")
-            })
-        });
+    let asset = find_update_asset(&client, &release, &build_flavor);
     let can_auto_install = cfg!(target_os = "windows") && update_available && asset.is_some();
-    let message = if !update_available {
-        format!("当前已是最新版本 v{current_version}")
-    } else if can_auto_install {
-        format!("发现新版本 v{latest_version}，可保留数据直接覆盖安装")
+    let fallback_note = if used_fallback {
+        "（GitHub API 受限，已通过发布页备用通道检查）"
     } else {
-        format!("发现新版本 v{latest_version}，请打开发布页下载")
+        ""
+    };
+    let message = if !update_available {
+        format!("当前已是最新版本 v{current_version}{fallback_note}")
+    } else if can_auto_install {
+        format!("发现新版本 v{latest_version}，可保留数据直接覆盖安装{fallback_note}")
+    } else {
+        format!("发现新版本 v{latest_version}，请打开发布页下载{fallback_note}")
     };
 
     Ok(UpdateInfo {
@@ -888,17 +881,376 @@ fn check_for_updates_impl(app: &tauri::AppHandle) -> Result<UpdateInfo, String> 
         release_url: release.html_url,
         release_notes: release.body.unwrap_or_default(),
         published_at: release.published_at.unwrap_or_default(),
-        asset_name: asset.map(|item| item.name.clone()).unwrap_or_default(),
+        asset_name: asset
+            .as_ref()
+            .map(|item| item.name.clone())
+            .unwrap_or_default(),
         asset_url: asset
+            .as_ref()
             .map(|item| item.browser_download_url.clone())
             .unwrap_or_default(),
-        asset_size: asset.map(|item| item.size).unwrap_or(0),
+        asset_size: asset.as_ref().map(|item| item.size).unwrap_or(0),
         build_flavor,
         install_type,
         install_root: path_to_string(install_root),
         can_auto_install,
         message,
     })
+}
+
+fn fetch_latest_release(
+    client: &reqwest::blocking::Client,
+) -> Result<(GithubRelease, bool), String> {
+    match fetch_latest_release_from_api(client) {
+        Ok(release) => Ok((release, false)),
+        Err(api_error) => match fetch_latest_release_from_page(client) {
+            Ok(release) => Ok((release, true)),
+            Err(page_error) => Err(format!(
+                "连接 GitHub Releases 失败：{api_error}；备用发布页也失败：{page_error}"
+            )),
+        },
+    }
+}
+
+fn find_update_asset(
+    client: &reqwest::blocking::Client,
+    release: &GithubRelease,
+    build_flavor: &str,
+) -> Option<GithubReleaseAsset> {
+    let expected_suffix = update_asset_suffix(build_flavor);
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name.to_ascii_lowercase().ends_with(&expected_suffix))
+        .cloned()
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|asset| {
+                    asset
+                        .name
+                        .to_ascii_lowercase()
+                        .ends_with("-windows-x64-cpu-installer.exe")
+                })
+                .cloned()
+        })
+        .or_else(|| probe_known_update_asset(client, &release.tag_name, build_flavor))
+        .or_else(|| probe_known_update_asset(client, &release.tag_name, "cpu"))
+}
+
+fn probe_known_update_asset(
+    client: &reqwest::blocking::Client,
+    release_tag: &str,
+    build_flavor: &str,
+) -> Option<GithubReleaseAsset> {
+    let tag = release_tag.trim();
+    if !is_valid_release_tag(tag) {
+        return None;
+    }
+    let version_for_name = if tag.starts_with('v') || tag.starts_with('V') {
+        tag.to_string()
+    } else {
+        format!("v{tag}")
+    };
+    let asset_name = format!(
+        "Video_Similarity-{}{}",
+        version_for_name,
+        update_asset_suffix(build_flavor)
+    );
+    let asset_url = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/{asset_name}");
+    let size = probe_remote_asset_size(client, &asset_url)?;
+    if !(1024 * 1024..=8 * 1024 * 1024 * 1024).contains(&size) {
+        return None;
+    }
+    Some(GithubReleaseAsset {
+        name: asset_name,
+        browser_download_url: asset_url,
+        size,
+    })
+}
+
+fn probe_remote_asset_size(client: &reqwest::blocking::Client, url: &str) -> Option<u64> {
+    if let Ok(response) = client
+        .head(url)
+        .header("Accept", "application/octet-stream,*/*;q=0.8")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .send()
+    {
+        if response.status().is_success() {
+            if let Some(size) = response.content_length() {
+                if size > 0 {
+                    return Some(size);
+                }
+            }
+        }
+    }
+
+    let response = client
+        .get(url)
+        .header("Accept", "application/octet-stream,*/*;q=0.8")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .header("Range", "bytes=0-0")
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response
+        .headers()
+        .get("content-range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_range_total)
+        .or_else(|| response.content_length())
+}
+
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    value
+        .rsplit_once('/')
+        .and_then(|(_, total)| total.trim().parse::<u64>().ok())
+}
+
+fn fetch_latest_release_from_api(
+    client: &reqwest::blocking::Client,
+) -> Result<GithubRelease, String> {
+    let response = client
+        .get(RELEASES_API_URL)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .send()
+        .map_err(|e| format!("GitHub API 请求失败: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format_github_response_error("GitHub API", response));
+    }
+    response
+        .json::<GithubRelease>()
+        .map_err(|e| format!("解析 GitHub 最新版本失败: {e}"))
+}
+
+fn fetch_latest_release_from_page(
+    client: &reqwest::blocking::Client,
+) -> Result<GithubRelease, String> {
+    let response = client
+        .get(RELEASES_LATEST_PAGE_URL)
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .header("Upgrade-Insecure-Requests", "1")
+        .send()
+        .map_err(|e| format!("发布页请求失败: {e}"))?;
+    let final_url = response.url().to_string();
+    if !response.status().is_success() {
+        return Err(format_github_response_error("GitHub 发布页", response));
+    }
+    let html = response
+        .text()
+        .map_err(|e| format!("读取 GitHub 发布页失败: {e}"))?;
+    let tag_name = extract_release_tag(&final_url, &html)
+        .ok_or_else(|| "无法从 GitHub 发布页识别最新版本号。".to_string())?;
+    let html_url = format!(
+        "https://github.com/RoamerFly/video-similarity-detector/releases/tag/{tag_name}"
+    );
+    let release_notes = fetch_release_notes_from_atom(client, &tag_name)
+        .or_else(|| extract_release_notes_from_html(&html));
+    Ok(GithubRelease {
+        tag_name,
+        html_url,
+        body: release_notes,
+        published_at: None,
+        assets: Vec::new(),
+    })
+}
+
+fn fetch_release_notes_from_atom(
+    client: &reqwest::blocking::Client,
+    tag_name: &str,
+) -> Option<String> {
+    let response = client
+        .get(RELEASES_ATOM_URL)
+        .header("Accept", "application/atom+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let xml = response.text().ok()?;
+    extract_atom_release_notes(&xml, tag_name)
+}
+
+fn extract_atom_release_notes(xml: &str, tag_name: &str) -> Option<String> {
+    let expected_title = format!("<title>{tag_name}</title>");
+    for block in xml.split("<entry>").skip(1) {
+        let entry = block.split("</entry>").next().unwrap_or_default();
+        if !entry.contains(&expected_title)
+            && !entry.contains(&format!("/releases/tag/{tag_name}\""))
+        {
+            continue;
+        }
+        let content = extract_between(entry, "<content type=\"html\">", "</content>")?;
+        let text = strip_html_tags(&decode_xml_entities(content));
+        if !text.trim().is_empty() {
+            return Some(text.trim().to_string());
+        }
+    }
+    None
+}
+
+fn extract_release_notes_from_html(html: &str) -> Option<String> {
+    for marker in [
+        "<div class=\"markdown-body",
+        "<div data-view-component=\"true\" class=\"markdown-body",
+    ] {
+        if let Some((_, rest)) = html.split_once(marker) {
+            let content = rest.split("</div>").next().unwrap_or_default();
+            let text = strip_html_tags(&decode_xml_entities(content));
+            if !text.trim().is_empty() {
+                return Some(text.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_between<'a>(value: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    value
+        .split_once(start)
+        .and_then(|(_, rest)| rest.split_once(end).map(|(content, _)| content))
+}
+
+fn decode_xml_entities(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn strip_html_tags(value: &str) -> String {
+    let normalized = value
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</p>", "\n")
+        .replace("</h1>", "\n")
+        .replace("</h2>", "\n")
+        .replace("</h3>", "\n")
+        .replace("<li>", "\n- ")
+        .replace("</li>", "\n");
+    let mut output = String::new();
+    let mut inside_tag = false;
+    for ch in normalized.chars() {
+        match ch {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_github_response_error(
+    context: &str,
+    response: reqwest::blocking::Response,
+) -> String {
+    let status = response.status();
+    let rate_remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body = response.text().unwrap_or_default();
+    let detail = summarize_github_error_body(&body);
+    let mut message = format!("{context} 返回 HTTP {status}");
+    if !detail.is_empty() {
+        message.push_str(&format!("，{detail}"));
+    }
+    if let Some(remaining) = rate_remaining {
+        message.push_str(&format!("，剩余 API 额度 {remaining}"));
+    }
+    message
+}
+
+fn summarize_github_error_body(body: &str) -> String {
+    if body.trim().is_empty() {
+        return String::new();
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if let Some(message) = value.get("message").and_then(Value::as_str) {
+            return message.trim().to_string();
+        }
+    }
+    body.trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(180)
+        .collect::<String>()
+}
+
+fn extract_release_tag(final_url: &str, html: &str) -> Option<String> {
+    extract_release_tag_from_url(final_url).or_else(|| extract_release_tag_from_html(html))
+}
+
+fn extract_release_tag_from_url(url: &str) -> Option<String> {
+    for marker in ["/releases/tag/", "/releases/download/"] {
+        if let Some((_, rest)) = url.split_once(marker) {
+            let tag = rest
+                .split(['?', '#', '/', '"', '\''])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if is_valid_release_tag(tag) {
+                return Some(tag.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_release_tag_from_html(html: &str) -> Option<String> {
+    for marker in [
+        "https://github.com/RoamerFly/video-similarity-detector/releases/tag/",
+        "/RoamerFly/video-similarity-detector/releases/tag/",
+        "/releases/tag/",
+    ] {
+        let mut remaining = html;
+        while let Some((_, rest)) = remaining.split_once(marker) {
+            let tag = rest
+                .split(['?', '#', '/', '"', '\'', '<', '>'])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if is_valid_release_tag(tag) {
+                return Some(tag.to_string());
+            }
+            remaining = rest;
+        }
+    }
+    None
+}
+
+fn is_valid_release_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.chars().any(|ch| ch.is_ascii_digit())
+        && tag
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | 'v' | 'V'))
 }
 
 #[tauri::command]
@@ -964,6 +1316,10 @@ fn download_update_installer(
         .map_err(|e| format!("创建下载请求失败: {e}"))?;
     let mut response = client
         .get(&request.asset_url)
+        .header("Accept", "application/octet-stream,*/*;q=0.8")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|e| format!("下载更新安装器失败: {e}"))?;
@@ -1290,7 +1646,7 @@ fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
     }
 
     let mut videos = Vec::new();
-    collect_videos(&input_dir, request.recursive.unwrap_or(true), &mut videos)?;
+    collect_videos(&input_dir, request.recursive.unwrap_or(true), &mut videos, true)?;
     videos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(videos)
 }
@@ -1566,9 +1922,10 @@ fn list_analysis_tasks(
 
     let mut tasks = Vec::new();
     for entry in fs::read_dir(&directory).map_err(|e| format!("读取历史任务失败: {e}"))? {
-        let task_dir = entry
-            .map_err(|e| format!("读取历史任务目录项失败: {e}"))?
-            .path();
+        let task_dir = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) => continue,
+        };
         if !task_dir.is_dir() {
             continue;
         }
@@ -1715,12 +2072,7 @@ fn delete_analysis_task(
         let task_root = target.canonicalize().unwrap_or_else(|_| target.clone());
 
         for artifact in record.cache_artifacts {
-            let raw_path = PathBuf::from(&artifact.path);
-            let path = if raw_path.is_absolute() {
-                raw_path
-            } else {
-                cache_dir.join(raw_path)
-            };
+            let path = resolve_analysis_artifact_path(&root, &cache_dir, &artifact);
             if !path.exists() {
                 continue;
             }
@@ -1728,13 +2080,12 @@ fn delete_analysis_task(
             if !is_child_path(&cache_root, &resolved) || resolved.starts_with(&task_root) {
                 continue;
             }
-            if resolved.is_dir() {
+            // Stale generated-cache paths should not block removing the task record itself.
+            let _ = if resolved.is_dir() {
                 fs::remove_dir_all(&resolved)
-                    .map_err(|e| format!("删除任务缓存失败 {}: {e}", resolved.display()))?;
             } else {
                 fs::remove_file(&resolved)
-                    .map_err(|e| format!("删除任务缓存失败 {}: {e}", resolved.display()))?;
-            }
+            };
         }
     }
     if target.exists() {
@@ -1766,9 +2117,10 @@ fn scan_analysis_task_cache(
     if task_dir.is_dir() {
         for entry in fs::read_dir(&task_dir).map_err(|e| format!("读取任务缓存失败: {e}"))?
         {
-            let path = entry
-                .map_err(|e| format!("读取任务缓存项失败: {e}"))?
-                .path();
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(_) => continue,
+            };
             if path == manifest_path {
                 continue;
             }
@@ -1780,12 +2132,12 @@ fn scan_analysis_task_cache(
                 continue;
             }
             if seen.insert(path_to_string(&path)) {
-                if let Some(entry) = build_cache_entry(
+                if let Ok(Some(entry)) = build_cache_entry(
                     &cache_dir,
                     &path,
                     "任务断点",
                     "当前任务的比较断点或临时恢复数据",
-                )? {
+                ) {
                     items.push(entry);
                 }
             }
@@ -1796,12 +2148,7 @@ fn scan_analysis_task_cache(
         .canonicalize()
         .unwrap_or_else(|_| cache_dir.clone());
     for artifact in record.cache_artifacts {
-        let raw_path = PathBuf::from(&artifact.path);
-        let path = if raw_path.is_absolute() {
-            raw_path
-        } else {
-            cache_dir.join(raw_path)
-        };
+        let path = resolve_analysis_artifact_path(&root, &cache_dir, &artifact);
         if !path.exists() {
             continue;
         }
@@ -1809,7 +2156,7 @@ fn scan_analysis_task_cache(
         if !is_child_path(&base, &target) || !seen.insert(path_to_string(&target)) {
             continue;
         }
-        if let Some(entry) = build_cache_entry(
+        if let Ok(Some(entry)) = build_cache_entry(
             &cache_dir,
             &target,
             if artifact.category.is_empty() {
@@ -1822,7 +2169,7 @@ fn scan_analysis_task_cache(
             } else {
                 &artifact.description
             },
-        )? {
+        ) {
             items.push(entry);
         }
     }
@@ -1951,6 +2298,8 @@ fn run_batch_compare(
         config.top_k.to_string(),
         "--candidate-limit".into(),
         config.candidate_limit.unwrap_or(20).to_string(),
+        "--compare-workers".into(),
+        config.compare_workers.unwrap_or(1).max(1).min(8).to_string(),
         "--max-gap-sec".into(),
         config.max_gap_sec.to_string(),
         "--frame-step".into(),
@@ -2986,15 +3335,18 @@ fn report_list_cache_path(root: &Path, output_dir: &Path) -> PathBuf {
 }
 
 #[tauri::command]
-fn read_report(request: ReportPathRequest) -> Result<Value, String> {
-    let path = PathBuf::from(request.path);
+fn read_report(app: tauri::AppHandle, request: ReportPathRequest) -> Result<Value, String> {
+    let root = resolve_project_root(&app)?;
+    let path = resolve_user_path(&root, &request.path);
     let content = fs::read_to_string(&path).map_err(|e| format!("读取报告失败: {e}"))?;
     serde_json::from_str(&content).map_err(|e| format!("解析报告 JSON 失败: {e}"))
 }
 
 #[tauri::command]
-fn read_text_file(request: ReportPathRequest) -> Result<String, String> {
-    fs::read_to_string(&request.path).map_err(|e| format!("读取文件失败 {}: {e}", request.path))
+fn read_text_file(app: tauri::AppHandle, request: ReportPathRequest) -> Result<String, String> {
+    let root = resolve_project_root(&app)?;
+    let path = resolve_user_path(&root, &request.path);
+    fs::read_to_string(&path).map_err(|e| format!("读取文件失败 {}: {e}", path.display()))
 }
 
 #[tauri::command]
@@ -3270,8 +3622,9 @@ fn image_file_data_url(path: &Path) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn delete_report(request: ReportPathRequest) -> Result<(), String> {
-    let path = PathBuf::from(request.path);
+fn delete_report(app: tauri::AppHandle, request: ReportPathRequest) -> Result<(), String> {
+    let root = resolve_project_root(&app)?;
+    let path = resolve_user_path(&root, &request.path);
     let stem = path.with_extension("");
     for ext in ["json", "csv", "html"] {
         let candidate = stem.with_extension(ext);
@@ -3285,6 +3638,7 @@ fn delete_report(request: ReportPathRequest) -> Result<(), String> {
 
 #[tauri::command]
 fn update_report_entries(
+    app: tauri::AppHandle,
     request: UpdateReportEntriesRequest,
 ) -> Result<UpdateReportEntriesResult, String> {
     if request.pairs.is_empty() {
@@ -3295,7 +3649,8 @@ fn update_report_entries(
         });
     }
 
-    let path = PathBuf::from(request.path.trim());
+    let root = resolve_project_root(&app)?;
+    let path = resolve_user_path(&root, request.path.trim());
     let stem = path.with_extension("");
     let json_path = stem.with_extension("json");
     let csv_path = stem.with_extension("csv");
@@ -3848,13 +4203,15 @@ fn is_child_path(parent: &Path, child: &Path) -> bool {
 }
 
 #[tauri::command]
-fn open_file(request: ReportPathRequest) -> Result<(), String> {
-    open_os_path(&PathBuf::from(request.path))
+fn open_file(app: tauri::AppHandle, request: ReportPathRequest) -> Result<(), String> {
+    let root = resolve_project_root(&app)?;
+    open_os_path(&resolve_user_path(&root, &request.path))
 }
 
 #[tauri::command]
-fn reveal_in_folder(request: ReportPathRequest) -> Result<(), String> {
-    let path = PathBuf::from(request.path);
+fn reveal_in_folder(app: tauri::AppHandle, request: ReportPathRequest) -> Result<(), String> {
+    let root = resolve_project_root(&app)?;
+    let path = resolve_user_path(&root, &request.path);
     let directory = if path.is_dir() {
         path
     } else {
@@ -3866,8 +4223,9 @@ fn reveal_in_folder(request: ReportPathRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_path(request: ReportPathRequest) -> Result<(), String> {
-    open_os_path(&PathBuf::from(request.path))
+fn open_path(app: tauri::AppHandle, request: ReportPathRequest) -> Result<(), String> {
+    let root = resolve_project_root(&app)?;
+    open_os_path(&resolve_user_path(&root, &request.path))
 }
 
 #[tauri::command]
@@ -4198,15 +4556,61 @@ fn resolve_user_path(root: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn collect_videos(dir: &Path, recursive: bool, videos: &mut Vec<VideoFile>) -> Result<(), String> {
-    for entry in fs::read_dir(dir).map_err(|e| format!("读取视频目录失败: {e}"))? {
-        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+fn resolve_analysis_artifact_path(
+    root: &Path,
+    cache_dir: &Path,
+    artifact: &AnalysisTaskCacheArtifact,
+) -> PathBuf {
+    let path_text = normalize_display_path(artifact.path.trim()).trim().to_string();
+    let raw = PathBuf::from(&path_text);
+    if raw.is_absolute() {
+        return raw;
+    }
+
+    match artifact.path_base.as_str() {
+        "cacheDir" => cache_dir.join(raw),
+        "projectRoot" => root.join(raw),
+        "absolute" => raw,
+        _ => {
+            let cache_candidate = cache_dir.join(&raw);
+            if cache_candidate.exists() {
+                cache_candidate
+            } else {
+                root.join(raw)
+            }
+        }
+    }
+}
+
+fn collect_videos(
+    dir: &Path,
+    recursive: bool,
+    videos: &mut Vec<VideoFile>,
+    strict: bool,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if strict => return Err(format!("读取视频目录失败: {error}")),
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
         let path = entry.path();
-        if path.is_dir() && recursive {
-            collect_videos(&path, recursive, videos)?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
             continue;
         }
-        if !path.is_file() {
+        if file_type.is_dir() && recursive {
+            collect_videos(&path, recursive, videos, false)?;
+            continue;
+        }
+        if !file_type.is_file() {
             continue;
         }
 
@@ -4219,7 +4623,10 @@ fn collect_videos(dir: &Path, recursive: bool, videos: &mut Vec<VideoFile>) -> R
             continue;
         }
 
-        let metadata = fs::metadata(&path).map_err(|e| format!("读取视频文件信息失败: {e}"))?;
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
         videos.push(VideoFile {
             name: path
                 .file_name()

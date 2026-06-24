@@ -423,7 +423,7 @@ export function AnalyzePage() {
       useSettingsStore.getState(),
       analysisConfigFromSettings(useSettingsStore.getState()),
     )
-    const taskConfig: RunBatchCompareConfig = { ...defaults, ...task.config, taskId: task.id }
+    const taskConfig: RunBatchCompareConfig = { ...defaults, ...task.config, taskId: task.id, compareWorkers: defaults.compareWorkers }
     if (!taskConfig?.videoDir || !taskConfig?.cacheDir) {
       setErrorMessage('该历史任务缺少运行配置，无法继续。')
       return
@@ -533,8 +533,8 @@ export function AnalyzePage() {
     try {
       await deleteAnalysisTask(
         task.id,
-        task.config?.cacheDir || settings.cacheDir,
-        task.config?.projectRoot || settings.projectRoot,
+        settings.cacheDir || task.config?.cacheDir || 'data',
+        settings.projectRoot || task.config?.projectRoot,
         deleteGeneratedCache,
       )
       if (detailTask?.id === task.id) setDetailTask(null)
@@ -554,8 +554,8 @@ export function AnalyzePage() {
     try {
       const scan = await scanAnalysisTaskCache(
         task.id,
-        task.config?.cacheDir || settings.cacheDir,
-        task.config?.projectRoot || settings.projectRoot,
+        settings.cacheDir || task.config?.cacheDir || 'data',
+        settings.projectRoot || task.config?.projectRoot,
       )
       setTaskCacheScan(scan)
       setSelectedTaskCachePaths(new Set(scan.items.map((item) => item.path)))
@@ -574,14 +574,14 @@ export function AnalyzePage() {
     setTaskCacheBusy(true)
     try {
       await clearCacheItems(
-        task.config?.cacheDir || settings.cacheDir,
-        task.config?.projectRoot || settings.projectRoot,
+        settings.cacheDir || task.config?.cacheDir || 'data',
+        settings.projectRoot || task.config?.projectRoot || '',
         paths,
       )
       const nextScan = await scanAnalysisTaskCache(
         task.id,
-        task.config?.cacheDir || settings.cacheDir,
-        task.config?.projectRoot || settings.projectRoot,
+        settings.cacheDir || task.config?.cacheDir || 'data',
+        settings.projectRoot || task.config?.projectRoot,
       )
       setTaskCacheScan(nextScan)
       setSelectedTaskCachePaths(new Set(nextScan.items.map((item) => item.path)))

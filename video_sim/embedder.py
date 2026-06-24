@@ -333,6 +333,8 @@ class FrameEmbeddingCache:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
 
+        _write_profile_sidecar(path, self.preprocess_config, self.metadata)
+
     @classmethod
     def load(cls, path: Union[str, Path]) -> "FrameEmbeddingCache":
         """
@@ -418,16 +420,17 @@ class FrameEmbeddingCache:
             from video_sim.preprocess import PreprocessConfig
             preprocess_config = PreprocessConfig()
 
-        profile_parts = [preprocess_config.cache_suffix.lstrip("_") or "default"]
-        if skip_threshold is not None:
-            profile_parts.append(f"skip_{_format_cache_float(skip_threshold)}")
-        if max_gap_sec is not None:
-            profile_parts.append(f"gap_{_format_cache_float(max_gap_sec)}s")
-        if frame_step is not None:
-            profile_parts.append(f"step_{max(1, int(frame_step))}")
-
-        profile_dir = _safe_cache_name("__".join(profile_parts))
-        return cls.get_video_cache_dir(video_path, cache_dir) / profile_dir / "frame_features.npz"
+        profile_key = _cache_profile_key(
+            preprocess_config,
+            skip_threshold,
+            max_gap_sec,
+            frame_step,
+        )
+        video_cache_dir = cls.get_video_cache_dir(video_path, cache_dir)
+        profile_dir = _find_numbered_profile_dir(video_cache_dir, profile_key)
+        if profile_dir is None:
+            profile_dir = _next_numbered_profile_dir(video_cache_dir)
+        return profile_dir / "frame_features.npz"
 
     @classmethod
     def get_legacy_cache_path(
@@ -508,6 +511,11 @@ class FrameEmbeddingCache:
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
         )
+        if not cache_path.exists():
+            cache_path = _find_matching_legacy_profile_cache(
+                cache_path, preprocess_config,
+                skip_threshold, max_gap_sec, frame_step,
+            ) or cache_path
         if not cache_path.exists():
             return None
 
@@ -752,6 +760,167 @@ def _np_scalar_to_string(value) -> str:
     return str(value)
 
 
+def _write_profile_sidecar(
+    npz_path: Path,
+    preprocess_config: Optional["PreprocessConfig"],
+    metadata: Optional[Dict[str, object]],
+) -> None:
+    """Write a human-readable profile.json next to the npz cache file.
+
+    The numbered cache directory stays short; this sidecar keeps the full
+    parameter profile readable and lets future runs map the same profile back
+    to the same number.
+    """
+    profile_path = npz_path.parent / "profile.json"
+    profile: Dict[str, object] = {}
+    if preprocess_config is None and metadata and isinstance(metadata.get("preprocess_config"), dict):
+        try:
+            preprocess_config = PreprocessConfig.from_dict(metadata["preprocess_config"])
+        except Exception:
+            preprocess_config = None
+    if metadata:
+        for key in ("skip_threshold", "max_gap_sec", "frame_step", "embedding_model"):
+            if key in metadata:
+                profile[key] = metadata[key]
+    if preprocess_config is not None:
+        profile["preprocess_config"] = preprocess_config.to_dict()
+    profile_key = _profile_key_from_sidecar_data(profile)
+    profile.update({
+        "version": 1,
+        "directory": npz_path.parent.name,
+        "cache_file": npz_path.name,
+        "profile_key": profile_key,
+        "profile_hash": hashlib.sha1(profile_key.encode("utf-8")).hexdigest()[:16],
+    })
+    try:
+        pending = profile_path.with_name(f"{profile_path.name}.tmp")
+        with open(pending, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+        pending.replace(profile_path)
+    except Exception:
+        pass
+
+
+def _cache_profile_key(
+    preprocess_config: "PreprocessConfig",
+    skip_threshold: Optional[float],
+    max_gap_sec: Optional[float],
+    frame_step: Optional[int],
+) -> str:
+    profile_parts = [preprocess_config.cache_suffix.lstrip("_") or "default"]
+    if skip_threshold is not None:
+        profile_parts.append(f"skip_{_format_cache_float(float(skip_threshold))}")
+    if max_gap_sec is not None:
+        profile_parts.append(f"gap_{_format_cache_float(float(max_gap_sec))}s")
+    if frame_step is not None:
+        profile_parts.append(f"step_{max(1, int(frame_step))}")
+    return "__".join(profile_parts)
+
+
+def _profile_key_from_sidecar_data(profile: Dict[str, object]) -> str:
+    preprocess_config = profile.get("preprocess_config")
+    if isinstance(preprocess_config, dict):
+        config = PreprocessConfig.from_dict(preprocess_config)
+    else:
+        config = PreprocessConfig()
+    return _cache_profile_key(
+        config,
+        _optional_float(profile.get("skip_threshold")),
+        _optional_float(profile.get("max_gap_sec")),
+        _optional_int(profile.get("frame_step")),
+    )
+
+
+def _read_profile_sidecar(directory: Path) -> Optional[Dict[str, object]]:
+    profile_path = directory / "profile.json"
+    if not profile_path.is_file():
+        return None
+    try:
+        with open(profile_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        return loaded if isinstance(loaded, dict) else None
+    except Exception:
+        return None
+
+
+def _profile_matches(profile: Optional[Dict[str, object]], expected_key: str) -> bool:
+    if not profile:
+        return False
+    explicit_key = profile.get("profile_key") or profile.get("profileKey")
+    if isinstance(explicit_key, str) and explicit_key == expected_key:
+        return True
+    try:
+        return _profile_key_from_sidecar_data(profile) == expected_key
+    except Exception:
+        return False
+
+
+def _find_numbered_profile_dir(video_cache_dir: Path, profile_key: str) -> Optional[Path]:
+    if not video_cache_dir.is_dir():
+        return None
+    for directory in _numbered_profile_dirs(video_cache_dir):
+        if _profile_matches(_read_profile_sidecar(directory), profile_key):
+            return directory
+    return None
+
+
+def _next_numbered_profile_dir(video_cache_dir: Path) -> Path:
+    used = {
+        int(child.name)
+        for child in video_cache_dir.iterdir()
+        if child.is_dir() and child.name.isdigit()
+    } if video_cache_dir.is_dir() else set()
+    index = 1
+    while index in used:
+        index += 1
+    return video_cache_dir / str(index)
+
+
+def _numbered_profile_dirs(video_cache_dir: Path) -> List[Path]:
+    if not video_cache_dir.is_dir():
+        return []
+    directories = [
+        child
+        for child in video_cache_dir.iterdir()
+        if child.is_dir() and child.name.isdigit()
+    ]
+    return sorted(directories, key=lambda path: int(path.name))
+
+
+def _find_matching_legacy_profile_cache(
+    new_cache_path: Path,
+    preprocess_config: "PreprocessConfig",
+    skip_threshold: Optional[float],
+    max_gap_sec: Optional[float],
+    frame_step: Optional[int],
+) -> Optional[Path]:
+    """Fall back to older non-numbered profile directories.
+
+    Returns the old-style npz path if found, otherwise None.
+    The directory is not renamed because task.json artifacts may still reference it.
+    """
+    video_cache_dir = new_cache_path.parent.parent
+    if not video_cache_dir.is_dir():
+        return None
+    profile_key = _cache_profile_key(
+        preprocess_config,
+        skip_threshold,
+        max_gap_sec,
+        frame_step,
+    )
+    old_name = _safe_cache_name(profile_key)
+    old_path = video_cache_dir / old_name / "frame_features.npz"
+    if old_path.exists():
+        return old_path
+    for directory in video_cache_dir.iterdir():
+        if not directory.is_dir() or directory.name.isdigit():
+            continue
+        candidate = directory / "frame_features.npz"
+        if candidate.exists() and _profile_matches(_read_profile_sidecar(directory), profile_key):
+            return candidate
+    return None
+
+
 def _safe_cache_name(value: str) -> str:
     cleaned = []
     for char in value:
@@ -765,6 +934,24 @@ def _safe_cache_name(value: str) -> str:
 
 def _format_cache_float(value: float) -> str:
     return f"{float(value):.4f}".rstrip("0").rstrip(".").replace(".", "p")
+
+
+def _optional_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _round_optional_float(value: Optional[float]) -> Optional[float]:

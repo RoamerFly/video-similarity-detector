@@ -317,9 +317,10 @@ def _determine_relation(
     if (b_longer_by_duration or b_longer_by_frames) and a_in_b >= clip_threshold:
         return "A_is_likely_clip_of_B"
 
-    if b_in_a >= 0.75 and (b_in_a - a_in_b) >= directional_gap:
+    directional_clip_threshold = 0.85
+    if b_in_a >= directional_clip_threshold and (b_in_a - a_in_b) >= directional_gap:
         return "B_is_likely_clip_of_A"
-    elif a_in_b >= 0.75 and (a_in_b - b_in_a) >= directional_gap:
+    elif a_in_b >= directional_clip_threshold and (a_in_b - b_in_a) >= directional_gap:
         return "A_is_likely_clip_of_B"
     elif a_in_b >= 0.80 and b_in_a >= 0.80:
         return "near_duplicate_or_same_content"
@@ -475,6 +476,8 @@ def compare_frame_indexes_bidirectional(
     match_threshold: float = 0.65,
     top_k: int = 10,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    early_stop: bool = False,
+    early_stop_margin: float = 0.04,
 ) -> ContainmentResult:
     """
     Perform bidirectional containment detection with prebuilt frame indices.
@@ -496,6 +499,22 @@ def compare_frame_indexes_bidirectional(
     total_frames_b = index_b.num_frames
     duration_a = _cache_duration_seconds(cache_a)
     duration_b = _cache_duration_seconds(cache_b)
+
+    if early_stop and total_frames_a > 0 and total_frames_b > 0:
+        return _compare_frame_indexes_bidirectional_early_stop(
+            cache_a=cache_a,
+            cache_b=cache_b,
+            index_a=index_a,
+            index_b=index_b,
+            match_threshold=match_threshold,
+            top_k=top_k,
+            progress_callback=progress_callback,
+            early_stop_margin=early_stop_margin,
+            total_frames_a=total_frames_a,
+            total_frames_b=total_frames_b,
+            duration_a=duration_a,
+            duration_b=duration_b,
+        )
 
     # A -> B: Query B's index with A's embeddings
     matches_a_to_b, unique_matched_a, avg_sim_a_to_b, best_sims_a = _find_matches(
@@ -533,6 +552,178 @@ def compare_frame_indexes_bidirectional(
         ),
     )
 
+    return _build_containment_result(
+        cache_a=cache_a,
+        cache_b=cache_b,
+        matches_a_to_b=matches_a_to_b,
+        matches_b_to_a=matches_b_to_a,
+        avg_sim_a_to_b=avg_sim_a_to_b,
+        avg_sim_b_to_a=avg_sim_b_to_a,
+        best_sims_a=best_sims_a,
+        best_sims_b=best_sims_b,
+        total_frames_a=total_frames_a,
+        total_frames_b=total_frames_b,
+        duration_a=duration_a,
+        duration_b=duration_b,
+    )
+
+
+def _compare_frame_indexes_bidirectional_early_stop(
+    cache_a: FrameEmbeddingCache,
+    cache_b: FrameEmbeddingCache,
+    index_a: FrameIndexResult,
+    index_b: FrameIndexResult,
+    match_threshold: float,
+    top_k: int,
+    progress_callback: Optional[Callable[[str, int, int], None]],
+    early_stop_margin: float,
+    total_frames_a: int,
+    total_frames_b: int,
+    duration_a: float,
+    duration_b: float,
+) -> ContainmentResult:
+    a_is_shorter = total_frames_a <= total_frames_b
+    if a_is_shorter:
+        first_direction = "a_to_b"
+        first_matches, _unique, first_avg, first_best = _find_matches(
+            source_embeddings=cache_a.embeddings,
+            source_frame_indices=cache_a.frame_indices,
+            source_timestamps=cache_a.timestamps,
+            source_video=cache_a.video_path,
+            target_index_result=index_b,
+            target_video=cache_b.video_path,
+            top_k=top_k,
+            match_threshold=match_threshold,
+            source_thumbnail_paths=cache_a.thumbnail_paths,
+            progress_callback=(
+                (lambda done, total: progress_callback("a_to_b", done, total))
+                if progress_callback
+                else None
+            ),
+        )
+    else:
+        first_direction = "b_to_a"
+        first_matches, _unique, first_avg, first_best = _find_matches(
+            source_embeddings=cache_b.embeddings,
+            source_frame_indices=cache_b.frame_indices,
+            source_timestamps=cache_b.timestamps,
+            source_video=cache_b.video_path,
+            target_index_result=index_a,
+            target_video=cache_a.video_path,
+            top_k=top_k,
+            match_threshold=match_threshold,
+            source_thumbnail_paths=cache_b.thumbnail_paths,
+            progress_callback=(
+                (lambda done, total: progress_callback("b_to_a", done, total))
+                if progress_callback
+                else None
+            ),
+        )
+
+    p99 = float(np.percentile(first_best, 99)) if len(first_best) else 0.0
+    stop_threshold = max(0.0, float(match_threshold) - max(0.0, float(early_stop_margin)))
+    if not first_matches and p99 < stop_threshold:
+        if a_is_shorter:
+            return _build_containment_result(
+                cache_a=cache_a,
+                cache_b=cache_b,
+                matches_a_to_b=first_matches,
+                matches_b_to_a=[],
+                avg_sim_a_to_b=first_avg,
+                avg_sim_b_to_a=0.0,
+                best_sims_a=first_best,
+                best_sims_b=np.array([], dtype="float32"),
+                total_frames_a=total_frames_a,
+                total_frames_b=total_frames_b,
+                duration_a=duration_a,
+                duration_b=duration_b,
+            )
+        return _build_containment_result(
+            cache_a=cache_a,
+            cache_b=cache_b,
+            matches_a_to_b=[],
+            matches_b_to_a=first_matches,
+            avg_sim_a_to_b=0.0,
+            avg_sim_b_to_a=first_avg,
+            best_sims_a=np.array([], dtype="float32"),
+            best_sims_b=first_best,
+            total_frames_a=total_frames_a,
+            total_frames_b=total_frames_b,
+            duration_a=duration_a,
+            duration_b=duration_b,
+        )
+
+    if first_direction == "a_to_b":
+        matches_a_to_b = first_matches
+        avg_sim_a_to_b = first_avg
+        best_sims_a = first_best
+        matches_b_to_a, _unique_b, avg_sim_b_to_a, best_sims_b = _find_matches(
+            source_embeddings=cache_b.embeddings,
+            source_frame_indices=cache_b.frame_indices,
+            source_timestamps=cache_b.timestamps,
+            source_video=cache_b.video_path,
+            target_index_result=index_a,
+            target_video=cache_a.video_path,
+            top_k=top_k,
+            match_threshold=match_threshold,
+            source_thumbnail_paths=cache_b.thumbnail_paths,
+            progress_callback=(
+                (lambda done, total: progress_callback("b_to_a", done, total))
+                if progress_callback
+                else None
+            ),
+        )
+    else:
+        matches_b_to_a = first_matches
+        avg_sim_b_to_a = first_avg
+        best_sims_b = first_best
+        matches_a_to_b, _unique_a, avg_sim_a_to_b, best_sims_a = _find_matches(
+            source_embeddings=cache_a.embeddings,
+            source_frame_indices=cache_a.frame_indices,
+            source_timestamps=cache_a.timestamps,
+            source_video=cache_a.video_path,
+            target_index_result=index_b,
+            target_video=cache_b.video_path,
+            top_k=top_k,
+            match_threshold=match_threshold,
+            source_thumbnail_paths=cache_a.thumbnail_paths,
+            progress_callback=(
+                (lambda done, total: progress_callback("a_to_b", done, total))
+                if progress_callback
+                else None
+            ),
+        )
+
+    return _build_containment_result(
+        cache_a=cache_a,
+        cache_b=cache_b,
+        matches_a_to_b=matches_a_to_b,
+        matches_b_to_a=matches_b_to_a,
+        avg_sim_a_to_b=avg_sim_a_to_b,
+        avg_sim_b_to_a=avg_sim_b_to_a,
+        best_sims_a=best_sims_a,
+        best_sims_b=best_sims_b,
+        total_frames_a=total_frames_a,
+        total_frames_b=total_frames_b,
+        duration_a=duration_a,
+        duration_b=duration_b,
+    )
+
+
+def _build_containment_result(
+    cache_a: FrameEmbeddingCache,
+    cache_b: FrameEmbeddingCache,
+    matches_a_to_b: List[FrameMatch],
+    matches_b_to_a: List[FrameMatch],
+    avg_sim_a_to_b: float,
+    avg_sim_b_to_a: float,
+    best_sims_a: np.ndarray,
+    best_sims_b: np.ndarray,
+    total_frames_a: int,
+    total_frames_b: int,
+    duration_a: float,
+    duration_b: float,
+) -> ContainmentResult:
     # Calculate containment ratios from time-consistent matches. The raw unique
     # match count is too permissive for long videos because semantically similar
     # but unrelated frames can appear throughout the source.
@@ -540,9 +731,7 @@ def compare_frame_indexes_bidirectional(
     b_in_a = _temporal_consistent_coverage(matches_b_to_a, total_frames_b)
     symmetric_similarity = (a_in_b + b_in_a) / 2
 
-    # Calculate raw similarity statistics (combine best similarities from both directions)
     all_best_sims = np.concatenate([best_sims_a, best_sims_b]) if len(best_sims_a) > 0 or len(best_sims_b) > 0 else np.array([], dtype="float32")
-
     if len(all_best_sims) > 0:
         raw_similarity_max = float(np.max(all_best_sims))
         raw_similarity_mean = float(np.mean(all_best_sims))
@@ -554,7 +743,6 @@ def compare_frame_indexes_bidirectional(
         raw_similarity_p95 = 0.0
         raw_similarity_p99 = 0.0
 
-    # Determine relation
     relation = _determine_relation(
         a_in_b,
         b_in_a,

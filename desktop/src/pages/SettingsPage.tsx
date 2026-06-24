@@ -190,11 +190,8 @@ export function SettingsPage() {
   const saveMessageTimer = useRef<number | null>(null)
   const saveFeedbackTimer = useRef<number | null>(null)
   const savedSettingsRef = useRef<SettingsSnapshot>(settingsSnapshotFromState(useSettingsStore.getState()))
-  const [savedSignature, setSavedSignature] = useState(() => buildSettingsSignature(savedSettingsRef.current))
   const [saveFeedback, setSaveFeedback] = useState<'idle' | 'saving' | 'saved'>('idle')
   const environmentConfigKey = buildEnvironmentConfigKey(settings.pythonPath, settings.projectRoot, settings.reportDir)
-  const settingsSignature = buildSettingsSignature(settings)
-  const hasUnsavedChanges = settingsSignature !== savedSignature
 
   const executeEnvironmentCheck = useCallback(async (quickCheck = false) => {
     useEnvironmentStore.getState().setChecking(true)
@@ -350,7 +347,6 @@ export function SettingsPage() {
     current.saveSettings()
     const snapshot = settingsSnapshotFromState(current)
     savedSettingsRef.current = snapshot
-    setSavedSignature(buildSettingsSignature(snapshot))
     saveFeedbackTimer.current = window.setTimeout(() => {
       setSaveFeedback('saved')
       showSettingsMessage(message)
@@ -426,6 +422,13 @@ export function SettingsPage() {
     showSettingsMessage('已恢复默认基础设置，请点击“保存设置”应用。')
   }
 
+  const resetLabel = activeTab === 'analysis'
+    ? '恢复当前预设默认'
+    : activeTab === 'error_tolerance'
+      ? '恢复错误容忍默认'
+      : '恢复基础默认'
+  const toastMessage = error || savedMessage || (saveFeedback === 'saved' ? '设置保存成功' : '')
+
   return (
     <div className="route-fill settings-shell">
       <GlassPanel className="settings-tab-panel">
@@ -457,6 +460,24 @@ export function SettingsPage() {
             </button>
           </div>
           <div className="settings-fixed-actions">
+            <NeonButton
+              className="settings-reset-button"
+              variant="outline"
+              type="button"
+              onClick={handleReset}
+              title={resetLabel}
+              aria-label={resetLabel}
+            >
+              <RotateCcw size={18} />
+            </NeonButton>
+            <NeonButton
+              className={`settings-save-button ${saveFeedback === 'saving' ? 'is-saving' : saveFeedback === 'saved' ? 'is-saved' : ''}`}
+              type="button"
+              onClick={() => handleSave()}
+            >
+              {saveFeedback === 'saved' ? <CheckCircle2 size={18} /> : <Save size={18} />}
+              {saveFeedback === 'saving' ? '正在保存' : saveFeedback === 'saved' ? '保存成功' : '保存设置'}
+            </NeonButton>
             <NeonButton variant="outline" type="button" onClick={() => setUpdateDialogOpen(true)}>
               检查更新
             </NeonButton>
@@ -492,41 +513,10 @@ export function SettingsPage() {
           )}
         </div>
 
-        <div className="settings-actions">
-          <div>
-            <p className="settings-note compact">
-              {hasUnsavedChanges
-                ? '有尚未保存的修改；离开本页会撤销这些修改。'
-                : '设置已保存；正在运行的任务不会被中途改配置。'}
-            </p>
-            {(savedMessage || error) && (
-              <p className={error ? 'inline-error settings-note' : 'settings-note'}>
-                {error ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
-                {error || savedMessage}
-              </p>
-            )}
-          </div>
-          <NeonButton variant="outline" type="button" onClick={handleReset}>
-            <RotateCcw size={20} />
-            {activeTab === 'analysis'
-              ? '恢复当前预设默认'
-              : activeTab === 'error_tolerance'
-                ? '恢复错误容忍默认'
-                : '恢复基础默认'}
-          </NeonButton>
-          <NeonButton
-            className={`settings-save-button ${saveFeedback === 'saving' ? 'is-saving' : saveFeedback === 'saved' ? 'is-saved' : ''}`}
-            type="button"
-            onClick={() => handleSave()}
-          >
-            {saveFeedback === 'saved' ? <CheckCircle2 size={21} /> : <Save size={21} />}
-            {saveFeedback === 'saving' ? '正在保存' : saveFeedback === 'saved' ? '保存成功' : '保存设置'}
-          </NeonButton>
-        </div>
-        {saveFeedback === 'saved' && (
-          <div className="settings-save-toast" role="status" aria-live="polite">
-            <CheckCircle2 size={18} />
-            设置保存成功
+        {toastMessage && (
+          <div className={error ? 'settings-save-toast is-error' : 'settings-save-toast'} role="status" aria-live="polite">
+            {error ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
+            {toastMessage}
           </div>
         )}
       </GlassPanel>
@@ -642,6 +632,7 @@ function BaseSettings({
             <option value="exit">退出程序</option>
           </SelectInput>
         </label>
+        <NumberSetting label="并行设置" tip={parameterHints.compareWorkers} value={settings.defaultCompareWorkers} min={1} max={8} onChange={settings.setDefaultCompareWorkers} />
       </div>
 
       <div className="settings-side-stack">
@@ -761,6 +752,17 @@ function UpdateDialog({
   const currentVersion = update?.currentVersion || appInfo?.version || '0.1.0'
   const targetVersion = update?.latestVersion || currentVersion
   const installProgress = Math.max(0, Math.min(100, progress?.progress || 0))
+  const releaseNoteItems = useMemo(
+    () => formatReleaseNotes(update?.releaseNotes || ''),
+    [update?.releaseNotes],
+  )
+  const releaseNoteFallback = update
+    ? update.updateAvailable
+      ? '当前检查通道未返回发布说明，可打开发布页查看完整更新内容。'
+      : '当前版本没有新的发布说明。'
+    : checking
+      ? '正在读取最新版本信息...'
+      : '完成检查后会在这里显示新版本更新内容。'
 
   if (!open) return null
 
@@ -781,12 +783,54 @@ function UpdateDialog({
         <span>当前 v{currentVersion}</span>
         <strong>{update?.updateAvailable ? `可更新至 v${targetVersion}` : `${appInfo?.buildFlavor === 'gpu' ? 'GPU' : 'CPU'} 版`}</strong>
       </div>
+      {update && (
+        <div className="update-meta-grid">
+          <div>
+            <span>目标包</span>
+            <strong>{update.assetName || `${update.buildFlavor.toUpperCase()} 安装包`}</strong>
+          </div>
+          <div>
+            <span>包大小</span>
+            <strong>{update.assetSize > 0 ? formatBytes(update.assetSize) : '未获取'}</strong>
+          </div>
+          <div>
+            <span>发布时间</span>
+            <strong>{formatUpdatePublishedAt(update.publishedAt)}</strong>
+          </div>
+        </div>
+      )}
       <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{statusText}</p>
       {(appInfo?.installRoot || update?.installRoot) && (
         <p className="update-install-path" title={update?.installRoot || appInfo?.installRoot}>
           安装位置：{update?.installRoot || appInfo?.installRoot}
         </p>
       )}
+      <div className="update-release-notes">
+        <div className="update-release-notes-head">
+          <strong>新版本更新内容</strong>
+          {update?.releaseUrl ? (
+            <button type="button" onClick={() => void openReleasePage(update.releaseUrl)}>
+              <ExternalLink size={14} />
+              发布页
+            </button>
+          ) : null}
+        </div>
+        {releaseNoteItems.length ? (
+          <div className="update-release-notes-body">
+            {releaseNoteItems.map((item, index) => (
+              item.kind === 'heading' ? (
+                <h4 key={`${item.kind}-${index}`}>{item.text}</h4>
+              ) : item.kind === 'bullet' ? (
+                <p className="update-release-note-bullet" key={`${item.kind}-${index}`}>{item.text}</p>
+              ) : (
+                <p key={`${item.kind}-${index}`}>{item.text}</p>
+              )
+            ))}
+          </div>
+        ) : (
+          <p className="update-release-notes-empty">{releaseNoteFallback}</p>
+        )}
+      </div>
       {installing && (
         <div className="update-progress-block">
           <div>
@@ -829,6 +873,53 @@ function UpdateDialog({
     </div>,
     document.body,
   )
+}
+
+type ReleaseNoteItem = {
+  kind: 'heading' | 'bullet' | 'paragraph'
+  text: string
+}
+
+function formatReleaseNotes(notes: string): ReleaseNoteItem[] {
+  const lines = notes
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => cleanReleaseNoteLine(line))
+    .filter(Boolean)
+    .slice(0, 28)
+
+  return lines.map((line) => {
+    if (/^#{1,6}\s+/.test(line)) {
+      return { kind: 'heading', text: line.replace(/^#{1,6}\s+/, '') }
+    }
+    if (/^[-*]\s+/.test(line)) {
+      return { kind: 'bullet', text: line.replace(/^[-*]\s+/, '') }
+    }
+    return { kind: 'paragraph', text: line }
+  })
+}
+
+function cleanReleaseNoteLine(line: string) {
+  return line
+    .trim()
+    .replace(/^>\s*/, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/_([^_]+)_/g, '$1')
+}
+
+function formatUpdatePublishedAt(value: string) {
+  if (!value) return '未获取'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
 }
 
 function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: string) => void }) {
@@ -1349,6 +1440,7 @@ function buildSettingsSignature(settings: SettingsSnapshot) {
     checkEnvOnStartup: settings.checkEnvOnStartup,
     openMaximized: settings.openMaximized,
     closeBehavior: settings.closeBehavior,
+    defaultCompareWorkers: settings.defaultCompareWorkers,
     analysisMode: settings.analysisMode,
     selectedAnalysisPreset: settings.selectedAnalysisPreset,
     customAnalysisPresetSource: settings.customAnalysisPresetSource,

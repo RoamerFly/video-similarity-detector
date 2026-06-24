@@ -126,6 +126,7 @@ export interface RunBatchCompareConfig {
   windowSize: number
   topK: number
   candidateLimit: number
+  compareWorkers: number
   maxGapSec: number
   frameStep: number
   cropBlackBorders: boolean
@@ -181,6 +182,7 @@ export interface AnalysisTaskStage {
 
 export interface AnalysisTaskCacheArtifact {
   path: string
+  pathBase?: 'cacheDir' | 'projectRoot' | 'absolute' | string
   category: string
   description: string
   createdAt: string
@@ -632,6 +634,7 @@ export function buildAnalysisTaskMatchKey(config: RunBatchCompareConfig) {
     windowSize: config.windowSize,
     topK: config.topK,
     candidateLimit: config.candidateLimit,
+    compareWorkers: config.compareWorkers,
     maxGapSec: config.maxGapSec,
     frameStep: config.frameStep,
     cropBlackBorders: config.cropBlackBorders,
@@ -943,6 +946,7 @@ export function buildRunBatchCompareConfig(
     windowSize: analysisConfig.windowSize,
     topK: analysisConfig.topK,
     candidateLimit: analysisConfig.candidateLimit ?? settings.defaultCandidateLimit,
+    compareWorkers: analysisConfig.compareWorkers || settings.defaultCompareWorkers,
     maxGapSec: analysisConfig.maxGapSec,
     frameStep: analysisConfig.frameStep || settings.defaultFrameStep,
     minSegmentDuration: analysisConfig.minSegmentDuration || settings.defaultMinSegmentDuration,

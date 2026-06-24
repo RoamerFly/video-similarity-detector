@@ -25,6 +25,7 @@ export interface SettingsSnapshot {
   defaultWindowSize: number
   defaultTopK: number
   defaultCandidateLimit: number
+  defaultCompareWorkers: number
   defaultMaxGapSec: number
   defaultFrameStep: number
   defaultMinSegmentDuration: number
@@ -58,6 +59,7 @@ export interface AnalysisConfig {
   windowSize: number
   topK: number
   candidateLimit: number
+  compareWorkers: number
   maxGapSec: number
   frameStep: number
   minSegmentDuration: number
@@ -203,6 +205,7 @@ export const defaultSettings: SettingsSnapshot = {
   cacheDir: 'data',
   reportDir: 'data/reports',
   ...normalAnalysisPreset,
+  defaultCompareWorkers: 2,
   errorTolerancePreset: 'balanced',
   errorToleranceSevereLimit: 20,
   errorToleranceMissingPictureLimit: 100,
@@ -229,6 +232,7 @@ export function analysisConfigFromSettings(settings: SettingsSnapshot): Analysis
     windowSize: settings.defaultWindowSize,
     topK: settings.defaultTopK,
     candidateLimit: settings.defaultCandidateLimit,
+    compareWorkers: settings.defaultCompareWorkers,
     maxGapSec: settings.defaultMaxGapSec,
     frameStep: settings.defaultFrameStep,
     minSegmentDuration: settings.defaultMinSegmentDuration,

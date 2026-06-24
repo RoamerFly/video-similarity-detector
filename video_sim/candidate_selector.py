@@ -30,6 +30,8 @@ def select_candidate_pairs(
     match_threshold: float,
     representatives_per_video: int = 64,
     max_index_frames_per_video: int = 2048,
+    window_seconds: float = 30.0,
+    max_windows_per_video: int = 96,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> CandidateSelection:
     """
@@ -60,11 +62,18 @@ def select_candidate_pairs(
             embeddings,
             max(4, representatives_per_video),
         )
-        source_representatives.append(representatives)
+        window_representatives = _window_embeddings(
+            embeddings,
+            np.asarray(video_caches[video_path].timestamps, dtype="float32"),
+            window_seconds=window_seconds,
+            limit=max(1, max_windows_per_video),
+        )
+        source_representatives.append(_stack_nonempty([representatives, window_representatives]))
         indexed_embeddings = _representative_embeddings(
             embeddings,
             max(representatives_per_video, max_index_frames_per_video),
         )
+        indexed_embeddings = _stack_nonempty([indexed_embeddings, window_representatives])
         index_blocks.append(indexed_embeddings)
         owner_blocks.append(np.full(len(indexed_embeddings), video_id, dtype=np.int32))
         if progress_callback:
@@ -136,6 +145,50 @@ def _representative_embeddings(embeddings: np.ndarray, limit: int) -> np.ndarray
     count = min(max(1, int(limit)), len(embeddings))
     indices = np.linspace(0, len(embeddings) - 1, count, dtype=np.int64)
     return np.ascontiguousarray(embeddings[indices], dtype="float32")
+
+
+def _window_embeddings(
+    embeddings: np.ndarray,
+    timestamps: np.ndarray,
+    window_seconds: float,
+    limit: int,
+) -> np.ndarray:
+    if embeddings.ndim != 2 or len(embeddings) == 0:
+        return np.zeros((0, 0), dtype="float32")
+    if len(timestamps) != len(embeddings):
+        return _representative_embeddings(embeddings, limit)
+
+    span = max(float(window_seconds), 1.0)
+    buckets: dict[int, list[int]] = {}
+    for index, timestamp in enumerate(timestamps):
+        try:
+            bucket = int(max(0.0, float(timestamp)) // span)
+        except (TypeError, ValueError):
+            bucket = index
+        buckets.setdefault(bucket, []).append(index)
+
+    pooled = []
+    for indices in buckets.values():
+        block = np.asarray(embeddings[indices], dtype="float32")
+        if len(block) == 0:
+            continue
+        vector = np.mean(block, axis=0)
+        norm = float(np.linalg.norm(vector))
+        if norm > 0:
+            vector = vector / norm
+        pooled.append(vector.astype("float32"))
+
+    if not pooled:
+        return _representative_embeddings(embeddings, limit)
+    windows = np.ascontiguousarray(np.vstack(pooled), dtype="float32")
+    return _representative_embeddings(windows, limit)
+
+
+def _stack_nonempty(blocks: list[np.ndarray]) -> np.ndarray:
+    valid = [block for block in blocks if block.ndim == 2 and len(block) > 0]
+    if not valid:
+        return np.zeros((0, 0), dtype="float32")
+    return np.ascontiguousarray(np.vstack(valid), dtype="float32")
 
 
 def _candidate_score(

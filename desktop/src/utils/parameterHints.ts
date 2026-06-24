@@ -11,6 +11,7 @@ export const parameterHints = {
   windowSize: '按多少秒切一段，用来统计局部时间窗口相似度。',
   topK: '每一帧最多保留多少个候选相似帧。',
   candidateLimit: '每个视频最多精确比较多少个粗筛候选；0 表示比较全部视频对。',
+  compareWorkers: '同时精确比较多少个视频对；调高可加速，但会增加内存和 CPU/GPU 压力。',
   maxGapSec: '即使画面变化不大，也会按这个间隔保留一帧。',
   frameStep: '长视频加速项；每隔多少帧检查一次，1 表示逐帧检查。',
   minSegmentDuration: '匹配片段至少持续多久才显示；调低可找短片段。',

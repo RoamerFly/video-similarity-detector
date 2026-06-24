@@ -5,6 +5,7 @@ Provides video file discovery and metadata extraction.
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -12,6 +13,33 @@ from video_sim.config import Config
 
 # Default video extensions
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv")
+
+
+def _scan_video_paths(input_path: Path, recursive: bool, extensions: tuple[str, ...]) -> List[Path]:
+    videos: List[Path] = []
+    stack = [input_path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive:
+                                stack.append(Path(entry.path))
+                            continue
+                        if (
+                            entry.is_file(follow_symlinks=False)
+                            and Path(entry.name).suffix.lower() in extensions
+                        ):
+                            videos.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return videos
 
 
 def scan_videos(input_dir: Union[str, Path], recursive: bool = True) -> List[Path]:
@@ -33,12 +61,7 @@ def scan_videos(input_dir: Union[str, Path], recursive: bool = True) -> List[Pat
         print(f"Warning: Input directory not found: {input_path}")
         return []
 
-    videos = []
-    pattern = "**/*" if recursive else "*"
-
-    for path in input_path.glob(pattern):
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
-            videos.append(path)
+    videos = _scan_video_paths(input_path, recursive, VIDEO_EXTENSIONS)
 
     return sorted(videos, key=lambda p: p.name)
 
@@ -93,19 +116,19 @@ class VideoScanner:
             return []
 
         videos = []
-        pattern = "**/*" if recursive else "*"
-
-        for path in self.videos_dir.glob(pattern):
-            if path.is_file() and path.suffix.lower() in self.extensions:
+        for path in _scan_video_paths(self.videos_dir, recursive, self.extensions):
+            try:
                 size_mb = path.stat().st_size / (1024 * 1024)
-                videos.append(
-                    VideoInfo(
-                        path=path,
-                        name=path.name,
-                        size_mb=size_mb,
-                        extension=path.suffix.lower(),
-                    )
+            except OSError:
+                continue
+            videos.append(
+                VideoInfo(
+                    path=path,
+                    name=path.name,
+                    size_mb=size_mb,
+                    extension=path.suffix.lower(),
                 )
+            )
 
         return sorted(videos, key=lambda v: v.name)
 

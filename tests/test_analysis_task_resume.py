@@ -74,6 +74,9 @@ def test_stage_progress_and_redo_reset_downstream(tmp_path: Path):
     batch_compare.update_task_stage("cache", "completed", 100, "缓存检查完成")
     batch_compare.update_task_stage("features", "completed", 100, "特征完成")
 
+    assert batch_compare.task_stage_is_completed("scan")
+    assert batch_compare.task_stage_is_completed("features")
+    assert not batch_compare.task_stage_is_completed("candidate")
     assert batch_compare.ACTIVE_TASK_MANIFEST["progress"] == 55.0
     batch_compare.validate_stage_prerequisites("candidate")
 

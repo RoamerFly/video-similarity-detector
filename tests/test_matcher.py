@@ -9,6 +9,13 @@ Uses artificial vectors to verify:
 
 import numpy as np
 import pytest
+import sys
+import types
+
+decord_stub = types.ModuleType("decord")
+decord_stub.VideoReader = object
+decord_stub.cpu = lambda *_args, **_kwargs: None
+sys.modules.setdefault("decord", decord_stub)
 
 from video_sim.embedder import FrameEmbeddingCache
 from video_sim.indexer import FrameIndexResult, build_frame_index
@@ -17,6 +24,7 @@ from video_sim.matcher import (
     FrameMatch,
     _determine_relation,
     _find_matches,
+    compare_frame_indexes_bidirectional,
     compare_videos_bidirectional,
 )
 
@@ -364,6 +372,54 @@ class TestCompareVideosBidirectional:
         assert result.a_in_b < 0.5
         assert result.b_in_a < 0.5
         assert result.relation == "different"
+
+    def test_early_stop_preserves_clear_clip_match(self):
+        """Early stop must still run both directions when the shorter video matches."""
+        np.random.seed(42)
+        dim = 32
+        embeddings_b = normalize_embeddings(np.random.randn(12, dim).astype("float32"))
+        embeddings_a = embeddings_b[3:9].copy()
+        cache_a = create_test_cache("clip.mp4", embeddings_a)
+        cache_b = create_test_cache("long.mp4", embeddings_b)
+
+        result = compare_frame_indexes_bidirectional(
+            cache_a=cache_a,
+            cache_b=cache_b,
+            index_a=build_frame_index(cache_a),
+            index_b=build_frame_index(cache_b),
+            match_threshold=0.95,
+            top_k=3,
+            early_stop=True,
+        )
+
+        assert result.a_in_b > 0.95
+        assert result.relation == "A_is_likely_clip_of_B"
+        assert result.matches_a_to_b
+
+    def test_early_stop_skips_reverse_for_clear_non_match(self):
+        """A conservative no-match first pass can skip the reverse direction."""
+        cache_a = create_test_cache(
+            "a.mp4",
+            normalize_embeddings(np.tile([[1.0, 0.0, 0.0, 0.0]], (4, 1)).astype("float32")),
+        )
+        cache_b = create_test_cache(
+            "b.mp4",
+            normalize_embeddings(np.tile([[0.0, 1.0, 0.0, 0.0]], (8, 1)).astype("float32")),
+        )
+
+        result = compare_frame_indexes_bidirectional(
+            cache_a=cache_a,
+            cache_b=cache_b,
+            index_a=build_frame_index(cache_a),
+            index_b=build_frame_index(cache_b),
+            match_threshold=0.90,
+            top_k=1,
+            early_stop=True,
+        )
+
+        assert result.relation == "different"
+        assert result.matches_a_to_b == []
+        assert result.matches_b_to_a == []
 
     def test_empty_video(self):
         """Test handling of empty video cache."""

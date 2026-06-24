@@ -66,6 +66,7 @@ const initialAnalysisConfig: AnalysisConfig = {
   windowSize: defaultSettings.defaultWindowSize,
   topK: defaultSettings.defaultTopK,
   candidateLimit: defaultSettings.defaultCandidateLimit,
+  compareWorkers: defaultSettings.defaultCompareWorkers,
   maxGapSec: defaultSettings.defaultMaxGapSec,
   frameStep: defaultSettings.defaultFrameStep,
   minSegmentDuration: defaultSettings.defaultMinSegmentDuration,

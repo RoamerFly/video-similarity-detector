@@ -21,6 +21,57 @@ function Invoke-Checked([scriptblock]$Command, [string]$ErrorMessage) {
     }
 }
 
+function Add-PathEntry([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $entries = @($env:PATH -split [System.IO.Path]::PathSeparator) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($entry in $entries) {
+        if ([System.IO.Path]::GetFullPath($entry).Equals(
+            $fullPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            return
+        }
+    }
+    $env:PATH = "$fullPath$([System.IO.Path]::PathSeparator)$env:PATH"
+}
+
+function Ensure-BuildCommand([string]$Command) {
+    if (Get-Command $Command -ErrorAction SilentlyContinue) {
+        return
+    }
+
+    if ($Command -eq "cargo") {
+        $cargoCandidates = @()
+        if (-not [string]::IsNullOrWhiteSpace($env:CARGO_HOME)) {
+            $cargoCandidates += Join-Path $env:CARGO_HOME "bin\cargo.exe"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            $cargoCandidates += Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+        }
+        $profileDir = [Environment]::GetFolderPath("UserProfile")
+        if (-not [string]::IsNullOrWhiteSpace($profileDir)) {
+            $cargoCandidates += Join-Path $profileDir ".cargo\bin\cargo.exe"
+        }
+
+        foreach ($candidate in $cargoCandidates | Select-Object -Unique) {
+            if (Test-Path -LiteralPath $candidate) {
+                Add-PathEntry (Split-Path -Parent $candidate)
+                if (Get-Command $Command -ErrorAction SilentlyContinue) {
+                    Write-Host "  - Found cargo: $candidate" -ForegroundColor Green
+                    return
+                }
+            }
+        }
+    }
+
+    throw "Missing build command: $Command"
+}
+
 function Resolve-AbsolutePath([string]$Base, [string]$Value, [string]$DefaultValue) {
     $selected = if ([string]::IsNullOrWhiteSpace($Value)) { $DefaultValue } else { $Value.Trim() }
     if ([System.IO.Path]::IsPathRooted($selected)) {
@@ -103,9 +154,7 @@ Write-Host "Test output  : $outputDir"
 
 Write-Step "[1/5] Checking reusable local environment"
 foreach ($command in @("node", "npm", "npx", "cargo")) {
-    if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
-        throw "Missing build command: $command"
-    }
+    Ensure-BuildCommand $command
 }
 if (-not (Test-Path -LiteralPath (Join-Path $desktopDir "node_modules"))) {
     throw "desktop\node_modules is missing. Run npm install in desktop once."

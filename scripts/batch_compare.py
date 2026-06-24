@@ -29,11 +29,13 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def log(message: str) -> None:
@@ -79,6 +81,23 @@ def display_path(path: Path) -> str:
         return str(path.resolve())
     except OSError:
         return str(path)
+
+
+def _normalize_manifest_path(path: str | Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _portable_path(path: Path, base: Path = PROJECT_ROOT) -> str:
+    """将路径转为可移植格式：在项目根目录下则转相对路径，方便迁移。"""
+    root = base.resolve()
+    try:
+        resolved = path.resolve(strict=False)
+        return _normalize_manifest_path(resolved.relative_to(root))
+    except (ValueError, OSError):
+        try:
+            return _normalize_manifest_path(path.resolve(strict=False))
+        except OSError:
+            return _normalize_manifest_path(path)
 
 
 def progress_text(value: str) -> str:
@@ -440,6 +459,14 @@ def validate_stage_prerequisites(stage_id: str) -> None:
         raise RuntimeError(f"请先完成前置阶段：{'、'.join(incomplete)}")
 
 
+def task_stage_is_completed(stage_id: str) -> bool:
+    stages = merge_task_stages(ACTIVE_TASK_MANIFEST.get("stages"))
+    return any(
+        stage.get("id") == stage_id and stage.get("status") == "completed"
+        for stage in stages
+    )
+
+
 def finish_stage_only(stage_id: str) -> bool:
     target_stage = str(globals().get("TARGET_TASK_STAGE") or "")
     if target_stage != stage_id:
@@ -461,11 +488,13 @@ def record_task_cache_artifact(path: Path, description: str) -> None:
         for item in (ACTIVE_TASK_MANIFEST.get("cacheArtifacts") or [])
         if isinstance(item, dict) and item.get("path")
     ]
-    normalized = str(path.resolve(strict=False))
-    if any(str(item.get("path")) == normalized for item in artifacts):
+    normalized, path_base = _artifact_path_reference(path)
+    compare_key = _artifact_compare_key({"path": normalized, "pathBase": path_base})
+    if any(_artifact_compare_key(item) == compare_key for item in artifacts):
         return
     artifacts.append({
         "path": normalized,
+        "pathBase": path_base,
         "category": "任务生成缓存",
         "description": description,
         "createdAt": datetime.now().isoformat(),
@@ -817,6 +846,7 @@ def save_resume_pairs(
 
 
 ACTIVE_TASK_MANIFEST_PATH: Path | None = None
+ACTIVE_TASK_CACHE_DIR: Path | None = None
 ACTIVE_TASK_MANIFEST: dict = {}
 TARGET_TASK_STAGE = ""
 
@@ -842,6 +872,47 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     os.replace(pending, path)
 
 
+def task_cache_dir_from_manifest_path(manifest_path: Path | None) -> Path | None:
+    if manifest_path is None or len(manifest_path.parents) < 4:
+        return None
+    return manifest_path.parents[3]
+
+
+def _artifact_path_reference(path: Path) -> tuple[str, str]:
+    cache_dir = ACTIVE_TASK_CACHE_DIR or task_cache_dir_from_manifest_path(ACTIVE_TASK_MANIFEST_PATH)
+    if cache_dir is not None:
+        try:
+            resolved = path.resolve(strict=False)
+            cache_root = cache_dir.resolve(strict=False)
+            return _normalize_manifest_path(resolved.relative_to(cache_root)), "cacheDir"
+        except (ValueError, OSError):
+            pass
+    portable = _portable_path(path)
+    if Path(portable).is_absolute():
+        return portable, "absolute"
+    return portable, "projectRoot"
+
+
+def _artifact_compare_key(item: dict) -> str:
+    raw_path = str(item.get("path") or "")
+    raw = Path(raw_path)
+    if raw.is_absolute():
+        candidate = raw
+    else:
+        path_base = str(item.get("pathBase") or "")
+        if path_base == "cacheDir":
+            base = ACTIVE_TASK_CACHE_DIR or task_cache_dir_from_manifest_path(ACTIVE_TASK_MANIFEST_PATH)
+            candidate = (base or PROJECT_ROOT) / raw
+        elif path_base == "absolute":
+            candidate = raw
+        else:
+            candidate = PROJECT_ROOT / raw
+    try:
+        return _normalize_manifest_path(candidate.resolve(strict=False)).casefold()
+    except OSError:
+        return _normalize_manifest_path(candidate).casefold()
+
+
 def parse_task_config(raw_value: str) -> dict:
     if not raw_value:
         return {}
@@ -863,7 +934,7 @@ def start_task_manifest(
     config: dict,
     output_base: Path,
 ) -> None:
-    global ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST
+    global ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_CACHE_DIR, ACTIVE_TASK_MANIFEST
     existing = {}
     if manifest_path.exists():
         try:
@@ -877,6 +948,7 @@ def start_task_manifest(
     now = datetime.now().isoformat()
     video_records = task_video_records(videos)
     ACTIVE_TASK_MANIFEST_PATH = manifest_path
+    ACTIVE_TASK_CACHE_DIR = task_cache_dir_from_manifest_path(manifest_path)
     ACTIVE_TASK_MANIFEST = {
         **existing,
         "version": 1,
@@ -893,9 +965,9 @@ def start_task_manifest(
         "matchKey": match_key,
         "videos": video_records,
         "config": config,
-        "reportJson": str(output_base.with_suffix(".json")),
-        "reportCsv": str(output_base.with_suffix(".csv")),
-        "reportHtml": str(output_base.with_suffix(".html")),
+        "reportJson": _portable_path(output_base.with_suffix(".json")),
+        "reportCsv": _portable_path(output_base.with_suffix(".csv")),
+        "reportHtml": _portable_path(output_base.with_suffix(".html")),
         "activeStage": existing.get("activeStage") or "",
         "stages": merge_task_stages(existing.get("stages")),
         "cacheArtifacts": existing.get("cacheArtifacts") or [],
@@ -913,7 +985,7 @@ def activate_task_manifest(
     match_key: str,
     config: dict,
 ) -> None:
-    global ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST
+    global ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_CACHE_DIR, ACTIVE_TASK_MANIFEST
     manifest_path = task_state_path(cache_dir, task_id).parent / "task.json"
     existing = {}
     if manifest_path.exists():
@@ -950,6 +1022,7 @@ def activate_task_manifest(
             })
     total_pairs = max(0, len(videos) * (len(videos) - 1) // 2)
     ACTIVE_TASK_MANIFEST_PATH = manifest_path
+    ACTIVE_TASK_CACHE_DIR = cache_dir
     ACTIVE_TASK_MANIFEST = {
         **existing,
         "version": 1,
@@ -1212,6 +1285,12 @@ def main():
         help="Maximum coarse-screened target videos per source; 0 compares every pair (default: 20)",
     )
     parser.add_argument(
+        "--compare-workers",
+        type=int,
+        default=1,
+        help="Number of video pairs to compare concurrently during the exact pass (default: 1)",
+    )
+    parser.add_argument(
         "--min-segment-duration",
         type=float,
         default=5.0,
@@ -1355,12 +1434,33 @@ def main():
         validate_stage_prerequisites(args.target_stage)
         if args.redo_stage:
             reset_task_stage_and_downstream(args.target_stage)
-    ffmpeg = resolve_ffmpeg(project_root)
+    reuse_completed_scan = (
+        task_stage_is_completed("scan")
+        and args.target_stage != "scan"
+    )
+    ffmpeg = ""
     videos = []
     video_frame_counts = {}
     removed_videos = 0
     original_video_count = len(scanned_videos)
-    for probe_index, video_path in enumerate(scanned_videos, start=1):
+    videos_to_validate = scanned_videos
+    if reuse_completed_scan:
+        videos = list(scanned_videos)
+        videos_to_validate = []
+        emit_progress(
+            "scan",
+            original_video_count,
+            original_video_count,
+            "复用已完成的扫描与码流校验，跳过重复校验",
+            original_video_count,
+            original_video_count,
+            "跳过 FFmpeg 码流校验",
+        )
+        log("Scan preflight already completed for unchanged input; skipping FFmpeg stream validation.")
+    else:
+        ffmpeg = resolve_ffmpeg(project_root)
+
+    for probe_index, video_path in enumerate(videos_to_validate, start=1):
         raise_if_cancelled(cancel_file)
         emit_progress(
             "scan",
@@ -1866,6 +1966,133 @@ def main():
             "恢复历史比较进度",
         )
 
+    compare_workers = max(1, min(8, int(args.compare_workers or 1)))
+    log(f"Exact comparison workers: {compare_workers}; conservative early-stop enabled.")
+
+    if compare_workers > 1:
+        def check_cancel_progress(_direction: str, _done: int, _total: int):
+            raise_if_cancelled(cancel_file)
+
+        def compute_exact_pair(video_a: Path, video_b: Path):
+            cache_a = video_caches[video_a]
+            cache_b = video_caches[video_b]
+            return compare_frame_indexes_bidirectional(
+                cache_a=cache_a,
+                cache_b=cache_b,
+                index_a=frame_indexes[video_a],
+                index_b=frame_indexes[video_b],
+                match_threshold=args.match_threshold,
+                top_k=args.top_k,
+                progress_callback=check_cancel_progress,
+                early_stop=True,
+            )
+
+        def store_parallel_pair(current_pair_key: str, result, cache_a, cache_b):
+            duration_a = cache_a.timestamps[-1] if len(cache_a.timestamps) > 0 else 0
+            duration_b = cache_b.timestamps[-1] if len(cache_b.timestamps) > 0 else 0
+            windows_a_to_b = fixed_window_similarity(
+                result.matches_a_to_b,
+                window_size=args.window_size,
+                total_source_duration=duration_a,
+            )
+            windows_b_to_a = fixed_window_similarity(
+                result.matches_b_to_a,
+                window_size=args.window_size,
+                total_source_duration=duration_b,
+            )
+            segments = aggregate_segments(
+                result.matches_a_to_b + result.matches_b_to_a,
+                min_segment_duration=args.min_segment_duration,
+                min_segment_matches=args.min_segment_matches,
+                offset_tolerance_sec=args.offset_tolerance,
+            )
+            report_data.add_pair_result(
+                result=result,
+                segments=[s.to_dict() for s in segments],
+                windows_a_to_b=[w.to_dict() for w in windows_a_to_b],
+                windows_b_to_a=[w.to_dict() for w in windows_b_to_a],
+            )
+            if report_data.video_pairs:
+                report_data.video_pairs[-1]["preprocess_config"] = preprocess_config.to_dict()
+                report_data.video_pairs[-1]["match_threshold"] = args.match_threshold
+                resume_state.setdefault("pairs", {})[current_pair_key] = report_data.video_pairs[-1]
+                try:
+                    save_resume_pair(
+                        state_path,
+                        resume_signature,
+                        current_pair_key,
+                        report_data.video_pairs[-1],
+                    )
+                except OSError as checkpoint_error:
+                    log(f"Warning: Failed to save resume checkpoint: {compact_error(checkpoint_error)}")
+
+        with ThreadPoolExecutor(max_workers=compare_workers) as executor:
+            future_meta = {}
+            for pair_index, (video_a, video_b) in enumerate(video_pairs, start=1):
+                raise_if_cancelled(cancel_file)
+                current_pair_key = pair_key(video_a, video_b)
+                current_pair_units = pair_units[current_pair_key]
+                cached_pair = resume_state.get("pairs", {}).get(current_pair_key)
+                if cached_pair:
+                    report_data.video_pairs.append(cached_pair)
+                    log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
+                    continue
+                future = executor.submit(compute_exact_pair, video_a, video_b)
+                future_meta[future] = (
+                    pair_index,
+                    video_a,
+                    video_b,
+                    current_pair_key,
+                    current_pair_units,
+                    f"当前比较：{video_a.name} -> {video_b.name}",
+                )
+
+            for future in as_completed(future_meta):
+                pair_index, video_a, video_b, current_pair_key, current_pair_units, pair_sub_label = future_meta[future]
+                try:
+                    raise_if_cancelled(cancel_file)
+                    result = future.result()
+                    store_parallel_pair(current_pair_key, result, video_caches[video_a], video_caches[video_b])
+                    compare_units_done += current_pair_units
+                    completed_pair_count += 1
+                    update_task_manifest(
+                        completedPairs=completed_pair_count,
+                        progress=round(completed_pair_count / max(1, total_pairs) * 100.0, 2),
+                        stage=f"已完成视频对 {completed_pair_count}/{total_pairs}",
+                    )
+                    emit_progress(
+                        "compare",
+                        compare_units_done,
+                        compare_units_total,
+                        f"完成比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
+                        1,
+                        1,
+                        f"{pair_sub_label} · 比较完成",
+                    )
+                except AnalysisCancelled:
+                    raise
+                except Exception as e:
+                    warning_msg = (
+                        "Failed to compare videos: "
+                        f"video_a={display_path(video_a)}; "
+                        f"video_b={display_path(video_b)}; "
+                        f"reason={e}"
+                    )
+                    log(f"\nWarning: {warning_msg}")
+                    report_data.add_warning(warning_msg)
+                    compare_units_done += current_pair_units
+                    emit_progress(
+                        "compare",
+                        compare_units_done,
+                        compare_units_total,
+                        f"跳过失败比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
+                        1,
+                        1,
+                        f"{pair_sub_label} · 比较失败",
+                    )
+
+        video_pairs = []
+
     for pair_index, (video_a, video_b) in enumerate(video_pairs, start=1):
         raise_if_cancelled(cancel_file)
         current_pair_key = pair_key(video_a, video_b)
@@ -1918,6 +2145,7 @@ def main():
                 match_threshold=args.match_threshold,
                 top_k=args.top_k,
                 progress_callback=on_compare_progress,
+                early_stop=True,
             )
 
             # Compute directional window similarity so A→B and B→A are not mixed.
@@ -2062,9 +2290,9 @@ def main():
         completedPairs=total_pairs,
         progress=100.0,
         stage="分析完成",
-        reportJson=str(json_path),
-        reportCsv=str(csv_path),
-        reportHtml=str(html_path),
+        reportJson=_portable_path(json_path),
+        reportCsv=_portable_path(csv_path),
+        reportHtml=_portable_path(html_path),
     )
     emit_progress("done", 1, 1, "分析完成")
 

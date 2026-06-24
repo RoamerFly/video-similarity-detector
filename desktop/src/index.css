@@ -7856,17 +7856,33 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: nowrap;
 }
 
 .settings-fixed-actions {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
 .settings-fixed-actions .neon-button {
   min-height: 34px;
   padding-inline: 13px;
+  white-space: nowrap;
+}
+
+.settings-fixed-actions .settings-reset-button {
+  width: 34px;
+  min-width: 34px;
+  padding-inline: 0;
+}
+
+.settings-fixed-actions .settings-save-button {
+  width: auto;
+  min-width: 104px;
+  margin-top: 0;
 }
 
 .settings-fixed-actions .cache-check-button {
@@ -7907,7 +7923,7 @@ select {
 .settings-save-toast {
   position: absolute;
   right: 18px;
-  bottom: 76px;
+  top: 68px;
   z-index: 45;
   display: inline-flex;
   align-items: center;
@@ -7921,6 +7937,12 @@ select {
   background: rgba(17, 112, 80, 0.94);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
   animation: settings-toast-in 0.28s ease both;
+}
+
+.settings-save-toast.is-error {
+  color: rgba(255, 238, 242, 0.98);
+  border-color: rgba(255, 105, 130, 0.62);
+  background: rgba(128, 26, 51, 0.95);
 }
 
 @keyframes settings-save-spin {
@@ -9024,6 +9046,42 @@ select {
     linear-gradient(145deg, rgba(21, 74, 148, 0.24), rgba(7, 18, 45, 0.38));
 }
 
+.update-meta-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(84px, 0.58fr) minmax(92px, 0.58fr);
+  gap: 8px;
+}
+
+.update-meta-grid div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid rgba(116, 145, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(7, 18, 45, 0.36);
+}
+
+.update-meta-grid span,
+.update-meta-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-meta-grid span {
+  color: rgba(226, 232, 255, 0.52);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.update-meta-grid strong {
+  color: rgba(240, 246, 255, 0.92);
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .update-version-line,
 .update-progress-block > div:first-child,
 .update-actions {
@@ -9066,6 +9124,93 @@ select {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.update-release-notes {
+  display: grid;
+  min-height: 130px;
+  max-height: min(320px, 34vh);
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(116, 145, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(4, 13, 34, 0.48);
+}
+
+.update-release-notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(116, 145, 255, 0.16);
+}
+
+.update-release-notes-head strong {
+  color: rgba(246, 249, 255, 0.96);
+  font-size: 13px;
+}
+
+.update-release-notes-head button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  color: rgba(202, 230, 255, 0.92);
+  border: 1px solid rgba(116, 145, 255, 0.22);
+  border-radius: 7px;
+  background: rgba(12, 28, 64, 0.58);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.update-release-notes-body {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 10px 12px 12px;
+  scrollbar-gutter: stable;
+}
+
+.update-release-notes-body h4,
+.update-release-notes-body p,
+.update-release-notes-empty {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.update-release-notes-body h4 {
+  margin-top: 9px;
+  color: rgba(116, 221, 255, 0.96);
+  font-size: 13px;
+}
+
+.update-release-notes-body h4:first-child {
+  margin-top: 0;
+}
+
+.update-release-notes-body p,
+.update-release-notes-empty {
+  color: rgba(226, 232, 255, 0.76);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.update-release-note-bullet {
+  position: relative;
+  padding-left: 14px;
+}
+
+.update-release-note-bullet::before {
+  position: absolute;
+  left: 1px;
+  color: rgba(113, 207, 255, 0.95);
+  content: "•";
+}
+
+.update-release-notes-empty {
+  padding: 12px;
 }
 
 .update-progress-block {
@@ -9131,17 +9276,6 @@ select {
 
 .about-grid.compact strong {
   font-size: 13px;
-}
-
-.settings-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 9px;
-}
-
-.settings-actions .settings-note {
-  margin: 0;
 }
 
 @media (max-width: 1320px), (max-height: 820px) {
