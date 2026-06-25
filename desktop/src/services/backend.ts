@@ -147,6 +147,7 @@ export interface RunBatchCompareConfig {
   taskMatchKey?: string
   executionStage?: AnalysisTaskStageId
   redoStage?: boolean
+  videoPaths?: string[]
 }
 
 export type ConfigTemplateKind = 'analysis' | 'error_tolerance'
@@ -218,6 +219,7 @@ export interface DuplicateFileCheckConfig {
   outputDir: string
   projectRoot: string
   recursive?: boolean
+  videoPaths?: string[]
 }
 
 export interface ReportPathsPayload {
@@ -330,6 +332,12 @@ export interface CacheScanResult {
 
 export interface DeleteFilesResult {
   deletedPaths: string[]
+  failed: Array<{ path: string; error: string }>
+  message: string
+}
+
+export interface MoveFilesResult {
+  movedPaths: Array<{ from: string; to: string }>
   failed: Array<{ path: string; error: string }>
   message: string
 }
@@ -651,6 +659,7 @@ export function buildAnalysisTaskMatchKey(config: RunBatchCompareConfig) {
     minSegmentDuration: config.minSegmentDuration,
     minSegmentMatches: config.minSegmentMatches,
     offsetTolerance: config.offsetTolerance,
+    videoPaths: (config.videoPaths || []).map(normalizeTaskPath),
   })
 }
 
@@ -797,6 +806,13 @@ export async function deleteFiles(paths: string[]) {
   if (!hasTauriRuntime()) return { deletedPaths: [], failed: [], message: '删除文件需要在 Tauri 应用中运行。' }
   return invoke<DeleteFilesResult>('delete_files', {
     request: { paths },
+  })
+}
+
+export async function moveFiles(paths: string[], targetDir: string) {
+  if (!hasTauriRuntime()) return { movedPaths: [], failed: [], message: '移动文件需要在 Tauri 应用中运行。' }
+  return invoke<MoveFilesResult>('move_files', {
+    request: { paths, targetDir },
   })
 }
 

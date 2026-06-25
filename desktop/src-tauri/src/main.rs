@@ -436,12 +436,21 @@ struct DuplicateFileCheckConfig {
     output_dir: String,
     project_root: Option<String>,
     recursive: Option<bool>,
+    #[serde(default)]
+    video_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeleteFilesRequest {
     paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveFilesRequest {
+    paths: Vec<String>,
+    target_dir: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,6 +500,21 @@ struct DeleteFileFailure {
 #[serde(rename_all = "camelCase")]
 struct DeleteFilesResult {
     deleted_paths: Vec<String>,
+    failed: Vec<DeleteFileFailure>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveFileRecord {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveFilesResult {
+    moved_paths: Vec<MoveFileRecord>,
     failed: Vec<DeleteFileFailure>,
     message: String,
 }
@@ -545,6 +569,8 @@ struct RunBatchCompareConfig {
     task_match_key: Option<String>,
     execution_stage: Option<String>,
     redo_stage: Option<bool>,
+    #[serde(default)]
+    video_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2243,6 +2269,25 @@ fn run_batch_compare(
     if cancel_file.exists() {
         let _ = fs::remove_file(&cancel_file);
     }
+    let video_list_path = if config.video_paths.is_empty() {
+        None
+    } else {
+        let paths = config
+            .video_paths
+            .iter()
+            .map(|path| path.trim())
+            .filter(|path| !path.is_empty())
+            .map(|path| path_to_string(resolve_user_path(&root, path)))
+            .collect::<Vec<_>>();
+        let path = runtime_dir.join(format!("videos-{}.json", timestamp_millis()));
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&paths)
+                .map_err(|e| format!("序列化视频扫描范围失败: {e}"))?,
+        )
+        .map_err(|e| format!("写入视频扫描范围失败: {e}"))?;
+        Some(path)
+    };
     let python = resolve_python(&app, &root, config.python_path.as_deref());
     let task_id = config
         .task_id
@@ -2339,6 +2384,9 @@ fn run_batch_compare(
     ];
     if let Some(stage_id) = execution_stage.as_deref() {
         args.extend(["--target-stage".into(), stage_id.to_string()]);
+    }
+    if let Some(path) = video_list_path.as_deref() {
+        args.extend(["--video-list".into(), path_to_string(path)]);
     }
     if redo_stage {
         args.push("--redo-stage".into());
@@ -2640,10 +2688,39 @@ fn run_duplicate_file_check_impl(
 
     emit_progress(&app, "扫描视频文件", 5.0);
     emit_log(&app, "stdout", "相同文件检查：开始扫描视频目录");
-    let videos = scan_videos_impl(ScanRequest {
-        input_dir: path_to_string(&video_dir),
-        recursive: config.recursive.or(Some(true)),
-    })?;
+    let videos = if config.video_paths.is_empty() {
+        scan_videos_impl(ScanRequest {
+            input_dir: path_to_string(&video_dir),
+            recursive: config.recursive.or(Some(true)),
+        })?
+    } else {
+        let mut selected = Vec::new();
+        let mut failed = Vec::new();
+        let mut seen = BTreeSet::new();
+        for raw_path in &config.video_paths {
+            let path_text = normalize_display_path(raw_path.trim()).trim().to_string();
+            if path_text.is_empty() || !seen.insert(path_text.clone()) {
+                continue;
+            }
+            let path = resolve_user_path(&root, &path_text);
+            match video_file_from_path(&path) {
+                Ok(video) => selected.push(video),
+                Err(error) => failed.push(format!("{}: {error}", path.display())),
+            }
+        }
+        selected.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        if selected.is_empty() {
+            return Err("扫描范围内没有可检查的视频文件".to_string());
+        }
+        if !failed.is_empty() {
+            emit_log(
+                &app,
+                "stderr",
+                &format!("相同文件检查：{} 个筛选视频不可用，已跳过", failed.len()),
+            );
+        }
+        selected
+    };
     ensure_analysis_not_cancelled(&app)?;
     emit_log(
         &app,
@@ -3641,7 +3718,16 @@ fn update_report_entries(
     app: tauri::AppHandle,
     request: UpdateReportEntriesRequest,
 ) -> Result<UpdateReportEntriesResult, String> {
-    if request.pairs.is_empty() {
+    let root = resolve_project_root(&app)?;
+    let path = resolve_user_path(&root, request.path.trim());
+    update_report_entries_for_resolved_path(&path, &request.pairs)
+}
+
+fn update_report_entries_for_resolved_path(
+    path: &Path,
+    pairs_to_remove: &[ReportPairIdentity],
+) -> Result<UpdateReportEntriesResult, String> {
+    if pairs_to_remove.is_empty() {
         return Ok(UpdateReportEntriesResult {
             removed_count: 0,
             remaining_count: 0,
@@ -3649,8 +3735,6 @@ fn update_report_entries(
         });
     }
 
-    let root = resolve_project_root(&app)?;
-    let path = resolve_user_path(&root, request.path.trim());
     let stem = path.with_extension("");
     let json_path = stem.with_extension("json");
     let csv_path = stem.with_extension("csv");
@@ -3668,8 +3752,7 @@ fn update_report_entries(
             .ok_or_else(|| "JSON 报告中没有可修改的 video_pairs 数据".to_string())?;
         let before = pairs.len();
         pairs.retain(|pair| {
-            !request
-                .pairs
+            !pairs_to_remove
                 .iter()
                 .any(|target| report_pair_matches(pair, target))
         });
@@ -3715,8 +3798,7 @@ fn update_report_entries(
             .map_err(|e| format!("解析 CSV 报告失败: {e}"))?;
         let before = rows.len();
         rows.retain(|row| {
-            !request
-                .pairs
+            !pairs_to_remove
                 .iter()
                 .any(|target| csv_pair_matches(&headers, row, target))
         });
@@ -3788,6 +3870,144 @@ fn delete_files(request: DeleteFilesRequest) -> Result<DeleteFilesResult, String
         failed,
         message,
     })
+}
+
+#[tauri::command]
+async fn move_files(request: MoveFilesRequest) -> Result<MoveFilesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || move_files_impl(request))
+        .await
+        .map_err(|error| format!("移动文件任务异常: {error}"))?
+}
+
+fn move_files_impl(request: MoveFilesRequest) -> Result<MoveFilesResult, String> {
+    let target_dir_text = normalize_display_path(request.target_dir.trim()).trim().to_string();
+    if target_dir_text.is_empty() {
+        return Err("请选择目标目录".to_string());
+    }
+    let target_dir = PathBuf::from(&target_dir_text);
+    fs::create_dir_all(&target_dir).map_err(|e| format!("创建目标目录失败: {e}"))?;
+    if !target_dir.is_dir() {
+        return Err("目标路径不是目录".to_string());
+    }
+
+    let mut moved_paths = Vec::new();
+    let mut failed = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for raw_path in request.paths {
+        let path_text = normalize_display_path(raw_path.trim()).trim().to_string();
+        if path_text.is_empty() || !seen.insert(path_text.clone()) {
+            continue;
+        }
+
+        let source = PathBuf::from(&path_text);
+        let metadata = match fs::metadata(&source) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => {
+                failed.push(DeleteFileFailure {
+                    path: path_text,
+                    error: "路径不是文件，已跳过".to_string(),
+                });
+                continue;
+            }
+            Err(error) => {
+                failed.push(DeleteFileFailure {
+                    path: path_text,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let Some(file_name) = source.file_name() else {
+            failed.push(DeleteFileFailure {
+                path: path_text,
+                error: "无法识别文件名".to_string(),
+            });
+            continue;
+        };
+        let destination = unique_move_destination(&target_dir, file_name);
+        if source == destination {
+            failed.push(DeleteFileFailure {
+                path: path_text,
+                error: "源文件已在目标目录中".to_string(),
+            });
+            continue;
+        }
+
+        let move_result = fs::rename(&source, &destination).or_else(|rename_error| {
+            fs::copy(&source, &destination)
+                .and_then(|bytes| {
+                    if bytes != metadata.len() {
+                        let _ = fs::remove_file(&destination);
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "复制后的文件大小不一致",
+                        ));
+                    }
+                    fs::remove_file(&source)
+                })
+                .map_err(|copy_error| {
+                    std::io::Error::new(
+                        copy_error.kind(),
+                        format!("{rename_error}; 复制兜底也失败: {copy_error}"),
+                    )
+                })
+        });
+
+        match move_result {
+            Ok(()) => moved_paths.push(MoveFileRecord {
+                from: path_to_string(source),
+                to: path_to_string(destination),
+            }),
+            Err(error) => failed.push(DeleteFileFailure {
+                path: path_text,
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    let message = if failed.is_empty() {
+        format!("已移动 {} 个文件", moved_paths.len())
+    } else {
+        format!(
+            "已移动 {} 个文件，{} 个文件移动失败",
+            moved_paths.len(),
+            failed.len()
+        )
+    };
+
+    Ok(MoveFilesResult {
+        moved_paths,
+        failed,
+        message,
+    })
+}
+
+fn unique_move_destination(target_dir: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let mut candidate = target_dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let file_path = Path::new(file_name);
+    let stem = file_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("video");
+    let extension = file_path.extension().and_then(|value| value.to_str());
+
+    for index in 1..10_000 {
+        let next_name = match extension {
+            Some(ext) if !ext.is_empty() => format!("{stem} ({index}).{ext}"),
+            _ => format!("{stem} ({index})"),
+        };
+        candidate = target_dir.join(next_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    target_dir.join(format!("{stem}-{}", timestamp_millis()))
 }
 
 #[tauri::command]
@@ -4435,6 +4655,7 @@ fn main() {
             delete_report,
             update_report_entries,
             delete_files,
+            move_files,
             clear_cache,
             scan_cache,
             clear_cache_items,
@@ -4646,6 +4867,38 @@ fn collect_videos(
         });
     }
     Ok(())
+}
+
+fn video_file_from_path(path: &Path) -> Result<VideoFile, String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("读取文件信息失败: {e}"))?;
+    if !metadata.is_file() {
+        return Err("路径不是文件".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if !VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+        return Err("不是支持的视频格式".to_string());
+    }
+    Ok(VideoFile {
+        name: path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string(),
+        path: path_to_string(path),
+        extension,
+        size_bytes: metadata.len(),
+        size_mb: metadata.len() as f64 / 1024.0 / 1024.0,
+        modified_at_ms: metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or(0),
+    })
 }
 
 fn run_capture(root: &Path, python: &str, args: Vec<String>) -> Result<ProcessOutput, String> {
@@ -5662,9 +5915,9 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
 mod tests {
     use super::{
         is_decord_seek_warning_line, is_h264_decoder_log_line, parse_analysis_video_context,
-        parse_analysis_video_quarantined, update_report_entries, AnalysisVideoContext,
-        AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator, ReportPairIdentity,
-        UpdateReportEntriesRequest,
+        parse_analysis_video_quarantined, update_report_entries_for_resolved_path,
+        AnalysisVideoContext, AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator,
+        ReportPairIdentity,
     };
     use serde_json::json;
     use std::fs;
@@ -5795,15 +6048,15 @@ mod tests {
             .expect("write csv report");
         fs::write(&html_path, "<html>old report</html>").expect("write html report");
 
-        let result = update_report_entries(UpdateReportEntriesRequest {
-            path: json_path.to_string_lossy().into_owned(),
-            pairs: vec![ReportPairIdentity {
+        let result = update_report_entries_for_resolved_path(
+            &json_path,
+            &[ReportPairIdentity {
                 video_a: "b.mp4".to_string(),
                 video_b: "a.mp4".to_string(),
                 video_a_path: "D:/videos/b.mp4".to_string(),
                 video_b_path: "D:/videos/a.mp4".to_string(),
             }],
-        })
+        )
         .expect("delete selected report pair");
 
         assert_eq!(result.removed_count, 1);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -39,11 +39,15 @@ import {
   clearCacheItems,
   createAnalysisTask,
   deleteAnalysisTask,
+  deleteFiles,
   formatBytes,
   formatDateTime,
   getAppInfo,
   listAnalysisTasks,
+  moveFiles,
   normalizeBackendError,
+  probeVideoMetadata,
+  revealInFolder,
   runBatchCompare,
   runDuplicateFileCheck,
   scanAnalysisTaskCache,
@@ -55,10 +59,13 @@ import {
   type AnalysisTaskStageId,
   type CacheScanResult,
   type RunBatchCompareConfig,
+  type VideoFile,
+  type VideoMetadata,
 } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { analysisConfigFromSettings } from '@/types/config'
+import type { VideoScanFilters } from '@/types/config'
 import {
   analysisTaskStages,
   analysisTaskStatusClass,
@@ -77,6 +84,7 @@ export function AnalyzePage() {
     subProgress,
     subStage,
     scannedVideos: videos,
+    scannedDir,
     scanMessage,
     logs,
     totalLogCount,
@@ -114,8 +122,15 @@ export function AnalyzePage() {
   const [taskCacheScan, setTaskCacheScan] = useState<CacheScanResult | null>(null)
   const [selectedTaskCachePaths, setSelectedTaskCachePaths] = useState<Set<string>>(() => new Set())
   const [taskCacheBusy, setTaskCacheBusy] = useState(false)
+  const [videoMultiSelect, setVideoMultiSelect] = useState(false)
+  const [selectedVideoPaths, setSelectedVideoPaths] = useState<Set<string>>(() => new Set())
+  const [videoContextMenu, setVideoContextMenu] = useState<VideoContextMenuState | null>(null)
+  const [videoFileBusy, setVideoFileBusy] = useState(false)
+  const [videoFileAction, setVideoFileAction] = useState('')
+  const [isScanning, setIsScanning] = useState(false)
   const pauseRequestedTaskId = useRef('')
   const historyRefreshInFlight = useRef(false)
+  const scanInFlight = useRef(false)
   const isRunning = runningStatus === 'running'
   const isBusy = isRunning || isPreparing
   const latestLog = logs[logs.length - 1]
@@ -151,6 +166,28 @@ export function AnalyzePage() {
   )
   const statusTitle = displayedTask?.stage || stage || scanMessage
   const stageTask = historyTasks.find((task) => task.id === stageTaskId) ?? null
+
+  useEffect(() => {
+    if (!videoContextMenu) return undefined
+    const close = () => setVideoContextMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', close)
+    window.addEventListener('resize', close)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', close)
+      window.removeEventListener('resize', close)
+    }
+  }, [videoContextMenu])
+
+  useEffect(() => {
+    setSelectedVideoPaths((current) => {
+      if (current.size === 0) return current
+      const available = new Set(videos.map((video) => normalizeVideoPath(video.path)))
+      const next = new Set(Array.from(current).filter((path) => available.has(path)))
+      return setsEqual(current, next) ? current : next
+    })
+  }, [videos])
 
   const refreshHistoryTasks = useCallback(async (showLoading = false) => {
     if (!settings.cacheDir || historyRefreshInFlight.current) return
@@ -275,31 +312,49 @@ export function AnalyzePage() {
   }, [clockNow, displayedStages, displayedTask])
 
   async function handleScan(dir = settings.videoDir) {
+    if (scanInFlight.current) {
+      setScanMessage('正在扫描视频目录，请稍候...')
+      return videos
+    }
     if (!dir.trim()) {
       setScanMessage('请先到设置页配置视频目录。')
       setErrorMessage('请先到设置页配置视频目录。')
       return []
     }
 
+    scanInFlight.current = true
+    setIsScanning(true)
     setErrorMessage('')
+    setVideoContextMenu(null)
     setScanMessage('正在扫描视频目录...')
     try {
       const found = await scanVideos(dir, true)
-      setScannedVideos(found, dir)
-      if (found.length === 0) {
+      const filtered = await filterScannedVideos(found, useSettingsStore.getState().videoScanFilters, {
+        projectRoot: settings.projectRoot,
+        pythonPath: settings.pythonPath,
+        onMetadataStart: () => setScanMessage(`已扫描 ${found.length} 个视频，正在读取视频参数...`),
+      })
+      setScannedVideos(filtered, dir)
+      setSelectedVideoPaths(new Set())
+      if (filtered.length === 0) {
         setScanMessage('该目录下未找到支持的视频文件。')
       } else {
+        const filterSuffix = filtered.length === found.length ? '' : `，已按扫描范围保留 ${filtered.length}/${found.length} 个`
         setScanMessage(isDuplicateFileMode
-          ? `已扫描 ${found.length} 个视频，将直接检查完全相同文件。`
-          : `已扫描 ${found.length} 个视频，预计比较 ${Math.max(0, pairCountFor(found.length))} 对。`)
+          ? `已扫描 ${found.length} 个视频${filterSuffix}，将直接检查完全相同文件。`
+          : `已扫描 ${found.length} 个视频${filterSuffix}，预计比较 ${Math.max(0, pairCountFor(filtered.length))} 对。`)
       }
-      return found
+      return filtered
     } catch (error) {
       const message = normalizeBackendError(error)
       setScannedVideos([], '')
+      setSelectedVideoPaths(new Set())
       setScanMessage(message)
       setErrorMessage(message)
       return []
+    } finally {
+      scanInFlight.current = false
+      setIsScanning(false)
     }
   }
 
@@ -377,10 +432,28 @@ export function AnalyzePage() {
     setProgress(0, '正在新建分析任务', { subProgress: null, subStage: '' })
     setErrorMessage('')
     try {
-      const batchConfig = buildRunBatchCompareConfig(currentSettings, config)
+      let selectedVideos = scannedDir === config.videoDir ? videos : []
+      if (selectedVideos.length === 0) {
+        selectedVideos = await handleScan(config.videoDir)
+      }
+      if (selectedVideos.length < 2) {
+        setErrorMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
+        setScanMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
+        return
+      }
+      const videoPaths = selectedVideos.map((video) => video.path)
+      const batchConfig = {
+        ...buildRunBatchCompareConfig(currentSettings, config),
+        videoPaths,
+      }
       const taskMatchKey = buildAnalysisTaskMatchKey(batchConfig)
       const task = await createAnalysisTask(batchConfig, taskMatchKey)
-      setHistoryTasks((current) => [task, ...current.filter((item) => item.id !== task.id)])
+      const seededTask = await updateAnalysisTask(task.id, batchConfig.cacheDir, batchConfig.projectRoot, {
+        stage: `等待启动：已选择 ${selectedVideos.length} 个视频`,
+        totalPairs: pairCountFor(selectedVideos.length),
+        videos: selectedVideos,
+      })
+      setHistoryTasks((current) => [seededTask, ...current.filter((item) => item.id !== seededTask.id)])
       setProgress(0, '任务已新建，等待启动')
       setScanMessage(`已新建任务 ${task.id}。请在“历史任务”中启动。`)
       setActiveSubpage('history')
@@ -476,7 +549,9 @@ export function AnalyzePage() {
       })
 
       if (taskConfig.analysisMode === 'duplicate_file') {
-        const found = await scanVideos(taskConfig.videoDir, true)
+        const found = taskConfig.videoPaths?.length
+          ? videoFilesFromTask(task, taskConfig.videoPaths)
+          : await scanVideos(taskConfig.videoDir, true)
         const estimatedPairs = pairCountFor(found.length)
         setScannedVideos(found, taskConfig.videoDir)
         const paths = await runDuplicateFileCheck({
@@ -484,6 +559,7 @@ export function AnalyzePage() {
           outputDir: taskConfig.outputDir,
           projectRoot: taskConfig.projectRoot,
           recursive: true,
+          videoPaths: taskConfig.videoPaths,
         })
         setReportPaths(paths)
         await updateAnalysisTask(task.id, taskConfig.cacheDir, taskConfig.projectRoot, {
@@ -608,6 +684,115 @@ export function AnalyzePage() {
     }
   }
 
+  function toggleVideoSelection(video: VideoFile) {
+    const key = normalizeVideoPath(video.path)
+    setSelectedVideoPaths((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function selectAllVideos() {
+    setSelectedVideoPaths(new Set(videos.map((video) => normalizeVideoPath(video.path))))
+  }
+
+  function clearVideoSelection() {
+    setSelectedVideoPaths(new Set())
+  }
+
+  function openVideoContextMenu(event: MouseEvent, video: VideoFile) {
+    event.preventDefault()
+    setVideoContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      video,
+    })
+  }
+
+  function selectedVideosForAction(fallback?: VideoFile) {
+    if (videoMultiSelect && selectedVideoPaths.size > 0) {
+      if (fallback && !selectedVideoPaths.has(normalizeVideoPath(fallback.path))) return [fallback]
+      const selected = videos.filter((video) => selectedVideoPaths.has(normalizeVideoPath(video.path)))
+      if (selected.length > 0) return selected
+    }
+    return fallback ? [fallback] : []
+  }
+
+  async function revealVideo(video: VideoFile) {
+    setVideoContextMenu(null)
+    setErrorMessage('')
+    try {
+      await revealInFolder(video.path)
+    } catch (error) {
+      setErrorMessage(normalizeBackendError(error))
+    }
+  }
+
+  async function deleteVideoFiles(targets: VideoFile[]) {
+    if (targets.length === 0 || videoFileBusy) return
+    if (!window.confirm(`确认删除选中的 ${targets.length} 个视频文件吗？此操作不可撤销。`)) return
+    setVideoContextMenu(null)
+    setVideoFileBusy(true)
+    setVideoFileAction(`正在删除 ${targets.length} 个视频...`)
+    setErrorMessage('')
+    try {
+      const result = await deleteFiles(targets.map((video) => video.path))
+      const deleted = new Set(result.deletedPaths.map(normalizeVideoPath))
+      if (deleted.size > 0) {
+        const nextVideos = videos.filter((video) => !deleted.has(normalizeVideoPath(video.path)))
+        setScannedVideos(nextVideos, scannedDir)
+        setSelectedVideoPaths((current) => {
+          const next = new Set(current)
+          deleted.forEach((path) => next.delete(path))
+          return next
+        })
+        setScanMessage(`已删除 ${deleted.size} 个视频，当前剩余 ${nextVideos.length} 个。`)
+      }
+      if (result.failed.length > 0) {
+        setErrorMessage(result.message)
+      }
+    } catch (error) {
+      setErrorMessage(normalizeBackendError(error))
+    } finally {
+      setVideoFileBusy(false)
+      setVideoFileAction('')
+    }
+  }
+
+  async function moveVideoFiles(targets: VideoFile[]) {
+    if (targets.length === 0 || videoFileBusy) return
+    setVideoContextMenu(null)
+    setErrorMessage('')
+    try {
+      const targetDir = await selectOutputDirectory()
+      if (!targetDir) return
+      setVideoFileBusy(true)
+      setVideoFileAction(`正在移动 ${targets.length} 个视频...`)
+      const result = await moveFiles(targets.map((video) => video.path), targetDir)
+      const moved = new Set(result.movedPaths.map((item) => normalizeVideoPath(item.from)))
+      if (moved.size > 0) {
+        const nextVideos = videos.filter((video) => !moved.has(normalizeVideoPath(video.path)))
+        setScannedVideos(nextVideos, scannedDir)
+        setSelectedVideoPaths((current) => {
+          const next = new Set(current)
+          moved.forEach((path) => next.delete(path))
+          return next
+        })
+        setScanMessage(`已移动 ${moved.size} 个视频到 ${targetDir}，当前剩余 ${nextVideos.length} 个。`)
+      }
+      if (result.failed.length > 0) {
+        setErrorMessage(result.message)
+      }
+    } catch (error) {
+      setErrorMessage(normalizeBackendError(error))
+    } finally {
+      setVideoFileBusy(false)
+      setVideoFileAction('')
+    }
+  }
+
   return (
     <div className="route-fill analyze-workspace">
       <div className="analysis-page-content">
@@ -653,9 +838,9 @@ export function AnalyzePage() {
           </div>
 
           <div className="analysis-action-row">
-            <NeonButton variant="outline" onClick={() => void handleScan()} disabled={isBusy}>
-              <RefreshCw size={20} />
-              扫描视频
+            <NeonButton variant="outline" onClick={() => void handleScan()} disabled={isBusy || isScanning}>
+              <RefreshCw size={20} className={isScanning ? 'spin-slow' : undefined} />
+              {isScanning ? '扫描中' : '扫描视频'}
             </NeonButton>
             {isRunning && activeTaskId ? (
               <NeonButton className="start-analysis-button compact" tone="red" onClick={() => void handlePause()}>
@@ -663,7 +848,7 @@ export function AnalyzePage() {
                 暂停任务
               </NeonButton>
             ) : (
-              <NeonButton className="start-analysis-button compact" onClick={() => void handleCreateTask()} disabled={isPreparing}>
+              <NeonButton className="start-analysis-button compact" onClick={() => void handleCreateTask()} disabled={isPreparing || isScanning}>
                 <Play size={22} fill="currentColor" />
                 {isPreparing ? '新建中' : '新建任务'}
               </NeonButton>
@@ -835,16 +1020,93 @@ export function AnalyzePage() {
           </div>
 
           {videos.length > 0 ? (
-            <div className="video-list-strip compact">
-              {videos.slice(0, 10).map((video) => (
-                <span title={video.path} key={video.path}>
-                  {video.name}
-                  <small>{formatBytes(video.sizeBytes)}</small>
-                </span>
-              ))}
+            <div className={isScanning ? 'video-list-panel is-scanning' : 'video-list-panel'}>
+              <div className="video-list-toolbar">
+                <span>{videoFileAction || (isScanning ? scanMessage : selectedVideoPaths.size > 0 ? `已选 ${selectedVideoPaths.size}` : scanMessage)}</span>
+                <div>
+                  {videoMultiSelect ? (
+                    <>
+                      <button type="button" onClick={selectAllVideos} disabled={videoFileBusy}>
+                        全选
+                      </button>
+                      <button type="button" onClick={clearVideoSelection} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
+                        清空
+                      </button>
+                      <button type="button" onClick={() => void moveVideoFiles(selectedVideosForAction())} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
+                        <FolderOpen size={15} />
+                        移动
+                      </button>
+                      <button type="button" className="danger" onClick={() => void deleteVideoFiles(selectedVideosForAction())} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
+                        <Trash2 size={15} />
+                        删除
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    className={videoMultiSelect ? 'active' : ''}
+                    onClick={() => {
+                      setVideoMultiSelect((current) => !current)
+                      setSelectedVideoPaths(new Set())
+                    }}
+                    disabled={videoFileBusy}
+                  >
+                    <ListChecks size={15} />
+                    多选
+                  </button>
+                </div>
+              </div>
+              <div className="video-scroll-list" role="list" aria-label="已扫描视频">
+                {videos.map((video) => {
+                  const selected = selectedVideoPaths.has(normalizeVideoPath(video.path))
+                  return (
+                    <button
+                      type="button"
+                      role="listitem"
+                      className={selected ? 'video-list-row selected' : 'video-list-row'}
+                      title={video.path}
+                      key={video.path}
+                      onClick={() => {
+                        if (videoMultiSelect) toggleVideoSelection(video)
+                      }}
+                      onContextMenu={(event) => openVideoContextMenu(event, video)}
+                    >
+                      {videoMultiSelect ? (
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleVideoSelection(video)}
+                          onClick={(event) => event.stopPropagation()}
+                          aria-label={`选择 ${video.name}`}
+                        />
+                      ) : null}
+                      <span className="video-row-main">
+                        <strong>{video.name}</strong>
+                        <small>{video.path}</small>
+                      </span>
+                      <span className="video-row-meta">{formatBytes(video.sizeBytes)}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              {isScanning && (
+                <div className="scan-progress-overlay" role="status" aria-live="polite">
+                  <RefreshCw size={20} className="spin-slow" />
+                  <span>{scanMessage || '正在扫描视频目录...'}</span>
+                </div>
+              )}
+              {!isScanning && videoFileAction && (
+                <div className="scan-progress-overlay" role="status" aria-live="polite">
+                  <RefreshCw size={20} className="spin-slow" />
+                  <span>{videoFileAction}</span>
+                </div>
+              )}
             </div>
           ) : (
-            <p className="empty-state-text">{scanMessage}</p>
+            <div className={isScanning ? 'empty-state-text scan-empty-state is-scanning' : 'empty-state-text'}>
+              {isScanning ? <RefreshCw size={22} className="spin-slow" /> : null}
+              <span>{scanMessage}</span>
+            </div>
           )}
 
         </GlassPanel>
@@ -966,6 +1228,37 @@ export function AnalyzePage() {
         onClose={() => setCacheTaskId('')}
         onConfirm={(paths) => void handleClearTaskCache(paths)}
       />
+      {videoContextMenu && createPortal(
+        <div
+          className="video-context-menu analysis-video-context-menu"
+          style={{ left: videoContextMenu.x, top: videoContextMenu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <strong title={videoContextMenu.video.path}>{videoContextMenu.video.name}</strong>
+          <button type="button" role="menuitem" onClick={() => void revealVideo(videoContextMenu.video)}>
+            <FolderOpen size={15} />
+            文件位置
+          </button>
+          <button type="button" role="menuitem" onClick={() => void moveVideoFiles(selectedVideosForAction(videoContextMenu.video))} disabled={videoFileBusy}>
+            <FolderOpen size={15} />
+            移动到目录
+          </button>
+          <button type="button" role="menuitem" onClick={() => {
+            if (!videoMultiSelect) setVideoMultiSelect(true)
+            toggleVideoSelection(videoContextMenu.video)
+            setVideoContextMenu(null)
+          }}>
+            <ListChecks size={15} />
+            {selectedVideoPaths.has(normalizeVideoPath(videoContextMenu.video.path)) ? '取消选择' : '加入选择'}
+          </button>
+          <button className="danger" type="button" role="menuitem" onClick={() => void deleteVideoFiles(selectedVideosForAction(videoContextMenu.video))} disabled={videoFileBusy}>
+            <Trash2 size={15} />
+            删除
+          </button>
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }
@@ -1326,6 +1619,223 @@ function PathSummary({
 interface TaskConfigSection {
   title: string
   rows: Array<{ label: string; value: string }>
+}
+
+interface VideoContextMenuState {
+  x: number
+  y: number
+  video: VideoFile
+}
+
+async function filterScannedVideos(
+  videos: VideoFile[],
+  filters: VideoScanFilters,
+  options: {
+    projectRoot?: string
+    pythonPath?: string
+    onMetadataStart?: () => void
+  } = {},
+) {
+  const enabled = new Set(filters.enabledKeys)
+  if (enabled.size === 0) return videos
+
+  const sizeMultiplier = videoScanSizeUnitBytes(filters.sizeUnit)
+  const minBytes = positiveNumber(filters.minSizeGb) * sizeMultiplier
+  const maxBytes = positiveNumber(filters.maxSizeGb) * sizeMultiplier
+  const prefixes = splitFilterTokens(filters.namePrefixes).map((item) => item.toLocaleLowerCase())
+  const includes = splitFilterTokens(filters.nameIncludes).map((item) => item.toLocaleLowerCase())
+  const extensions = splitFilterTokens(filters.extensions).map((item) => item.replace(/^\./, '').toLocaleLowerCase())
+
+  let next = videos.filter((video) => {
+    if (enabled.has('size')) {
+      if (minBytes > 0 && video.sizeBytes < minBytes) return false
+      if (maxBytes > 0 && video.sizeBytes > maxBytes) return false
+    }
+    if (enabled.has('name')) {
+      const name = video.name.toLocaleLowerCase()
+      if (prefixes.length > 0 && !prefixes.some((prefix) => name.startsWith(prefix))) return false
+      if (includes.length > 0 && !includes.some((part) => name.includes(part))) return false
+    }
+    if (enabled.has('extension') && extensions.length > 0) {
+      const extension = video.extension.replace(/^\./, '').toLocaleLowerCase()
+      if (!extensions.includes(extension)) return false
+    }
+    return true
+  })
+
+  const needsMetadata = hasMetadataFilters(filters) || needsMetadataSort(filters)
+  if (!needsMetadata || next.length === 0) return sortScannedVideos(next, filters)
+
+  options.onMetadataStart?.()
+  const metadataRows = await probeVideoMetadata(next.map((video) => video.path), options.projectRoot, options.pythonPath)
+  const metadataByPath = new Map(metadataRows.map((metadata) => [normalizeVideoPath(metadata.path), metadata]))
+  if (hasMetadataFilters(filters)) {
+    next = next.filter((video) => metadataMatchesFilters(metadataByPath.get(normalizeVideoPath(video.path)), filters))
+  }
+  return sortScannedVideos(next, filters, metadataByPath)
+}
+
+function hasMetadataFilters(filters: VideoScanFilters) {
+  const enabled = new Set(filters.enabledKeys)
+  return (
+    (enabled.has('duration') && (positiveNumber(filters.minDurationSec) > 0 || positiveNumber(filters.maxDurationSec) > 0))
+    || (enabled.has('fps') && (positiveNumber(filters.minFps) > 0 || positiveNumber(filters.maxFps) > 0))
+    || (enabled.has('resolution') && (
+      positiveNumber(filters.minWidth) > 0
+      || positiveNumber(filters.minHeight) > 0
+      || positiveNumber(filters.maxWidth) > 0
+      || positiveNumber(filters.maxHeight) > 0
+    ))
+  )
+}
+
+function metadataMatchesFilters(metadata: VideoMetadata | undefined, filters: VideoScanFilters) {
+  if (!metadata?.readable) return false
+  const enabled = new Set(filters.enabledKeys)
+  if (enabled.has('duration')) {
+    const durationMultiplier = videoScanDurationUnitSeconds(filters.durationUnit)
+    const minDuration = positiveNumber(filters.minDurationSec) * durationMultiplier
+    const maxDuration = positiveNumber(filters.maxDurationSec) * durationMultiplier
+    if (minDuration > 0 && metadata.duration < minDuration) return false
+    if (maxDuration > 0 && metadata.duration > maxDuration) return false
+  }
+  if (enabled.has('fps')) {
+    const minFps = positiveNumber(filters.minFps)
+    const maxFps = positiveNumber(filters.maxFps)
+    if (minFps > 0 && metadata.fps < minFps) return false
+    if (maxFps > 0 && metadata.fps > maxFps) return false
+  }
+  if (enabled.has('resolution')) {
+    const minWidth = positiveNumber(filters.minWidth)
+    const minHeight = positiveNumber(filters.minHeight)
+    const maxWidth = positiveNumber(filters.maxWidth)
+    const maxHeight = positiveNumber(filters.maxHeight)
+    if (minWidth > 0 && metadata.width < minWidth) return false
+    if (minHeight > 0 && metadata.height < minHeight) return false
+    if (maxWidth > 0 && metadata.width > maxWidth) return false
+    if (maxHeight > 0 && metadata.height > maxHeight) return false
+  }
+  return true
+}
+
+function needsMetadataSort(filters: VideoScanFilters) {
+  return filters.sortBy === 'duration' || filters.sortBy === 'fps' || filters.sortBy === 'resolution'
+}
+
+function sortScannedVideos(
+  videos: VideoFile[],
+  filters: VideoScanFilters,
+  metadataByPath = new Map<string, VideoMetadata>(),
+) {
+  const direction: 1 | -1 = filters.sortDirection === 'desc' ? -1 : 1
+  return [...videos].sort((left, right) => {
+    const leftMetadata = metadataByPath.get(normalizeVideoPath(left.path))
+    const rightMetadata = metadataByPath.get(normalizeVideoPath(right.path))
+    const compared = compareVideoByScanSort(left, right, leftMetadata, rightMetadata, filters.sortBy, direction)
+    if (compared !== 0) return compared
+    return left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' })
+      || left.path.localeCompare(right.path, 'zh-CN', { numeric: true, sensitivity: 'base' })
+  })
+}
+
+function compareVideoByScanSort(
+  left: VideoFile,
+  right: VideoFile,
+  leftMetadata: VideoMetadata | undefined,
+  rightMetadata: VideoMetadata | undefined,
+  sortBy: VideoScanFilters['sortBy'],
+  direction: 1 | -1,
+) {
+  if (sortBy === 'size') return compareNumbers(left.sizeBytes, right.sizeBytes) * direction
+  if (sortBy === 'modified') return compareNumbers(left.modifiedAtMs, right.modifiedAtMs) * direction
+  if (sortBy === 'duration') return compareMetadataNumbers(leftMetadata, rightMetadata, (metadata) => metadata.duration, direction)
+  if (sortBy === 'fps') return compareMetadataNumbers(leftMetadata, rightMetadata, (metadata) => metadata.fps, direction)
+  if (sortBy === 'resolution') {
+    return compareMetadataNumbers(leftMetadata, rightMetadata, (metadata) => metadata.width * metadata.height, direction)
+      || compareMetadataNumbers(leftMetadata, rightMetadata, (metadata) => metadata.width, direction)
+      || compareMetadataNumbers(leftMetadata, rightMetadata, (metadata) => metadata.height, direction)
+  }
+  return left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' }) * direction
+}
+
+function compareMetadataNumbers(
+  left: VideoMetadata | undefined,
+  right: VideoMetadata | undefined,
+  pick: (metadata: VideoMetadata) => number,
+  direction: 1 | -1,
+) {
+  const leftReady = Boolean(left?.readable)
+  const rightReady = Boolean(right?.readable)
+  if (leftReady !== rightReady) return leftReady ? -1 : 1
+  if (!leftReady || !rightReady || !left || !right) return 0
+  return compareNumbers(pick(left), pick(right)) * direction
+}
+
+function compareNumbers(left: number, right: number) {
+  if (!Number.isFinite(left) && !Number.isFinite(right)) return 0
+  if (!Number.isFinite(left)) return 1
+  if (!Number.isFinite(right)) return -1
+  return left - right
+}
+
+function videoFilesFromTask(task: AnalysisTaskRecord, paths: string[]): VideoFile[] {
+  const taskVideos = new Map(task.videos.map((video) => [normalizeVideoPath(video.path), video]))
+  return paths.map((path) => {
+    const record = taskVideos.get(normalizeVideoPath(path))
+    const name = videoNameFromPath(path)
+    const extension = name.includes('.') ? name.split('.').pop() || '' : ''
+    return {
+      path,
+      name,
+      extension,
+      sizeBytes: record?.size ?? 0,
+      sizeMb: record?.size ? record.size / 1024 / 1024 : 0,
+      modifiedAtMs: record?.mtimeMs ?? 0,
+    }
+  })
+}
+
+function splitFilterTokens(value: string) {
+  return value
+    .split(/[\s,;，；、]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function positiveNumber(value: unknown) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? Math.max(0, numeric) : 0
+}
+
+function videoScanSizeUnitBytes(unit: VideoScanFilters['sizeUnit']) {
+  if (unit === 'B') return 1
+  if (unit === 'KB') return 1024
+  if (unit === 'MB') return 1024 * 1024
+  if (unit === 'TB') return 1024 * 1024 * 1024 * 1024
+  return 1024 * 1024 * 1024
+}
+
+function videoScanDurationUnitSeconds(unit: VideoScanFilters['durationUnit']) {
+  if (unit === 'ms') return 0.001
+  if (unit === 'min') return 60
+  if (unit === 'hour') return 3600
+  return 1
+}
+
+function videoNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path
+}
+
+function normalizeVideoPath(path: string) {
+  return path.replaceAll('\\', '/').replace(/\/+$/, '').toLocaleLowerCase()
+}
+
+function setsEqual(left: Set<string>, right: Set<string>) {
+  if (left.size !== right.size) return false
+  for (const value of left) {
+    if (!right.has(value)) return false
+  }
+  return true
 }
 
 function buildTaskReportRows(task: AnalysisTaskRecord) {

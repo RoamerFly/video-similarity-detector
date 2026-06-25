@@ -923,6 +923,43 @@ def parse_task_config(raw_value: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def load_video_list(video_list_path: str, input_dir: Path, error_video_dir: Path) -> list[Path]:
+    if not video_list_path:
+        return []
+    try:
+        payload = json.loads(Path(video_list_path).read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"Error: Failed to read selected video list: {exc}")
+        sys.exit(1)
+    if not isinstance(payload, list):
+        log("Error: Selected video list must be a JSON array")
+        sys.exit(1)
+
+    videos: list[Path] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        candidate = Path(item.strip())
+        if not candidate.is_absolute():
+            candidate = input_dir / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            log(f"  Skipping unavailable selected video: {candidate}")
+            continue
+        if str(resolved) in seen:
+            continue
+        if error_video_dir in resolved.parents:
+            continue
+        if not resolved.is_file():
+            log(f"  Skipping missing selected video: {resolved}")
+            continue
+        videos.append(resolved)
+        seen.add(str(resolved))
+    return sorted(videos, key=lambda path: path.name.lower())
+
+
 def start_task_manifest(
     manifest_path: Path,
     task_id: str,
@@ -1369,6 +1406,12 @@ def main():
         help="Serialized desktop run configuration stored with task history",
     )
     parser.add_argument(
+        "--video-list",
+        type=str,
+        default="",
+        help="JSON file with selected video paths to analyze instead of scanning the whole input directory",
+    )
+    parser.add_argument(
         "--target-stage",
         type=str,
         default="",
@@ -1409,11 +1452,15 @@ def main():
     log(f"Scanning for videos in: {input_dir}")
     project_root = Path.cwd().resolve()
     error_video_dir = project_root / "data" / "error_videos"
-    scanned_videos = [
-        path
-        for path in scan_videos(input_dir, recursive=True)
-        if error_video_dir not in path.resolve().parents
-    ]
+    if args.video_list:
+        scanned_videos = load_video_list(args.video_list, input_dir, error_video_dir)
+        log(f"Using selected video list: {args.video_list}")
+    else:
+        scanned_videos = [
+            path
+            for path in scan_videos(input_dir, recursive=True)
+            if error_video_dir not in path.resolve().parents
+        ]
     raise_if_cancelled(cancel_file)
 
     if len(scanned_videos) < 2:

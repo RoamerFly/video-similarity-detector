@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  ScanSearch,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
@@ -54,10 +55,25 @@ import {
 } from '@/services/backend'
 import { useEnvironmentStore } from '@/stores/environmentStore'
 import { analysisPresetFromSettings, settingsSnapshotFromState, useSettingsStore } from '@/stores/settingsStore'
-import type { AnalysisPresetConfig, AnalysisPresetId, CloseBehavior, DeviceMode, ErrorTolerancePreset, PortraitRotation, ResizeMode, SettingsSnapshot } from '@/types/config'
+import type {
+  AnalysisPresetConfig,
+  AnalysisPresetId,
+  CloseBehavior,
+  DeviceMode,
+  ErrorTolerancePreset,
+  PortraitRotation,
+  ResizeMode,
+  SettingsSnapshot,
+  VideoScanDurationUnit,
+  VideoScanFilterKey,
+  VideoScanNumericValue,
+  VideoScanSizeUnit,
+  VideoScanSortBy,
+  VideoScanSortDirection,
+} from '@/types/config'
 import { parameterHints, withEnglish } from '@/utils/parameterHints'
 
-type SettingsTab = 'base' | 'analysis' | 'error_tolerance'
+type SettingsTab = 'base' | 'analysis' | 'error_tolerance' | 'video_scan'
 
 interface ErrorToleranceTemplateConfig {
   errorTolerancePreset: ErrorTolerancePreset
@@ -160,6 +176,48 @@ const errorToleranceOptions: Array<{
     description: '使用手动调整后的错误容忍数值。',
     effect: '选择任意容忍预设后修改数值，会先保存到这里。',
   },
+]
+
+const videoScanFilterOptions: Array<{
+  id: VideoScanFilterKey
+  name: string
+  summary: string
+}> = [
+  { id: 'size', name: '文件大小', summary: '大小' },
+  { id: 'name', name: '名称', summary: '前缀 / 包含' },
+  { id: 'duration', name: '时长', summary: '时间' },
+  { id: 'resolution', name: '分辨率', summary: '宽高' },
+  { id: 'fps', name: '帧率', summary: 'FPS' },
+  { id: 'extension', name: '格式', summary: '扩展名' },
+]
+
+const videoScanSizeUnitOptions: Array<{ value: VideoScanSizeUnit; label: string }> = [
+  { value: 'B', label: 'B' },
+  { value: 'KB', label: 'KB' },
+  { value: 'MB', label: 'MB' },
+  { value: 'GB', label: 'GB' },
+  { value: 'TB', label: 'TB' },
+]
+
+const videoScanDurationUnitOptions: Array<{ value: VideoScanDurationUnit; label: string }> = [
+  { value: 'ms', label: '毫秒' },
+  { value: 'sec', label: '秒' },
+  { value: 'min', label: '分钟' },
+  { value: 'hour', label: '小时' },
+]
+
+const videoScanSortByOptions: Array<{ value: VideoScanSortBy; label: string }> = [
+  { value: 'name', label: '名称' },
+  { value: 'duration', label: '时长' },
+  { value: 'size', label: '大小' },
+  { value: 'fps', label: '帧率' },
+  { value: 'resolution', label: '分辨率' },
+  { value: 'modified', label: '修改时间' },
+]
+
+const videoScanSortDirectionOptions: Array<{ value: VideoScanSortDirection; label: string }> = [
+  { value: 'asc', label: '升序' },
+  { value: 'desc', label: '降序' },
 ]
 
 async function runEnvironmentCheck(quickCheck = false) {
@@ -411,6 +469,11 @@ export function SettingsPage() {
       showSettingsMessage('已恢复默认错误容忍设置，请点击“保存设置”应用。')
       return
     }
+    if (activeTab === 'video_scan') {
+      settings.resetVideoScanFilters()
+      showSettingsMessage('已恢复默认视频扫描范围，请点击“保存设置”应用。')
+      return
+    }
 
     settings.resetBaseSettings({
       projectRoot: appInfo?.projectRoot || settings.projectRoot,
@@ -426,7 +489,9 @@ export function SettingsPage() {
     ? '恢复当前预设默认'
     : activeTab === 'error_tolerance'
       ? '恢复错误容忍默认'
-      : '恢复基础默认'
+      : activeTab === 'video_scan'
+        ? '恢复视频扫描范围默认'
+        : '恢复基础默认'
   const toastMessage = error || savedMessage || (saveFeedback === 'saved' ? '设置保存成功' : '')
 
   return (
@@ -457,6 +522,14 @@ export function SettingsPage() {
             >
               <ShieldCheck size={18} />
               错误容忍设置
+            </button>
+            <button
+              type="button"
+              className={activeTab === 'video_scan' ? 'active' : ''}
+              onClick={() => setActiveTab('video_scan')}
+            >
+              <ScanSearch size={18} />
+              视频扫描范围
             </button>
           </div>
           <div className="settings-fixed-actions">
@@ -503,13 +576,15 @@ export function SettingsPage() {
                 handleSave(`已保存到“${presetName}”预设。`)
               }}
             />
-          ) : (
+          ) : activeTab === 'error_tolerance' ? (
             <ErrorToleranceSettings
               onMessage={(message) => {
                 setSavedMessage(message)
                 window.setTimeout(() => setSavedMessage(''), 1800)
               }}
             />
+          ) : (
+            <VideoScanRangeSettings />
           )}
         </div>
 
@@ -1270,6 +1345,212 @@ function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) =>
   )
 }
 
+function VideoScanRangeSettings() {
+  const settings = useSettingsStore()
+  const filters = settings.videoScanFilters
+  const enabled = new Set(filters.enabledKeys)
+
+  function toggleFilter(key: VideoScanFilterKey, checked: boolean) {
+    const next = new Set(filters.enabledKeys)
+    if (checked) next.add(key)
+    else next.delete(key)
+    settings.setVideoScanFilterKeys(videoScanFilterOptions.map((option) => option.id).filter((id) => next.has(id)))
+  }
+
+  return (
+    <div className="settings-panel-grid video-scan-page">
+      <div className="video-scan-heading">
+        <div>
+          <strong>视频扫描范围</strong>
+          <p>未勾选条件时扫描全部视频；勾选后仅扫描并处理匹配条件的视频。</p>
+        </div>
+        <div className="video-scan-summary">
+          <span>当前范围</span>
+          <strong>{filters.enabledKeys.length ? `${filters.enabledKeys.length} 个条件` : '全部视频'}</strong>
+          <small title={formatVideoScanFilterSummary(filters.enabledKeys)}>{formatVideoScanFilterSummary(filters.enabledKeys)}</small>
+        </div>
+      </div>
+
+      <div className="video-scan-filter-options" aria-label="视频扫描条件">
+        {videoScanFilterOptions.map((option) => (
+          <label className={enabled.has(option.id) ? 'video-scan-filter-card active' : 'video-scan-filter-card'} key={option.id}>
+            <input
+              type="checkbox"
+              checked={enabled.has(option.id)}
+              onChange={(event) => toggleFilter(option.id, event.target.checked)}
+            />
+            <span>{option.name}</span>
+            <small>{option.summary}</small>
+          </label>
+        ))}
+      </div>
+
+      <div className="video-scan-parameter-grid">
+        <section className={enabled.has('size') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
+          <div className="video-scan-card-title">
+            <h4>文件大小</h4>
+            <VideoScanUnitSelect
+              ariaLabel="文件大小单位"
+              disabled={!enabled.has('size')}
+              options={videoScanSizeUnitOptions}
+              value={filters.sizeUnit}
+              onChange={(value) => settings.setVideoScanFilterValue('sizeUnit', value)}
+            />
+          </div>
+          <div className="video-scan-range-row">
+            <VideoScanNumberSetting
+              label="最小"
+              value={filters.minSizeGb}
+              min={0}
+              disabled={!enabled.has('size')}
+              onChange={(value) => settings.setVideoScanFilterValue('minSizeGb', value)}
+            />
+            <VideoScanNumberSetting
+              label="最大"
+              value={filters.maxSizeGb}
+              min={0}
+              disabled={!enabled.has('size')}
+              onChange={(value) => settings.setVideoScanFilterValue('maxSizeGb', value)}
+            />
+          </div>
+        </section>
+
+        <section className={enabled.has('name') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
+          <h4>名称匹配</h4>
+          <label className="param-input-row">
+            <ParameterHint label="名称前缀" tip="多个前缀可用逗号、空格或换行分隔。" />
+            <TextInput
+              value={filters.namePrefixes}
+              disabled={!enabled.has('name')}
+              placeholder="movie_, sample_"
+              onChange={(event) => settings.setVideoScanFilterValue('namePrefixes', event.target.value)}
+            />
+          </label>
+          <label className="param-input-row">
+            <ParameterHint label="名称包含" tip="多个关键词可用逗号、空格或换行分隔。" />
+            <TextInput
+              value={filters.nameIncludes}
+              disabled={!enabled.has('name')}
+              placeholder="1080p, 完整版"
+              onChange={(event) => settings.setVideoScanFilterValue('nameIncludes', event.target.value)}
+            />
+          </label>
+        </section>
+
+        <section className={enabled.has('duration') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
+          <div className="video-scan-card-title">
+            <h4>时长</h4>
+            <VideoScanUnitSelect
+              ariaLabel="时长单位"
+              disabled={!enabled.has('duration')}
+              options={videoScanDurationUnitOptions}
+              value={filters.durationUnit}
+              onChange={(value) => settings.setVideoScanFilterValue('durationUnit', value)}
+            />
+          </div>
+          <div className="video-scan-range-row">
+            <VideoScanNumberSetting
+              label="最短"
+              value={filters.minDurationSec}
+              min={0}
+              disabled={!enabled.has('duration')}
+              onChange={(value) => settings.setVideoScanFilterValue('minDurationSec', value)}
+            />
+            <VideoScanNumberSetting
+              label="最长"
+              value={filters.maxDurationSec}
+              min={0}
+              disabled={!enabled.has('duration')}
+              onChange={(value) => settings.setVideoScanFilterValue('maxDurationSec', value)}
+            />
+          </div>
+        </section>
+
+        <section className={enabled.has('resolution') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
+          <h4>分辨率</h4>
+          <div className="video-scan-resolution-grid">
+            <VideoScanNumberSetting label="最小宽" value={filters.minWidth} min={0} suffix="px" integer disabled={!enabled.has('resolution')} onChange={(value) => settings.setVideoScanFilterValue('minWidth', value)} />
+            <VideoScanNumberSetting label="最小高" value={filters.minHeight} min={0} suffix="px" integer disabled={!enabled.has('resolution')} onChange={(value) => settings.setVideoScanFilterValue('minHeight', value)} />
+            <VideoScanNumberSetting label="最大宽" value={filters.maxWidth} min={0} suffix="px" integer disabled={!enabled.has('resolution')} onChange={(value) => settings.setVideoScanFilterValue('maxWidth', value)} />
+            <VideoScanNumberSetting label="最大高" value={filters.maxHeight} min={0} suffix="px" integer disabled={!enabled.has('resolution')} onChange={(value) => settings.setVideoScanFilterValue('maxHeight', value)} />
+          </div>
+        </section>
+
+        <section className={enabled.has('fps') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
+          <h4>帧率</h4>
+          <div className="video-scan-range-row">
+            <VideoScanNumberSetting
+              label="最低"
+              value={filters.minFps}
+              min={0}
+              suffix="fps"
+              disabled={!enabled.has('fps')}
+              onChange={(value) => settings.setVideoScanFilterValue('minFps', value)}
+            />
+            <VideoScanNumberSetting
+              label="最高"
+              value={filters.maxFps}
+              min={0}
+              suffix="fps"
+              disabled={!enabled.has('fps')}
+              onChange={(value) => settings.setVideoScanFilterValue('maxFps', value)}
+            />
+          </div>
+        </section>
+
+        <section className="video-scan-parameter-card">
+          <h4>结果排序</h4>
+          <div className="video-scan-sort-grid">
+            <label className="param-input-row">
+              <ParameterHint label="排序依据" tip="扫描完成后按所选参数排序；选择时长、帧率或分辨率时会读取视频元数据。" />
+              <SelectInput
+                value={filters.sortBy}
+                onChange={(event) => settings.setVideoScanFilterValue('sortBy', event.target.value as VideoScanSortBy)}
+              >
+                {videoScanSortByOptions.map((option) => (
+                  <option value={option.value} key={option.value}>{option.label}</option>
+                ))}
+              </SelectInput>
+            </label>
+            <label className="param-input-row">
+              <ParameterHint label="排序方式" tip="升序从小到大 / A 到 Z；降序反向排列。" />
+              <SelectInput
+                value={filters.sortDirection}
+                onChange={(event) => settings.setVideoScanFilterValue('sortDirection', event.target.value as VideoScanSortDirection)}
+              >
+                {videoScanSortDirectionOptions.map((option) => (
+                  <option value={option.value} key={option.value}>{option.label}</option>
+                ))}
+              </SelectInput>
+            </label>
+          </div>
+        </section>
+
+        <section className={enabled.has('extension') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
+          <h4>格式</h4>
+          <label className="param-input-row">
+            <ParameterHint label="扩展名" tip="多个扩展名可用逗号、空格或换行分隔；可写 mp4 或 .mp4。" />
+            <TextInput
+              value={filters.extensions}
+              disabled={!enabled.has('extension')}
+              placeholder="mp4, mkv, mov"
+              onChange={(event) => settings.setVideoScanFilterValue('extensions', event.target.value)}
+            />
+          </label>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function formatVideoScanFilterSummary(keys: VideoScanFilterKey[]) {
+  if (keys.length === 0) return 'all'
+  return videoScanFilterOptions
+    .filter((option) => keys.includes(option.id))
+    .map((option) => option.name)
+    .join(' / ')
+}
+
 function TemplateToolbar<T>({
   label,
   templates,
@@ -1368,6 +1649,7 @@ function NumberSetting({
   min,
   max,
   suffix,
+  disabled,
   onChange,
 }: {
   label: string
@@ -1376,6 +1658,7 @@ function NumberSetting({
   min?: number
   max?: number
   suffix?: string
+  disabled?: boolean
   onChange: (value: number) => void
 }) {
   return (
@@ -1387,12 +1670,83 @@ function NumberSetting({
           min={min}
           max={max}
           value={value}
+          disabled={disabled}
           onChange={(event) => onChange(clampNumber(event.target.value, min, max, value))}
         />
         {suffix && <span>{suffix}</span>}
       </div>
     </label>
   )
+}
+
+function VideoScanUnitSelect<T extends string>({
+  ariaLabel,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  ariaLabel: string
+  value: T
+  options: Array<{ value: T; label: string }>
+  disabled?: boolean
+  onChange: (value: T) => void
+}) {
+  return (
+    <label className="video-scan-unit-select" aria-label={ariaLabel} title={ariaLabel}>
+      <SelectInput value={value} disabled={disabled} onChange={(event) => onChange(event.target.value as T)}>
+        {options.map((option) => (
+          <option value={option.value} key={option.value}>{option.label}</option>
+        ))}
+      </SelectInput>
+    </label>
+  )
+}
+
+function VideoScanNumberSetting({
+  label,
+  value,
+  min,
+  max,
+  suffix,
+  integer,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: VideoScanNumericValue
+  min?: number
+  max?: number
+  suffix?: string
+  integer?: boolean
+  disabled?: boolean
+  onChange: (value: VideoScanNumericValue) => void
+}) {
+  return (
+    <label className="param-input-row">
+      <ParameterHint label={label} tip="0 表示不限。" />
+      <div className={suffix ? 'number-suffix' : undefined}>
+        <TextInput
+          type="number"
+          min={min}
+          max={max}
+          step={integer ? 1 : 0.1}
+          disabled={disabled}
+          value={value}
+          onChange={(event) => onChange(parseOptionalScanNumber(event.target.value, min, max, integer))}
+        />
+        {suffix && <span>{suffix}</span>}
+      </div>
+    </label>
+  )
+}
+
+function parseOptionalScanNumber(value: string, min: number | undefined, max: number | undefined, integer?: boolean): VideoScanNumericValue {
+  if (value.trim() === '') return ''
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return ''
+  const clamped = Math.max(min ?? Number.NEGATIVE_INFINITY, Math.min(max ?? Number.POSITIVE_INFINITY, numeric))
+  return integer ? Math.round(clamped) : Math.round(clamped * 100) / 100
 }
 
 function clampNumber(value: string, min: number | undefined, max: number | undefined, fallback: number) {
@@ -1446,5 +1800,6 @@ function buildSettingsSignature(settings: SettingsSnapshot) {
     customAnalysisPresetSource: settings.customAnalysisPresetSource,
     customAnalysisPresets: settings.customAnalysisPresets,
     customErrorTolerance: settings.customErrorTolerance,
+    videoScanFilters: settings.videoScanFilters,
   })
 }

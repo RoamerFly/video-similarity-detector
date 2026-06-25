@@ -7,11 +7,38 @@ export type BuiltInAnalysisPresetId = 'ultra_fast' | 'fast' | 'normal' | 'precis
 export type EditableAnalysisPresetId = BuiltInAnalysisPresetId | 'custom'
 export type AnalysisPresetId = EditableAnalysisPresetId | 'duplicate_file'
 export type CloseBehavior = 'ask' | 'tray' | 'exit'
+export type VideoScanFilterKey = 'size' | 'name' | 'duration' | 'resolution' | 'fps' | 'extension'
+export type VideoScanSizeUnit = 'B' | 'KB' | 'MB' | 'GB' | 'TB'
+export type VideoScanDurationUnit = 'ms' | 'sec' | 'min' | 'hour'
+export type VideoScanNumericValue = number | ''
+export type VideoScanSortBy = 'name' | 'duration' | 'size' | 'fps' | 'resolution' | 'modified'
+export type VideoScanSortDirection = 'asc' | 'desc'
 
 export interface ErrorToleranceConfig {
   errorToleranceSevereLimit: number
   errorToleranceMissingPictureLimit: number
   errorTolerancePreflightValidation: boolean
+}
+
+export interface VideoScanFilters {
+  enabledKeys: VideoScanFilterKey[]
+  minSizeGb: VideoScanNumericValue
+  maxSizeGb: VideoScanNumericValue
+  sizeUnit: VideoScanSizeUnit
+  namePrefixes: string
+  nameIncludes: string
+  minDurationSec: VideoScanNumericValue
+  maxDurationSec: VideoScanNumericValue
+  durationUnit: VideoScanDurationUnit
+  minWidth: VideoScanNumericValue
+  minHeight: VideoScanNumericValue
+  maxWidth: VideoScanNumericValue
+  maxHeight: VideoScanNumericValue
+  minFps: VideoScanNumericValue
+  maxFps: VideoScanNumericValue
+  extensions: string
+  sortBy: VideoScanSortBy
+  sortDirection: VideoScanSortDirection
 }
 
 export interface SettingsSnapshot {
@@ -49,6 +76,7 @@ export interface SettingsSnapshot {
   customAnalysisPresetSource: BuiltInAnalysisPresetId
   customAnalysisPresets: Record<EditableAnalysisPresetId, AnalysisPresetConfig>
   customErrorTolerance: ErrorToleranceConfig
+  videoScanFilters: VideoScanFilters
 }
 
 export interface AnalysisConfig {
@@ -220,6 +248,26 @@ export const defaultSettings: SettingsSnapshot = {
     errorToleranceSevereLimit: 20,
     errorToleranceMissingPictureLimit: 100,
     errorTolerancePreflightValidation: true,
+  },
+  videoScanFilters: {
+    enabledKeys: [],
+    minSizeGb: 0,
+    maxSizeGb: 0,
+    sizeUnit: 'GB',
+    namePrefixes: '',
+    nameIncludes: '',
+    minDurationSec: 0,
+    maxDurationSec: 0,
+    durationUnit: 'sec',
+    minWidth: 0,
+    minHeight: 0,
+    maxWidth: 0,
+    maxHeight: 0,
+    minFps: 0,
+    maxFps: 0,
+    extensions: '',
+    sortBy: 'name',
+    sortDirection: 'asc',
   },
 }
 

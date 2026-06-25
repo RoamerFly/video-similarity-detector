@@ -11,6 +11,8 @@ import type {
   PortraitRotation,
   ResizeMode,
   SettingsSnapshot,
+  VideoScanFilterKey,
+  VideoScanFilters,
 } from '@/types/config'
 import { analysisPresets, cloneEditableAnalysisPresets, defaultSettings } from '@/types/config'
 
@@ -50,6 +52,8 @@ interface SettingsActions {
   setCheckEnvOnStartup: (value: boolean) => void
   setOpenMaximized: (value: boolean) => void
   setCloseBehavior: (value: CloseBehavior) => void
+  setVideoScanFilterKeys: (value: VideoScanFilterKey[]) => void
+  setVideoScanFilterValue: <K extends keyof VideoScanFilters>(key: K, value: VideoScanFilters[K]) => void
   setAnalysisMode: (value: AnalysisMode) => void
   applyAnalysisPreset: (preset: AnalysisPresetId) => void
   applyAnalysisTemplate: (config: AnalysisPresetConfig) => void
@@ -58,6 +62,7 @@ interface SettingsActions {
   resetBaseSettings: (defaults?: Partial<Pick<SettingsSnapshot, 'projectRoot' | 'videoDir' | 'cacheDir' | 'reportDir'>>) => void
   resetAnalysisSettings: () => void
   resetErrorToleranceSettings: () => void
+  resetVideoScanFilters: () => void
   resetSettings: () => void
   saveSettings: () => void
   replaceSettings: (settings: SettingsSnapshot) => void
@@ -172,6 +177,18 @@ export const useSettingsStore = create<SettingsState>()(
       setCheckEnvOnStartup: (checkEnvOnStartup) => set({ checkEnvOnStartup }),
       setOpenMaximized: (openMaximized) => set({ openMaximized }),
       setCloseBehavior: (closeBehavior) => set({ closeBehavior }),
+      setVideoScanFilterKeys: (enabledKeys) => set({
+        videoScanFilters: {
+          ...useSettingsStore.getState().videoScanFilters,
+          enabledKeys: sanitizeVideoScanFilterKeys(enabledKeys),
+        },
+      }),
+      setVideoScanFilterValue: (key, value) => set((state) => ({
+        videoScanFilters: {
+          ...state.videoScanFilters,
+          [key]: value,
+        },
+      })),
       setAnalysisMode: (analysisMode) => set({
         analysisMode,
         selectedAnalysisPreset: analysisMode === 'duplicate_file' ? 'duplicate_file' : 'normal',
@@ -277,12 +294,20 @@ export const useSettingsStore = create<SettingsState>()(
         errorToleranceMissingPictureLimit: defaultSettings.errorToleranceMissingPictureLimit,
         errorTolerancePreflightValidation: defaultSettings.errorTolerancePreflightValidation,
       }),
+      resetVideoScanFilters: () => set({
+        videoScanFilters: { ...defaultSettings.videoScanFilters },
+      }),
       resetSettings: () => set({
         ...defaultSettings,
         customAnalysisPresets: cloneEditableAnalysisPresets(),
         customErrorTolerance: { ...defaultSettings.customErrorTolerance },
+        videoScanFilters: { ...defaultSettings.videoScanFilters },
       }),
-      saveSettings: () => persistSettingsSnapshot(settingsSnapshotFromState(useSettingsStore.getState())),
+      saveSettings: () => {
+        const snapshot = settingsSnapshotFromState(useSettingsStore.getState())
+        set(snapshot)
+        persistSettingsSnapshot(snapshot)
+      },
       replaceSettings: (settings) => set(settingsSnapshotFromState(settings)),
     }
   },
@@ -324,6 +349,7 @@ export function settingsSnapshotFromState(settings: SettingsSnapshot): SettingsS
     customAnalysisPresetSource: settings.customAnalysisPresetSource,
     customAnalysisPresets: cloneEditableAnalysisPresets(settings.customAnalysisPresets),
     customErrorTolerance: { ...settings.customErrorTolerance },
+    videoScanFilters: sanitizeVideoScanFilters(settings.videoScanFilters),
   }
 }
 
@@ -469,6 +495,7 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
     customAnalysisPresetSource: sanitizeBuiltInPresetId(snapshot.customAnalysisPresetSource),
     customAnalysisPresets: sanitizeCustomAnalysisPresets(snapshot.customAnalysisPresets),
     customErrorTolerance,
+    videoScanFilters: sanitizeVideoScanFilters(snapshot.videoScanFilters),
   }
 }
 
@@ -544,9 +571,68 @@ function sanitizeCustomAnalysisPresets(value: unknown) {
   return sanitized
 }
 
+function sanitizeVideoScanFilters(value: unknown): VideoScanFilters {
+  if (!value || typeof value !== 'object') return { ...defaultSettings.videoScanFilters }
+  const raw = value as Partial<VideoScanFilters>
+  return {
+    enabledKeys: sanitizeVideoScanFilterKeys(raw.enabledKeys),
+    minSizeGb: clampDecimal(Number(raw.minSizeGb), 0),
+    maxSizeGb: clampDecimal(Number(raw.maxSizeGb), 0),
+    sizeUnit: sanitizeVideoScanSizeUnit(raw.sizeUnit),
+    namePrefixes: typeof raw.namePrefixes === 'string' ? raw.namePrefixes : '',
+    nameIncludes: typeof raw.nameIncludes === 'string' ? raw.nameIncludes : '',
+    minDurationSec: clampDecimal(Number(raw.minDurationSec), 0),
+    maxDurationSec: clampDecimal(Number(raw.maxDurationSec), 0),
+    durationUnit: sanitizeVideoScanDurationUnit(raw.durationUnit),
+    minWidth: clampMin(Number(raw.minWidth), 0),
+    minHeight: clampMin(Number(raw.minHeight), 0),
+    maxWidth: clampMin(Number(raw.maxWidth), 0),
+    maxHeight: clampMin(Number(raw.maxHeight), 0),
+    minFps: clampDecimal(Number(raw.minFps), 0),
+    maxFps: clampDecimal(Number(raw.maxFps), 0),
+    extensions: typeof raw.extensions === 'string' ? raw.extensions : '',
+    sortBy: sanitizeVideoScanSortBy(raw.sortBy),
+    sortDirection: raw.sortDirection === 'desc' ? 'desc' : defaultSettings.videoScanFilters.sortDirection,
+  }
+}
+
+function sanitizeVideoScanFilterKeys(value: unknown): VideoScanFilterKey[] {
+  if (!Array.isArray(value)) return []
+  const allowed: VideoScanFilterKey[] = ['size', 'name', 'duration', 'resolution', 'fps', 'extension']
+  return allowed.filter((key) => value.includes(key))
+}
+
+function sanitizeVideoScanSizeUnit(value: unknown) {
+  return value === 'B' || value === 'KB' || value === 'MB' || value === 'GB' || value === 'TB'
+    ? value
+    : defaultSettings.videoScanFilters.sizeUnit
+}
+
+function sanitizeVideoScanDurationUnit(value: unknown) {
+  return value === 'ms' || value === 'sec' || value === 'min' || value === 'hour'
+    ? value
+    : defaultSettings.videoScanFilters.durationUnit
+}
+
+function sanitizeVideoScanSortBy(value: unknown) {
+  return value === 'name'
+    || value === 'duration'
+    || value === 'size'
+    || value === 'fps'
+    || value === 'resolution'
+    || value === 'modified'
+    ? value
+    : defaultSettings.videoScanFilters.sortBy
+}
+
 function clampMin(value: number, min: number) {
   if (!Number.isFinite(value)) return min
   return Math.max(min, Math.round(value))
+}
+
+function clampDecimal(value: number, min: number) {
+  if (!Number.isFinite(value)) return min
+  return Math.max(min, Math.round(value * 100) / 100)
 }
 
 function clampFloat(value: number, min: number, max: number) {
