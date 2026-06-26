@@ -429,15 +429,9 @@ export async function checkForUpdates() {
   return invoke<UpdateInfo>('check_for_updates')
 }
 
-export async function downloadAndInstallUpdate(update: UpdateInfo) {
+export async function downloadAndInstallUpdate() {
   if (!hasTauriRuntime()) throw new Error('覆盖更新需要在桌面应用中运行。')
-  return invoke<void>('download_and_install_update', {
-    request: {
-      assetName: update.assetName,
-      assetUrl: update.assetUrl,
-      assetSize: update.assetSize,
-    },
-  })
+  return invoke<void>('download_and_install_update')
 }
 
 export async function openReleasePage(url: string) {

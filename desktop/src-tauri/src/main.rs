@@ -22,6 +22,7 @@ use tauri::{
     Emitter, Manager, State,
 };
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_updater::UpdaterExt;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv"];
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "aac", "m4a", "ogg", "opus", "wma"];
@@ -30,14 +31,8 @@ const MAIN_TRAY_ID: &str = "main-tray";
 const CLOSE_BEHAVIOR_ASK: u8 = 0;
 const CLOSE_BEHAVIOR_TRAY: u8 = 1;
 const CLOSE_BEHAVIOR_EXIT: u8 = 2;
-const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/RoamerFly/video-similarity-detector/releases/latest";
 const RELEASES_LATEST_PAGE_URL: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest";
-const RELEASES_ATOM_URL: &str =
-    "https://github.com/RoamerFly/video-similarity-detector/releases.atom";
-const RELEASE_DOWNLOAD_PREFIX: &str =
-    "https://github.com/RoamerFly/video-similarity-detector/releases/download/";
 const ANALYSIS_VIDEO_CONTEXT_PREFIX: &str = "ANALYSIS_VIDEO_CONTEXT|";
 const ANALYSIS_VIDEO_QUARANTINED_PREFIX: &str = "ANALYSIS_VIDEO_QUARANTINED|";
 static CLOSE_BEHAVIOR: AtomicU8 = AtomicU8::new(CLOSE_BEHAVIOR_ASK);
@@ -73,22 +68,6 @@ struct AppInfo {
     install_root: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    html_url: String,
-    body: Option<String>,
-    published_at: Option<String>,
-    assets: Vec<GithubReleaseAsset>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct GithubReleaseAsset {
-    name: String,
-    browser_download_url: String,
-    size: u64,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -106,14 +85,6 @@ struct UpdateInfo {
     install_root: String,
     can_auto_install: bool,
     message: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InstallUpdateRequest {
-    asset_name: String,
-    asset_url: String,
-    asset_size: u64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -953,449 +924,187 @@ fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
 
 #[tauri::command]
 async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || check_for_updates_impl(&app))
-        .await
-        .map_err(|e| format!("检查更新任务异常: {e}"))?
-}
-
-fn check_for_updates_impl(app: &tauri::AppHandle) -> Result<UpdateInfo, String> {
-    let root = resolve_project_root(app)?;
+    let root = resolve_project_root(&app)?;
     let current_version = app.package_info().version.to_string();
     let build_flavor = detect_build_flavor(&root);
     let install_type = detect_install_type(&root);
     let install_root = resolve_install_root()?;
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!(
-            "Video-Similarity/{current_version} (+https://github.com/RoamerFly/video-similarity-detector)"
-        ))
-        .connect_timeout(Duration::from_secs(6))
-        .timeout(Duration::from_secs(15))
+
+    let updater = app
+        .updater_builder()
         .build()
-        .map_err(|e| format!("创建更新请求失败: {e}"))?;
-    let (release, used_fallback) = fetch_latest_release(&client)?;
+        .map_err(|e| format!("初始化更新检查失败: {e}"))?;
 
-    let latest_version = release.tag_name.trim_start_matches('v').to_string();
-    let update_available = compare_versions(&latest_version, &current_version).is_gt();
-    let asset = find_update_asset(&client, &release, &build_flavor);
-    let can_auto_install = cfg!(target_os = "windows") && update_available && asset.is_some();
-    let fallback_note = if used_fallback {
-        "（GitHub API 受限，已通过发布页备用通道检查）"
-    } else {
-        ""
-    };
-    let message = if !update_available {
-        format!("当前已是最新版本 v{current_version}{fallback_note}")
-    } else if can_auto_install {
-        format!("发现新版本 v{latest_version}，可保留数据直接覆盖安装{fallback_note}")
-    } else {
-        format!("发现新版本 v{latest_version}，请打开发布页下载{fallback_note}")
-    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let latest_version = update.version.clone();
+            let update_available = true;
+            let can_auto_install = cfg!(target_os = "windows");
+            let download_url_str = update.download_url.to_string();
+            let asset_name = download_url_str
+                .rsplit_once('/')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or_default();
+            let release_url = format!(
+                "https://github.com/RoamerFly/video-similarity-detector/releases/tag/v{}",
+                latest_version
+            );
+            let message = if can_auto_install {
+                format!("发现新版本 v{latest_version}，可保留数据直接覆盖安装")
+            } else {
+                format!("发现新版本 v{latest_version}，请打开发布页下载")
+            };
 
-    Ok(UpdateInfo {
-        current_version,
-        latest_version,
-        update_available,
-        release_url: release.html_url,
-        release_notes: release.body.unwrap_or_default(),
-        published_at: release.published_at.unwrap_or_default(),
-        asset_name: asset
-            .as_ref()
-            .map(|item| item.name.clone())
-            .unwrap_or_default(),
-        asset_url: asset
-            .as_ref()
-            .map(|item| item.browser_download_url.clone())
-            .unwrap_or_default(),
-        asset_size: asset.as_ref().map(|item| item.size).unwrap_or(0),
-        build_flavor,
-        install_type,
-        install_root: path_to_string(install_root),
-        can_auto_install,
-        message,
-    })
-}
-
-fn fetch_latest_release(
-    client: &reqwest::blocking::Client,
-) -> Result<(GithubRelease, bool), String> {
-    match fetch_latest_release_from_api(client) {
-        Ok(release) => Ok((release, false)),
-        Err(api_error) => match fetch_latest_release_from_page(client) {
-            Ok(release) => Ok((release, true)),
-            Err(page_error) => Err(format!(
-                "连接 GitHub Releases 失败：{api_error}；备用发布页也失败：{page_error}"
-            )),
-        },
-    }
-}
-
-fn find_update_asset(
-    client: &reqwest::blocking::Client,
-    release: &GithubRelease,
-    build_flavor: &str,
-) -> Option<GithubReleaseAsset> {
-    let expected_suffix = update_asset_suffix(build_flavor);
-    release
-        .assets
-        .iter()
-        .find(|asset| asset.name.to_ascii_lowercase().ends_with(&expected_suffix))
-        .cloned()
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| {
-                    asset
-                        .name
-                        .to_ascii_lowercase()
-                        .ends_with("-windows-x64-cpu-installer.exe")
-                })
-                .cloned()
-        })
-        .or_else(|| probe_known_update_asset(client, &release.tag_name, build_flavor))
-        .or_else(|| probe_known_update_asset(client, &release.tag_name, "cpu"))
-}
-
-fn probe_known_update_asset(
-    client: &reqwest::blocking::Client,
-    release_tag: &str,
-    build_flavor: &str,
-) -> Option<GithubReleaseAsset> {
-    let tag = release_tag.trim();
-    if !is_valid_release_tag(tag) {
-        return None;
-    }
-    let version_for_name = if tag.starts_with('v') || tag.starts_with('V') {
-        tag.to_string()
-    } else {
-        format!("v{tag}")
-    };
-    let asset_name = format!(
-        "Video_Similarity-{}{}",
-        version_for_name,
-        update_asset_suffix(build_flavor)
-    );
-    let asset_url = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/{asset_name}");
-    let size = probe_remote_asset_size(client, &asset_url)?;
-    if !(1024 * 1024..=8 * 1024 * 1024 * 1024).contains(&size) {
-        return None;
-    }
-    Some(GithubReleaseAsset {
-        name: asset_name,
-        browser_download_url: asset_url,
-        size,
-    })
-}
-
-fn probe_remote_asset_size(client: &reqwest::blocking::Client, url: &str) -> Option<u64> {
-    if let Ok(response) = client
-        .head(url)
-        .header("Accept", "application/octet-stream,*/*;q=0.8")
-        .header("Cache-Control", "no-cache")
-        .header("Pragma", "no-cache")
-        .send()
-    {
-        if response.status().is_success() {
-            if let Some(size) = response.content_length() {
-                if size > 0 {
-                    return Some(size);
-                }
-            }
+            Ok(UpdateInfo {
+                current_version,
+                latest_version,
+                update_available,
+                release_url,
+                release_notes: update.body.unwrap_or_default(),
+                published_at: update.date.map(|d| d.to_string()).unwrap_or_default(),
+                asset_name,
+                asset_url: update.download_url.to_string(),
+                asset_size: 0,
+                build_flavor,
+                install_type,
+                install_root: path_to_string(install_root),
+                can_auto_install,
+                message,
+            })
         }
-    }
-
-    let response = client
-        .get(url)
-        .header("Accept", "application/octet-stream,*/*;q=0.8")
-        .header("Cache-Control", "no-cache")
-        .header("Pragma", "no-cache")
-        .header("Range", "bytes=0-0")
-        .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    response
-        .headers()
-        .get("content-range")
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_content_range_total)
-        .or_else(|| response.content_length())
-}
-
-fn parse_content_range_total(value: &str) -> Option<u64> {
-    value
-        .rsplit_once('/')
-        .and_then(|(_, total)| total.trim().parse::<u64>().ok())
-}
-
-fn fetch_latest_release_from_api(
-    client: &reqwest::blocking::Client,
-) -> Result<GithubRelease, String> {
-    let response = client
-        .get(RELEASES_API_URL)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("Cache-Control", "no-cache")
-        .header("Pragma", "no-cache")
-        .send()
-        .map_err(|e| format!("GitHub API 请求失败: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format_github_response_error("GitHub API", response));
-    }
-    response
-        .json::<GithubRelease>()
-        .map_err(|e| format!("解析 GitHub 最新版本失败: {e}"))
-}
-
-fn fetch_latest_release_from_page(
-    client: &reqwest::blocking::Client,
-) -> Result<GithubRelease, String> {
-    let response = client
-        .get(RELEASES_LATEST_PAGE_URL)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Cache-Control", "no-cache")
-        .header("Pragma", "no-cache")
-        .header("Upgrade-Insecure-Requests", "1")
-        .send()
-        .map_err(|e| format!("发布页请求失败: {e}"))?;
-    let final_url = response.url().to_string();
-    if !response.status().is_success() {
-        return Err(format_github_response_error("GitHub 发布页", response));
-    }
-    let html = response
-        .text()
-        .map_err(|e| format!("读取 GitHub 发布页失败: {e}"))?;
-    let tag_name = extract_release_tag(&final_url, &html)
-        .ok_or_else(|| "无法从 GitHub 发布页识别最新版本号。".to_string())?;
-    let html_url = format!(
-        "https://github.com/RoamerFly/video-similarity-detector/releases/tag/{tag_name}"
-    );
-    let release_notes = fetch_release_notes_from_atom(client, &tag_name)
-        .or_else(|| extract_release_notes_from_html(&html));
-    Ok(GithubRelease {
-        tag_name,
-        html_url,
-        body: release_notes,
-        published_at: None,
-        assets: Vec::new(),
-    })
-}
-
-fn fetch_release_notes_from_atom(
-    client: &reqwest::blocking::Client,
-    tag_name: &str,
-) -> Option<String> {
-    let response = client
-        .get(RELEASES_ATOM_URL)
-        .header("Accept", "application/atom+xml,application/xml;q=0.9,*/*;q=0.8")
-        .header("Cache-Control", "no-cache")
-        .header("Pragma", "no-cache")
-        .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let xml = response.text().ok()?;
-    extract_atom_release_notes(&xml, tag_name)
-}
-
-fn extract_atom_release_notes(xml: &str, tag_name: &str) -> Option<String> {
-    let expected_title = format!("<title>{tag_name}</title>");
-    for block in xml.split("<entry>").skip(1) {
-        let entry = block.split("</entry>").next().unwrap_or_default();
-        if !entry.contains(&expected_title)
-            && !entry.contains(&format!("/releases/tag/{tag_name}\""))
-        {
-            continue;
+        Ok(None) => {
+            Ok(UpdateInfo {
+                current_version: current_version.clone(),
+                latest_version: current_version.clone(),
+                update_available: false,
+                release_url: RELEASES_LATEST_PAGE_URL.to_string(),
+                release_notes: String::new(),
+                published_at: String::new(),
+                asset_name: String::new(),
+                asset_url: String::new(),
+                asset_size: 0,
+                build_flavor,
+                install_type,
+                install_root: path_to_string(install_root),
+                can_auto_install: false,
+                message: format!("当前已是最新版本 v{current_version}"),
+            })
         }
-        let content = extract_between(entry, "<content type=\"html\">", "</content>")?;
-        let text = strip_html_tags(&decode_xml_entities(content));
-        if !text.trim().is_empty() {
-            return Some(text.trim().to_string());
-        }
+        Err(e) => Err(format!("检查更新失败: {e}")),
     }
-    None
 }
 
-fn extract_release_notes_from_html(html: &str) -> Option<String> {
-    for marker in [
-        "<div class=\"markdown-body",
-        "<div data-view-component=\"true\" class=\"markdown-body",
-    ] {
-        if let Some((_, rest)) = html.split_once(marker) {
-            let content = rest.split("</div>").next().unwrap_or_default();
-            let text = strip_html_tags(&decode_xml_entities(content));
-            if !text.trim().is_empty() {
-                return Some(text.trim().to_string());
-            }
-        }
-    }
-    None
-}
 
-fn extract_between<'a>(value: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    value
-        .split_once(start)
-        .and_then(|(_, rest)| rest.split_once(end).map(|(content, _)| content))
-}
-
-fn decode_xml_entities(value: &str) -> String {
-    value
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
-fn strip_html_tags(value: &str) -> String {
-    let normalized = value
-        .replace("<br>", "\n")
-        .replace("<br/>", "\n")
-        .replace("<br />", "\n")
-        .replace("</p>", "\n")
-        .replace("</h1>", "\n")
-        .replace("</h2>", "\n")
-        .replace("</h3>", "\n")
-        .replace("<li>", "\n- ")
-        .replace("</li>", "\n");
-    let mut output = String::new();
-    let mut inside_tag = false;
-    for ch in normalized.chars() {
-        match ch {
-            '<' => inside_tag = true,
-            '>' => inside_tag = false,
-            _ if !inside_tag => output.push(ch),
-            _ => {}
-        }
-    }
-    output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_github_response_error(
-    context: &str,
-    response: reqwest::blocking::Response,
-) -> String {
-    let status = response.status();
-    let rate_remaining = response
-        .headers()
-        .get("x-ratelimit-remaining")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let body = response.text().unwrap_or_default();
-    let detail = summarize_github_error_body(&body);
-    let mut message = format!("{context} 返回 HTTP {status}");
-    if !detail.is_empty() {
-        message.push_str(&format!("，{detail}"));
-    }
-    if let Some(remaining) = rate_remaining {
-        message.push_str(&format!("，剩余 API 额度 {remaining}"));
-    }
-    message
-}
-
-fn summarize_github_error_body(body: &str) -> String {
-    if body.trim().is_empty() {
-        return String::new();
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(body) {
-        if let Some(message) = value.get("message").and_then(Value::as_str) {
-            return message.trim().to_string();
-        }
-    }
-    body.trim()
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(180)
-        .collect::<String>()
-}
-
-fn extract_release_tag(final_url: &str, html: &str) -> Option<String> {
-    extract_release_tag_from_url(final_url).or_else(|| extract_release_tag_from_html(html))
-}
-
-fn extract_release_tag_from_url(url: &str) -> Option<String> {
-    for marker in ["/releases/tag/", "/releases/download/"] {
-        if let Some((_, rest)) = url.split_once(marker) {
-            let tag = rest
-                .split(['?', '#', '/', '"', '\''])
-                .next()
-                .unwrap_or_default()
-                .trim();
-            if is_valid_release_tag(tag) {
-                return Some(tag.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_release_tag_from_html(html: &str) -> Option<String> {
-    for marker in [
-        "https://github.com/RoamerFly/video-similarity-detector/releases/tag/",
-        "/RoamerFly/video-similarity-detector/releases/tag/",
-        "/releases/tag/",
-    ] {
-        let mut remaining = html;
-        while let Some((_, rest)) = remaining.split_once(marker) {
-            let tag = rest
-                .split(['?', '#', '/', '"', '\'', '<', '>'])
-                .next()
-                .unwrap_or_default()
-                .trim();
-            if is_valid_release_tag(tag) {
-                return Some(tag.to_string());
-            }
-            remaining = rest;
-        }
-    }
-    None
-}
-
-fn is_valid_release_tag(tag: &str) -> bool {
-    !tag.is_empty()
-        && tag.chars().any(|ch| ch.is_ascii_digit())
-        && tag
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | 'v' | 'V'))
+#[cfg(windows)]
+fn powershell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
 }
 
 #[tauri::command]
-async fn download_and_install_update(
-    app: tauri::AppHandle,
-    request: InstallUpdateRequest,
-) -> Result<(), String> {
-    validate_update_asset(&request)?;
-    let app_for_download = app.clone();
-    let request_for_download = request;
-    let installer = tauri::async_runtime::spawn_blocking(move || {
-        download_update_installer(&app_for_download, &request_for_download)
-    })
-    .await
-    .map_err(|e| format!("下载更新任务异常: {e}"))??;
+async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let current_exe = std::env::current_exe().map_err(|e| format!("无法读取当前程序路径: {e}"))?;
+    let exe_stem = current_exe
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or("video-similarity-desktop");
+    let temp_dir = std::env::temp_dir().join("video-similarity-updates");
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("创建更新临时目录失败: {e}"))?;
+    let installer_path = temp_dir.join(format!("{exe_stem}-installer.exe"));
+
+    let updater = app
+        .updater_builder()
+        .build()
+        .map_err(|e| format!("初始化更新器失败: {e}"))?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("检查更新失败: {e}"))?
+        .ok_or_else(|| "没有可用的更新。".to_string())?;
+
+    let progress_app = app.clone();
+    let total = Arc::new(std::sync::Mutex::new(None::<u64>));
+    let total_for_cb = total.clone();
+    let mut downloaded = 0u64;
+    let bytes = update
+        .download(
+            move |chunk_len, content_len| {
+                downloaded += chunk_len as u64;
+                if content_len.is_some() {
+                    *total_for_cb.lock().unwrap() = content_len;
+                }
+                let total = *total_for_cb.lock().unwrap();
+                let _ = progress_app.emit(
+                    "update-download-progress",
+                    UpdateDownloadProgress {
+                        downloaded_bytes: downloaded,
+                        total_bytes: total.unwrap_or(0),
+                        progress: total
+                            .filter(|t| *t > 0)
+                            .map(|t| downloaded as f64 / t as f64 * 100.0)
+                            .unwrap_or(0.0),
+                        stage: "正在下载更新安装包".to_string(),
+                    },
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("下载更新安装包失败: {e}"))?;
+
+    fs::write(&installer_path, &bytes)
+        .map_err(|e| format!("写入更新安装包失败: {e}"))?;
 
     #[cfg(target_os = "windows")]
     {
         let install_root = resolve_install_root()?;
-        Command::new(&installer)
-            .arg("--update")
-            .arg("--auto-start")
-            .arg("--target")
-            .arg(&install_root)
-            .arg("--wait-pid")
-            .arg(std::process::id().to_string())
+        let script_path = installer_path.with_extension("update.ps1");
+
+        let ps_installer = powershell_quote_path(&installer_path);
+        let ps_script = powershell_quote_path(&script_path);
+        let ps_root = powershell_quote_path(&install_root);
+        let pid = std::process::id();
+
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+$pidToWait = {pid}
+$installer = {ps_installer}
+$log = "$installer.log"
+try {{
+  Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 1500
+  $proc = Start-Process -FilePath $installer -ArgumentList '--update','--auto-start','--target',{ps_root} -PassThru -Wait
+  if ($proc.ExitCode -ne 0) {{
+    throw "Installer exited with code $($proc.ExitCode)"
+  }}
+}} catch {{
+  Add-Content -LiteralPath $log -Value $_.Exception.ToString()
+}} finally {{
+  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath {ps_script} -Force -ErrorAction SilentlyContinue
+}}
+"#
+        );
+
+        fs::write(&script_path, &script)
+            .map_err(|e| format!("写入更新脚本失败: {e}"))?;
+
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+            ])
+            .arg(&script_path)
             .spawn()
             .map_err(|e| format!("启动更新安装器失败: {e}"))?;
+
         let _ = app.emit(
             "update-download-progress",
             UpdateDownloadProgress {
@@ -1411,112 +1120,9 @@ async fn download_and_install_update(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = installer;
+        let _ = installer_path;
         Err("当前平台暂不支持应用内覆盖安装，请从发布页下载安装包。".to_string())
     }
-}
-
-fn download_update_installer(
-    app: &tauri::AppHandle,
-    request: &InstallUpdateRequest,
-) -> Result<PathBuf, String> {
-    let temp_dir = std::env::temp_dir().join("video-similarity-updates");
-    fs::create_dir_all(&temp_dir).map_err(|e| format!("创建更新临时目录失败: {e}"))?;
-    let target = temp_dir.join(&request.asset_name);
-    let partial = target.with_extension("exe.download");
-    let _ = fs::remove_file(&partial);
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("Video-Similarity-Updater")
-        .timeout(Duration::from_secs(60 * 30))
-        .build()
-        .map_err(|e| format!("创建下载请求失败: {e}"))?;
-    let mut response = client
-        .get(&request.asset_url)
-        .header("Accept", "application/octet-stream,*/*;q=0.8")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Cache-Control", "no-cache")
-        .header("Pragma", "no-cache")
-        .send()
-        .and_then(|response| response.error_for_status())
-        .map_err(|e| format!("下载更新安装器失败: {e}"))?;
-    let total = response.content_length().unwrap_or(0);
-    let mut output =
-        fs::File::create(&partial).map_err(|e| format!("创建安装器临时文件失败: {e}"))?;
-    let mut buffer = vec![0u8; 1024 * 1024];
-    let mut downloaded = 0u64;
-
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|e| format!("读取更新数据失败: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        output
-            .write_all(&buffer[..read])
-            .map_err(|e| format!("写入更新安装器失败: {e}"))?;
-        downloaded = downloaded.saturating_add(read as u64);
-        let progress = if total > 0 {
-            (downloaded as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
-        } else {
-            0.0
-        };
-        let _ = app.emit(
-            "update-download-progress",
-            UpdateDownloadProgress {
-                downloaded_bytes: downloaded,
-                total_bytes: total,
-                progress,
-                stage: "正在下载更新安装器".to_string(),
-            },
-        );
-    }
-    output
-        .sync_all()
-        .map_err(|e| format!("保存更新安装器失败: {e}"))?;
-    if downloaded == 0 || (total > 0 && downloaded != total) {
-        let _ = fs::remove_file(&partial);
-        return Err(format!(
-            "更新安装器下载不完整：已下载 {downloaded} 字节，预期 {total} 字节"
-        ));
-    }
-    if request.asset_size > 0 && downloaded != request.asset_size {
-        let _ = fs::remove_file(&partial);
-        return Err(format!(
-            "更新安装器大小校验失败：已下载 {downloaded} 字节，发布信息为 {} 字节",
-            request.asset_size
-        ));
-    }
-    let mut signature = [0u8; 2];
-    fs::File::open(&partial)
-        .and_then(|mut file| file.read_exact(&mut signature))
-        .map_err(|e| format!("读取更新安装器签名失败: {e}"))?;
-    if signature != *b"MZ" {
-        let _ = fs::remove_file(&partial);
-        return Err("下载的文件不是有效的 Windows 安装程序。".to_string());
-    }
-    let _ = fs::remove_file(&target);
-    fs::rename(&partial, &target).map_err(|e| format!("完成更新下载失败: {e}"))?;
-    Ok(target)
-}
-
-fn validate_update_asset(request: &InstallUpdateRequest) -> Result<(), String> {
-    let lower_name = request.asset_name.to_ascii_lowercase();
-    if !lower_name.ends_with("-installer.exe")
-        || !lower_name.starts_with("video_similarity-v")
-        || request.asset_name.contains('/')
-        || request.asset_name.contains('\\')
-    {
-        return Err("更新安装器文件名不受信任。".to_string());
-    }
-    if !request.asset_url.starts_with(RELEASE_DOWNLOAD_PREFIX) {
-        return Err("更新下载地址不受信任。".to_string());
-    }
-    if request.asset_size < 1024 * 1024 || request.asset_size > 8 * 1024 * 1024 * 1024 {
-        return Err("更新安装器大小异常。".to_string());
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1552,34 +1158,6 @@ fn open_release_page(url: String) -> Result<(), String> {
     Ok(())
 }
 
-fn update_asset_suffix(build_flavor: &str) -> String {
-    format!(
-        "-windows-x64-{}-installer.exe",
-        if build_flavor.eq_ignore_ascii_case("gpu") {
-            "gpu"
-        } else {
-            "cpu"
-        }
-    )
-}
-
-fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let parse = |value: &str| {
-        value
-            .trim()
-            .trim_start_matches('v')
-            .split(['.', '-', '+'])
-            .take(4)
-            .map(|part| part.parse::<u64>().unwrap_or(0))
-            .collect::<Vec<_>>()
-    };
-    let mut left_parts = parse(left);
-    let mut right_parts = parse(right);
-    let length = left_parts.len().max(right_parts.len()).max(3);
-    left_parts.resize(length, 0);
-    right_parts.resize(length, 0);
-    left_parts.cmp(&right_parts)
-}
 
 fn resolve_install_root() -> Result<PathBuf, String> {
     std::env::current_exe()
@@ -4808,6 +4386,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|_app| {
             setup_tray(_app)?;
             #[cfg(debug_assertions)]

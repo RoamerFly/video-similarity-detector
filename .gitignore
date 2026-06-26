@@ -12,3 +12,9 @@ video_meta.txt
 faiss_video_index.bin
 
 /clip-vit-base-patch32.zip
+
+# WorkBuddy project data
+/.workbuddy
+
+# Tauri updater signing key (private key — DO NOT COMMIT)
+/desktop/.tauri/updater-key.private

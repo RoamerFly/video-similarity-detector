@@ -828,7 +828,7 @@ function UpdateDialog({
   async function handleInstallUpdate() {
     if (!update?.canAutoInstall) return
     const confirmed = window.confirm(
-      `将下载 ${formatBytes(update.assetSize)} 的 ${update.buildFlavor.toUpperCase()} 安装包，完成后自动退出并覆盖安装到：\n${update.installRoot}\n\n数据、报告、缓存和设置不会被删除。是否继续？`,
+      `将下载 ${update.buildFlavor.toUpperCase()} 安装包，完成后自动退出并覆盖安装到：\n${update.installRoot}\n\n数据、报告、缓存和设置不会被删除。是否继续？`,
     )
     if (!confirmed) return
     setInstalling(true)
@@ -840,7 +840,7 @@ function UpdateDialog({
       stage: '正在连接 GitHub Releases',
     })
     try {
-      await downloadAndInstallUpdate(update)
+      await downloadAndInstallUpdate()
     } catch (err) {
       setInstalling(false)
       setError(normalizeBackendError(err))
