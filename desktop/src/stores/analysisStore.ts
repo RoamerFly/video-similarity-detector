@@ -77,6 +77,7 @@ const initialAnalysisConfig: AnalysisConfig = {
   inputSize: defaultSettings.defaultInputSize,
   portraitRotation: defaultSettings.defaultPortraitRotation,
   force: defaultSettings.defaultForce,
+  earlyStop: defaultSettings.defaultEarlyStop,
   errorTolerancePreset: defaultSettings.errorTolerancePreset,
   errorToleranceSevereLimit: defaultSettings.errorToleranceSevereLimit,
   errorToleranceMissingPictureLimit: defaultSettings.errorToleranceMissingPictureLimit,

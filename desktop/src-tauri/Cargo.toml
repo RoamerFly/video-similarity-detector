@@ -1,6 +1,6 @@
 [package]
 name = "video-similarity-desktop"
-version = "0.2.11"
+version = "0.2.12"
 description = "Video Similarity Analysis Desktop Application"
 authors = ["developer"]
 license = "MIT"

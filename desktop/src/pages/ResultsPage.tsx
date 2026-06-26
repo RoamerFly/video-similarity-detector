@@ -655,8 +655,8 @@ export function ResultsPage() {
       name,
       videoDir,
     )
-    const added = addMergeVideo(path, name)
-    setNotice(added ? `已将 ${name} 加入合并列表。` : `${name} 已在合并列表中。`)
+    addMergeVideo(path, name)
+    setNotice(`已将 ${name} 加入合并列表。`)
     setVideoContextMenu(null)
     if (openMergePage) navigate('/merge')
   }
@@ -668,7 +668,7 @@ export function ResultsPage() {
       { path: resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir), name: pair.videoA },
       { path: resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir), name: pair.videoB },
     ])
-    setNotice(added > 0 ? `已将该视频对中的 ${added} 个视频加入合并列表。` : '该视频对已在合并列表中。')
+    setNotice(`已将该视频对中的 ${added} 个视频加入合并列表。`)
     setVideoContextMenu(null)
   }
 

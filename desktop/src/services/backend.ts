@@ -134,6 +134,7 @@ export interface RunBatchCompareConfig {
   inputSize: number
   portraitRotation: string
   force: boolean
+  earlyStop: boolean
   device: string
   errorTolerancePreset: string
   errorToleranceSevereLimit: number
@@ -192,6 +193,7 @@ export interface AnalysisTaskCacheArtifact {
 export interface AnalysisTaskRecord {
   version: number
   id: string
+  name: string
   status: 'created' | 'preparing' | 'running' | 'paused' | 'failed' | 'completed' | string
   createdAt: string
   updatedAt: string
@@ -522,12 +524,15 @@ export async function listAnalysisTasks(cacheDir: string, projectRoot?: string) 
 export async function createAnalysisTask(
   config: RunBatchCompareConfig,
   taskMatchKey: string,
+  taskName?: string,
 ) {
   if (!hasTauriRuntime()) {
     const now = new Date().toISOString()
+    const id = `analysis-${Date.now()}`
     return {
       version: 1,
-      id: `analysis-${Date.now()}`,
+      id,
+      name: taskName?.trim() || id,
       status: 'created',
       createdAt: now,
       updatedAt: now,
@@ -556,6 +561,7 @@ export async function createAnalysisTask(
       projectRoot: config.projectRoot,
       config,
       taskMatchKey,
+      taskName: taskName?.trim() || undefined,
     },
   })
 }
@@ -658,6 +664,7 @@ export function buildAnalysisTaskMatchKey(config: RunBatchCompareConfig) {
     inputSize: config.inputSize,
     portraitRotation: config.portraitRotation,
     force: config.force,
+    earlyStop: config.earlyStop ?? true,
     device: config.device,
     errorTolerancePreset: config.errorTolerancePreset,
     errorToleranceSevereLimit: config.errorToleranceSevereLimit,
@@ -1015,6 +1022,7 @@ export function buildRunBatchCompareConfig(
     inputSize: analysisConfig.inputSize || settings.defaultInputSize,
     portraitRotation: analysisConfig.portraitRotation || settings.defaultPortraitRotation,
     force: analysisConfig.force,
+    earlyStop: analysisConfig.earlyStop ?? settings.defaultEarlyStop,
     device: settings.defaultDevice,
     errorTolerancePreset: analysisConfig.errorTolerancePreset,
     errorToleranceSevereLimit: analysisConfig.errorToleranceSevereLimit,

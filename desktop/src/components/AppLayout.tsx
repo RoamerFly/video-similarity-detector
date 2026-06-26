@@ -138,7 +138,6 @@ export function AppLayout() {
         const store = useAnalysisStore.getState()
         store.setReportPaths(payload)
         store.setRunningStatus('success')
-        store.setActiveTaskId('')
         store.setProgress(100, '分析完成', { subProgress: 100, subStage: '当前子任务完成' })
         store.setErrorMessage('')
         navigate('/results')
@@ -146,7 +145,6 @@ export function AppLayout() {
       onStageFinished: () => {
         const store = useAnalysisStore.getState()
         store.setRunningStatus('paused')
-        store.setActiveTaskId('')
         store.setProgress(store.progress, '当前阶段已完成，可继续下一阶段', {
           subProgress: 100,
           subStage: '阶段产物已保存',

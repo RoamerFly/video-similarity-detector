@@ -228,7 +228,7 @@ export const useMergeStore = create<MergeState>()(
       },
       addVideo: (path, name, trackId) => {
         const normalized = normalizePath(path)
-        if (!normalized || get().items.some((item) => normalizePath(item.path) === normalized && item.trimStart === 0 && item.trimEnd === 0)) {
+        if (!normalized) {
           return false
         }
         const targetTrackId = validTrackId(get().videoTracks, trackId, defaultVideoTrack.id)
@@ -240,16 +240,10 @@ export const useMergeStore = create<MergeState>()(
       addVideos: (videos, trackId) => {
         const state = get()
         const targetTrackId = validTrackId(state.videoTracks, trackId, defaultVideoTrack.id)
-        const existing = new Set(
-          state.items
-            .filter((item) => item.trimStart === 0 && item.trimEnd === 0)
-            .map((item) => normalizePath(item.path)),
-        )
         const additions: MergeQueueItem[] = []
         for (const video of videos) {
           const normalized = normalizePath(video.path)
-          if (!normalized || existing.has(normalized)) continue
-          existing.add(normalized)
+          if (!normalized) continue
           additions.push(createVideoItem(video.path, video.name || fileName(video.path), targetTrackId))
         }
         if (additions.length > 0) {

@@ -1209,6 +1209,10 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
           <ParameterHint label="强制重建缓存" tip={parameterHints.force} />
           <Toggle checked={settings.defaultForce} onChange={settings.setDefaultForce} />
         </label>
+        <label className="settings-toggle-row">
+          <ParameterHint label="启用早停加速" tip={parameterHints.earlyStop} />
+          <Toggle checked={settings.defaultEarlyStop} onChange={settings.setDefaultEarlyStop} />
+        </label>
       </div>
       )}
     </div>
@@ -1832,6 +1836,7 @@ function buildSettingsSignature(settings: SettingsSnapshot) {
     defaultInputSize: settings.defaultInputSize,
     defaultPortraitRotation: settings.defaultPortraitRotation,
     defaultForce: settings.defaultForce,
+    defaultEarlyStop: settings.defaultEarlyStop,
     defaultDevice: settings.defaultDevice,
     errorTolerancePreset: settings.errorTolerancePreset,
     errorToleranceSevereLimit: settings.errorToleranceSevereLimit,

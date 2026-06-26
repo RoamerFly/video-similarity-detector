@@ -19,6 +19,7 @@ export const parameterHints = {
   offsetTolerance: '同一片段内两段视频的时间差允许波动多少秒。',
   cropBlackBorders: '先去掉四周黑边，减少电影黑边对相似度的影响。',
   force: '忽略旧缓存，重新抽帧并计算特征；通常只在参数变更后开启。',
+  earlyStop: '明显低相似的视频对会提前结束第二方向比较，加快大批量分析；关闭后会完整双向比较。',
   resizeMode: '把不同尺寸的视频统一到相同分辨率的方式。',
   inputSize: '参与匹配前统一缩放或裁剪到的像素尺寸。',
   portraitRotation: '竖屏视频裁剪后按这个方向转成横屏再比较。',

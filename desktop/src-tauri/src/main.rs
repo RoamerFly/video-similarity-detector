@@ -643,6 +643,7 @@ struct RunBatchCompareConfig {
     input_size: u32,
     portrait_rotation: Option<String>,
     force: bool,
+    early_stop: Option<bool>,
     device: Option<String>,
     error_tolerance_preset: Option<String>,
     error_tolerance_severe_limit: Option<u32>,
@@ -720,6 +721,7 @@ struct CreateAnalysisTaskRequest {
     project_root: Option<String>,
     config: RunBatchCompareConfig,
     task_match_key: String,
+    task_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -795,6 +797,8 @@ struct AnalysisTaskRecord {
     version: u32,
     #[serde(default)]
     id: String,
+    #[serde(default)]
+    name: String,
     #[serde(default)]
     status: String,
     #[serde(default)]
@@ -2034,7 +2038,7 @@ fn list_analysis_tasks(
     }
 
     let mut tasks = Vec::new();
-    for entry in fs::read_dir(&directory).map_err(|e| format!("读取历史任务失败: {e}"))? {
+    for entry in fs::read_dir(&directory).map_err(|e| format!("读取任务列表失败: {e}"))? {
         let task_dir = match entry {
             Ok(entry) => entry.path(),
             Err(_) => continue,
@@ -2058,6 +2062,9 @@ fn list_analysis_tasks(
                 .unwrap_or_default()
                 .to_string();
         }
+        if record.name.trim().is_empty() {
+            record.name = record.id.clone();
+        }
         if record.stages.is_empty() {
             record.stages = default_analysis_task_stages();
         }
@@ -2078,6 +2085,15 @@ fn create_analysis_task(
     fs::create_dir_all(&directory).map_err(|e| format!("创建分析任务目录失败: {e}"))?;
 
     let id = format!("analysis-{}", timestamp_millis());
+    let name = request
+        .task_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(id.as_str())
+        .chars()
+        .take(80)
+        .collect::<String>();
     let now = (timestamp_millis() / 1000).to_string();
     let mut config = request.config;
     config.task_id = Some(id.clone());
@@ -2086,6 +2102,7 @@ fn create_analysis_task(
     let record = AnalysisTaskRecord {
         version: 1,
         id: id.clone(),
+        name,
         status: "created".to_string(),
         created_at: now.clone(),
         updated_at: now,
@@ -2202,7 +2219,7 @@ fn delete_analysis_task(
         }
     }
     if target.exists() {
-        fs::remove_dir_all(target).map_err(|e| format!("删除历史任务失败: {e}"))?;
+        fs::remove_dir_all(target).map_err(|e| format!("删除任务失败: {e}"))?;
     }
     Ok(())
 }
@@ -2394,7 +2411,7 @@ fn run_batch_compare(
         .map(str::to_string);
     let redo_stage = config.redo_stage.unwrap_or(false);
     let task_config_json =
-        serde_json::to_string(&config).map_err(|e| format!("序列化历史任务配置失败: {e}"))?;
+        serde_json::to_string(&config).map_err(|e| format!("序列化任务配置失败: {e}"))?;
 
     {
         let pid_guard = task_state
@@ -2493,6 +2510,9 @@ fn run_batch_compare(
     }
     if config.force {
         args.push("--force".into());
+    }
+    if config.early_stop == Some(false) {
+        args.push("--disable-early-stop".into());
     }
     if !config.error_tolerance_preflight_validation.unwrap_or(true) {
         args.push("--skip-stream-validation".into());
@@ -2983,7 +3003,7 @@ fn run_duplicate_file_check_impl(
 
 fn ensure_analysis_not_cancelled(app: &tauri::AppHandle) -> Result<(), String> {
     if is_cancel_requested(app) {
-        Err("任务已暂停，可从历史任务继续".to_string())
+        Err("任务已暂停，可从任务列表继续".to_string())
     } else {
         Ok(())
     }

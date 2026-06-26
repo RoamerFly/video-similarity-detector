@@ -39,6 +39,7 @@ interface SettingsActions {
   setDefaultInputSize: (value: number) => void
   setDefaultPortraitRotation: (value: PortraitRotation) => void
   setDefaultForce: (value: boolean) => void
+  setDefaultEarlyStop: (value: boolean) => void
   setDefaultDevice: (value: DeviceMode) => void
   setErrorTolerancePreset: (value: ErrorTolerancePreset) => void
   setErrorToleranceSevereLimit: (value: number) => void
@@ -110,6 +111,7 @@ export const useSettingsStore = create<SettingsState>()(
       setDefaultInputSize: (defaultInputSize) => updateAnalysis({ defaultInputSize }),
       setDefaultPortraitRotation: (defaultPortraitRotation) => updateAnalysis({ defaultPortraitRotation }),
       setDefaultForce: (defaultForce) => updateAnalysis({ defaultForce }),
+      setDefaultEarlyStop: (defaultEarlyStop) => updateAnalysis({ defaultEarlyStop }),
       setDefaultDevice: (defaultDevice) => updateAnalysis({ defaultDevice }),
       setErrorTolerancePreset: (errorTolerancePreset) => set((state) => {
         if (errorTolerancePreset === 'custom') {
@@ -340,6 +342,7 @@ export function settingsSnapshotFromState(settings: SettingsSnapshot): SettingsS
     defaultInputSize: settings.defaultInputSize,
     defaultPortraitRotation: settings.defaultPortraitRotation,
     defaultForce: settings.defaultForce,
+    defaultEarlyStop: settings.defaultEarlyStop,
     defaultDevice: settings.defaultDevice,
     errorTolerancePreset: settings.errorTolerancePreset,
     errorToleranceSevereLimit: settings.errorToleranceSevereLimit,
@@ -485,6 +488,9 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
     defaultMinSegmentMatches: Number.isFinite(minSegmentMatches) ? clampMin(minSegmentMatches, 1) : defaultSettings.defaultMinSegmentMatches,
     defaultOffsetTolerance: Number.isFinite(offsetTolerance) ? clampMin(offsetTolerance, 1) : defaultSettings.defaultOffsetTolerance,
     defaultPortraitRotation: portraitRotation,
+    defaultEarlyStop: typeof snapshot.defaultEarlyStop === 'boolean'
+      ? snapshot.defaultEarlyStop
+      : defaultSettings.defaultEarlyStop,
     closeBehavior,
     appLanguage,
     errorTolerancePreset,
@@ -524,6 +530,7 @@ export function analysisPresetFromSettings(settings: SettingsSnapshot): Analysis
     defaultInputSize: settings.defaultInputSize,
     defaultPortraitRotation: settings.defaultPortraitRotation,
     defaultForce: settings.defaultForce,
+    defaultEarlyStop: settings.defaultEarlyStop,
     defaultDevice: settings.defaultDevice,
   }
 }
@@ -540,6 +547,7 @@ function sanitizeNamedAnalysisTemplate(config: AnalysisPresetConfig): AnalysisPr
     defaultMinSegmentMatches: clampMin(Number(merged.defaultMinSegmentMatches), 1),
     defaultOffsetTolerance: clampMin(Number(merged.defaultOffsetTolerance), 1),
     defaultInputSize: clampMin(Number(merged.defaultInputSize), 1),
+    defaultEarlyStop: typeof merged.defaultEarlyStop === 'boolean' ? merged.defaultEarlyStop : defaultSettings.defaultEarlyStop,
   }
 }
 
@@ -573,6 +581,7 @@ function sanitizeCustomAnalysisPresets(value: unknown) {
       defaultMinSegmentMatches: clampMin(Number(merged.defaultMinSegmentMatches), 1),
       defaultOffsetTolerance: clampMin(Number(merged.defaultOffsetTolerance), 1),
       defaultInputSize: clampMin(Number(merged.defaultInputSize), 1),
+      defaultEarlyStop: typeof merged.defaultEarlyStop === 'boolean' ? merged.defaultEarlyStop : defaultSettings.defaultEarlyStop,
     }
   }
   return sanitized

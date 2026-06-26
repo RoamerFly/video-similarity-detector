@@ -50,7 +50,7 @@ export const useResultsViewStore = create<ResultsViewState>()(
       query: '',
       relationFilter: 'all',
       reportReadFormat: 'auto',
-      sortState: { key: 'completedAt', direction: 'desc' },
+      sortState: { key: 'symmetricSimilarity', direction: 'desc' },
       selectedReportKey: '',
       reportOptions: [],
       page: 1,
@@ -68,6 +68,18 @@ export const useResultsViewStore = create<ResultsViewState>()(
     }),
     {
       name: 'video-similarity-results-view:v2',
+      version: 3,
+      migrate: (persistedState) => {
+        if (!persistedState || typeof persistedState !== 'object') return persistedState
+        const state = persistedState as Partial<ResultsViewState>
+        if (!state.sortState || state.sortState.key === 'completedAt') {
+          return {
+            ...state,
+            sortState: { key: 'symmetricSimilarity', direction: 'desc' },
+          }
+        }
+        return state
+      },
       partialize: (state) => ({
         activeTab: state.activeTab,
         query: state.query,

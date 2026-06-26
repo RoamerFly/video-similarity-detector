@@ -19,18 +19,18 @@ import {
   HardDrive,
   History,
   Layers3,
+  ListPlus,
   ListChecks,
   Pause,
   Play,
   RefreshCw,
   RotateCcw,
-  Settings,
   Square,
   Terminal,
   Trash2,
   X,
 } from 'lucide-react'
-import { GlassPanel, NeonButton, StatCard } from '@/components/DesignSystem'
+import { GlassPanel, NeonButton, SelectInput, StatCard, TextInput } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
 import { Translated } from '@/i18n/useI18n'
 import {
@@ -65,6 +65,7 @@ import {
   type VideoMetadata,
 } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
+import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { analysisConfigFromSettings } from '@/types/config'
 import type { VideoScanFilters } from '@/types/config'
@@ -75,6 +76,13 @@ import {
   canStartAnalysisStage,
   formatStageElapsed,
 } from '@/utils/analysisTask'
+
+interface PendingTaskDraft {
+  taskName: string
+  config: RunBatchCompareConfig
+  videos: VideoFile[]
+  loadedVideoDir: string
+}
 
 export function AnalyzePage() {
   const navigate = useNavigate()
@@ -92,7 +100,6 @@ export function AnalyzePage() {
     totalLogCount,
     logsDropped,
     runStartedAt,
-    runFinishedAt,
     errorMessage,
     activeTaskId,
     setAnalysisConfig,
@@ -132,6 +139,10 @@ export function AnalyzePage() {
   const [isMovingFiles, setIsMovingFiles] = useState(false)
   const [movingVideoTargets, setMovingVideoTargets] = useState<VideoFile[]>([])
   const [isScanning, setIsScanning] = useState(false)
+  const [pendingTaskDraft, setPendingTaskDraft] = useState<PendingTaskDraft | null>(null)
+  const [taskCreateDialogOpen, setTaskCreateDialogOpen] = useState(false)
+  const [loadedTaskId, setLoadedTaskId] = useState('')
+  const [taskLoadDialogOpen, setTaskLoadDialogOpen] = useState(false)
   const pauseRequestedTaskId = useRef('')
   const historyRefreshInFlight = useRef(false)
   const scanInFlight = useRef(false)
@@ -154,21 +165,32 @@ export function AnalyzePage() {
   const isDuplicateFileMode = settings.analysisMode === 'duplicate_file'
   const pairCount = !isDuplicateFileMode && videos.length > 1 ? (videos.length * (videos.length - 1)) / 2 : 0
   const activeHistoryTask = historyTasks.find((task) => task.id === activeTaskId) ?? null
-  const displayedTask = activeHistoryTask ?? historyTasks[0] ?? null
+  const loadedTask = loadedTaskId ? historyTasks.find((task) => task.id === loadedTaskId) ?? null : null
+  const displayedTask = activeHistoryTask ?? loadedTask
   const displayedStages = useMemo(
     () => displayedTask ? analysisTaskStages(displayedTask) : [],
     [displayedTask],
   )
-  const progressValue = clampPercent(displayedTask?.progress ?? progress)
+  const progressValue = displayedTask ? clampPercent(displayedTask.progress) : (isRunning ? clampPercent(progress) : 0)
   const progressLabel = formatPercent(progressValue)
   const elapsedLabel = displayedTask
     ? formatTaskStagesElapsed(displayedStages, clockNow)
-    : formatElapsed(runStartedAt, isRunning ? clockNow : runFinishedAt)
+    : (isRunning ? formatElapsed(runStartedAt, clockNow) : '-')
   const stageDetail = useMemo(
-    () => buildSubTaskDetail(subStage, subProgress) ?? parseStageDetail(stage),
-    [stage, subProgress, subStage],
+    () => isRunning ? buildSubTaskDetail(subStage, subProgress) ?? parseStageDetail(stage) : null,
+    [isRunning, stage, subProgress, subStage],
   )
-  const statusTitle = displayedTask?.stage || stage || scanMessage
+  const statusTitle = displayedTask?.stage || (isRunning ? stage : '')
+  const currentTaskName = displayedTask
+    ? displayTaskName(displayedTask)
+    : pendingTaskDraft
+      ? pendingTaskDraft.taskName.trim() || '未命名任务（运行时自动生成）'
+      : '未读取任务'
+  const createOrRunButtonLabel = loadedTask
+    ? '运行任务'
+    : isPreparing
+      ? '新建中'
+      : '新建任务'
   const stageTask = historyTasks.find((task) => task.id === stageTaskId) ?? null
 
   useEffect(() => {
@@ -237,6 +259,11 @@ export function AnalyzePage() {
   }, [detailTask, historyTasks])
 
   useEffect(() => {
+    if (!loadedTaskId || !historyReady) return
+    if (!historyTasks.some((task) => task.id === loadedTaskId)) setLoadedTaskId('')
+  }, [historyReady, historyTasks, loadedTaskId])
+
+  useEffect(() => {
     let alive = true
     getAppInfo()
       .then((info) => {
@@ -284,6 +311,7 @@ export function AnalyzePage() {
     settings.defaultInputSize,
     settings.defaultPortraitRotation,
     settings.defaultForce,
+    settings.defaultEarlyStop,
     settings.errorTolerancePreset,
     settings.errorToleranceSevereLimit,
     settings.errorToleranceMissingPictureLimit,
@@ -303,16 +331,7 @@ export function AnalyzePage() {
         message: taskStage.message,
       }))
     }
-    return analysisTaskStages({
-      stages: [],
-    } as AnalysisTaskRecord).map((taskStage) => ({
-      label: taskStage.label,
-      time: '待处理',
-      done: false,
-      active: false,
-      progress: 0,
-      message: taskStage.message,
-    }))
+    return []
   }, [clockNow, displayedStages, displayedTask])
 
   async function handleScan(dir = settings.videoDir) {
@@ -328,6 +347,8 @@ export function AnalyzePage() {
 
     scanInFlight.current = true
     setIsScanning(true)
+    setPendingTaskDraft(null)
+    setLoadedTaskId('')
     setErrorMessage('')
     setVideoContextMenu(null)
     setScanMessage('正在扫描视频目录...')
@@ -417,7 +438,7 @@ export function AnalyzePage() {
     }
   }
 
-  async function handleCreateTask() {
+  async function handleLoadTask(openDialog = false) {
     const currentSettings = useSettingsStore.getState()
     const config = analysisConfigFromSettings(currentSettings)
 
@@ -433,13 +454,10 @@ export function AnalyzePage() {
 
     setAnalysisConfig(config)
     setIsPreparing(true)
-    setProgress(0, '正在新建分析任务', { subProgress: null, subStage: '' })
+    setProgress(0, '正在读取任务配置', { subProgress: null, subStage: '' })
     setErrorMessage('')
     try {
-      let selectedVideos = scannedDir === config.videoDir ? videos : []
-      if (selectedVideos.length === 0) {
-        selectedVideos = await handleScan(config.videoDir)
-      }
+      const selectedVideos = await handleScan(config.videoDir)
       if (selectedVideos.length < 2) {
         setErrorMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
         setScanMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
@@ -450,17 +468,145 @@ export function AnalyzePage() {
         ...buildRunBatchCompareConfig(currentSettings, config),
         videoPaths,
       }
-      const taskMatchKey = buildAnalysisTaskMatchKey(batchConfig)
-      const task = await createAnalysisTask(batchConfig, taskMatchKey)
-      const seededTask = await updateAnalysisTask(task.id, batchConfig.cacheDir, batchConfig.projectRoot, {
+      setPendingTaskDraft({
+        taskName: '',
+        config: batchConfig,
+        videos: selectedVideos,
+        loadedVideoDir: batchConfig.videoDir,
+      })
+      setProgress(0, '任务已读取，等待确认')
+      setScanMessage(`已读取任务配置：${selectedVideos.length} 个视频。请检查配置后运行任务。`)
+      if (openDialog) setTaskCreateDialogOpen(true)
+    } catch (error) {
+      setErrorMessage(normalizeBackendError(error))
+    } finally {
+      setIsPreparing(false)
+    }
+  }
+
+  async function handleCreateTask() {
+    if (loadedTask) {
+      await handleRunLoadedTask(loadedTask)
+      return
+    }
+    await handleLoadTask(true)
+  }
+
+  async function handleOpenTaskLoadDialog() {
+    if (loadedTaskId) {
+      setLoadedTaskId('')
+      setScanMessage('已取消读取任务。')
+      return
+    }
+    setErrorMessage('')
+    await refreshHistoryTasks(true)
+    setTaskLoadDialogOpen(true)
+  }
+
+  function handleLoadExistingTask(task: AnalysisTaskRecord) {
+    const defaults = buildRunBatchCompareConfig(
+      useSettingsStore.getState(),
+      analysisConfigFromSettings(useSettingsStore.getState()),
+    )
+    const taskConfig: RunBatchCompareConfig = { ...defaults, ...(task.config ?? {}), taskId: task.id }
+    const videoPaths = taskConfig.videoPaths?.length
+      ? taskConfig.videoPaths
+      : task.videos.map((video) => video.path)
+    setLoadedTaskId(task.id)
+    setActiveTaskId('')
+    setPendingTaskDraft(null)
+    setTaskCreateDialogOpen(false)
+    setTaskLoadDialogOpen(false)
+    setRunningStatus('idle')
+    setAnalysisConfig({
+      videoDir: taskConfig.videoDir,
+      outputDir: taskConfig.outputDir,
+      skipThreshold: taskConfig.skipThreshold,
+      matchThreshold: taskConfig.matchThreshold,
+      windowSize: taskConfig.windowSize,
+      topK: taskConfig.topK,
+      candidateLimit: taskConfig.candidateLimit,
+      compareWorkers: taskConfig.compareWorkers,
+      maxGapSec: taskConfig.maxGapSec,
+      frameStep: taskConfig.frameStep,
+      minSegmentDuration: taskConfig.minSegmentDuration,
+      minSegmentMatches: taskConfig.minSegmentMatches,
+      offsetTolerance: taskConfig.offsetTolerance,
+      cropBlackBorders: taskConfig.cropBlackBorders,
+      resizeMode: taskConfig.resizeMode === 'letterbox' ? 'letterbox' : 'center_crop',
+      inputSize: taskConfig.inputSize,
+      portraitRotation: taskConfig.portraitRotation === 'left_90' ? 'left_90' : 'right_90',
+      force: taskConfig.force,
+      earlyStop: taskConfig.earlyStop !== false,
+      errorTolerancePreset: taskConfig.errorTolerancePreset === 'strict'
+        || taskConfig.errorTolerancePreset === 'lenient'
+        || taskConfig.errorTolerancePreset === 'failure_only'
+        || taskConfig.errorTolerancePreset === 'custom'
+        ? taskConfig.errorTolerancePreset
+        : 'balanced',
+      errorToleranceSevereLimit: taskConfig.errorToleranceSevereLimit,
+      errorToleranceMissingPictureLimit: taskConfig.errorToleranceMissingPictureLimit,
+      errorTolerancePreflightValidation: taskConfig.errorTolerancePreflightValidation,
+      mode: taskConfig.analysisMode === 'duplicate_file' ? 'duplicate_file' : 'video_similarity',
+    })
+    setScannedVideos(videoFilesFromTask(task, videoPaths), taskConfig.videoDir || task.videoDir)
+    setScanMessage(`已读取任务：${displayTaskName(task)}。`)
+    setErrorMessage('')
+    setActiveSubpage('analysis')
+  }
+
+  async function handleRunLoadedTask(task: AnalysisTaskRecord) {
+    setLoadedTaskId('')
+    await handleRunTask(task)
+  }
+
+  async function handleConfirmTaskDraft(draft: PendingTaskDraft, runAfterCreate: boolean) {
+    const currentSettings = useSettingsStore.getState()
+    let selectedVideos = draft.videos
+    let config = draft.config
+    setIsPreparing(true)
+    setErrorMessage('')
+    try {
+      if (normalizeVideoPath(config.videoDir) !== normalizeVideoPath(draft.loadedVideoDir)) {
+        const found = await scanVideos(config.videoDir, true)
+        selectedVideos = await filterScannedVideos(found, currentSettings.videoScanFilters, {
+          projectRoot: config.projectRoot,
+          pythonPath: config.pythonPath,
+          onMetadataStart: () => setScanMessage(`已扫描 ${found.length} 个视频，正在读取视频参数...`),
+        })
+        if (selectedVideos.length < 2) {
+          setErrorMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
+          setScanMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
+          return
+        }
+        setScannedVideos(selectedVideos, config.videoDir)
+      }
+      config = {
+        ...config,
+        videoPaths: selectedVideos.map((video) => video.path),
+      }
+      const taskMatchKey = buildAnalysisTaskMatchKey(config)
+      const task = await createAnalysisTask(config, taskMatchKey, draft.taskName)
+      const seededTask = await updateAnalysisTask(task.id, config.cacheDir, config.projectRoot, {
         stage: `等待启动：已选择 ${selectedVideos.length} 个视频`,
         totalPairs: pairCountFor(selectedVideos.length),
         videos: selectedVideos,
       })
       setHistoryTasks((current) => [seededTask, ...current.filter((item) => item.id !== seededTask.id)])
-      setProgress(0, '任务已新建，等待启动')
-      setScanMessage(`已新建任务 ${task.id}。请在“历史任务”中启动。`)
-      setActiveSubpage('history')
+      setPendingTaskDraft(null)
+      setTaskCreateDialogOpen(false)
+      if (runAfterCreate) {
+        setLoadedTaskId('')
+        setProgress(0, `正在启动任务：${displayTaskName(seededTask)}`)
+        setScanMessage(`已新建任务 ${displayTaskName(seededTask)}，正在启动。`)
+        await handleRunTask(seededTask)
+      } else {
+        setLoadedTaskId(seededTask.id)
+        setActiveTaskId('')
+        setRunningStatus('idle')
+        setProgress(0, '任务已新建，等待启动', { subProgress: null, subStage: '' })
+        setScanMessage(`已新建任务 ${displayTaskName(seededTask)}。`)
+      }
     } catch (error) {
       setErrorMessage(normalizeBackendError(error))
     } finally {
@@ -478,7 +624,7 @@ export function AnalyzePage() {
       await cancelCurrentTask()
       await updateAnalysisTask(activeTaskId, cacheDir, projectRoot, {
         status: 'paused',
-        stage: '任务已暂停，可从历史任务继续',
+        stage: '任务已暂停，可从任务列表继续',
         progress,
       })
       appendLog({ stream: 'stderr', line: '已请求暂停分析，正在等待当前步骤安全停止。', timestamp: Date.now() })
@@ -502,7 +648,7 @@ export function AnalyzePage() {
     )
     const taskConfig: RunBatchCompareConfig = { ...defaults, ...task.config, taskId: task.id, compareWorkers: defaults.compareWorkers }
     if (!taskConfig?.videoDir || !taskConfig?.cacheDir) {
-      setErrorMessage('该历史任务缺少运行配置，无法继续。')
+      setErrorMessage('该任务缺少运行配置，无法继续。')
       return
     }
     if (taskConfig.analysisMode === 'duplicate_file' && options.executionStage) {
@@ -522,7 +668,7 @@ export function AnalyzePage() {
       ? `${options.redoStage ? '正在重做' : '正在启动'}阶段：${selectedStage.label}`
       : task.status === 'created'
         ? '正在准备新任务'
-        : '正在检查历史任务断点和增量缓存'
+        : '正在检查任务断点和增量缓存'
     setProgress(task.progress, launchMessage, { subProgress: null, subStage: '' })
     try {
       await updateAnalysisTask(task.id, taskConfig.cacheDir, taskConfig.projectRoot, {
@@ -801,6 +947,17 @@ export function AnalyzePage() {
     }
   }
 
+  function addVideosToMergeList(targets: VideoFile[]) {
+    if (targets.length === 0) return
+    setVideoContextMenu(null)
+    const added = useMergeStore.getState().addVideos(targets.map((video) => ({
+      path: video.path,
+      name: video.name,
+    })))
+    setScanMessage(`已将 ${added} 个视频加入合并列表。`)
+    setErrorMessage('')
+  }
+
   async function interruptVideoMove() {
     if (!isMovingFiles) return
     const affected = movingVideoTargets
@@ -837,7 +994,7 @@ export function AnalyzePage() {
           </button>
           <button type="button" className={activeSubpage === 'history' ? 'active' : ''} onClick={() => setActiveSubpage('history')}>
             <History size={17} />
-            历史任务
+            任务列表
           </button>
         </div>
         <div className={`analyze-simple-page ${activeSubpage === 'history' ? 'show-history' : 'show-analysis'}`}>
@@ -848,6 +1005,10 @@ export function AnalyzePage() {
               分析任务
             </h2>
             <p>设置集中在设置页管理。这里仅负责扫描视频、启动分析和查看运行状态。</p>
+            <div className="current-task-chip" title={currentTaskName}>
+              <span>当前任务</span>
+              <strong>{currentTaskName}</strong>
+            </div>
           </div>
 
           <div className="analysis-path-summary">
@@ -884,12 +1045,12 @@ export function AnalyzePage() {
             ) : (
               <NeonButton className="start-analysis-button compact" onClick={() => void handleCreateTask()} disabled={isPreparing || isScanning}>
                 <Play size={22} fill="currentColor" />
-                {isPreparing ? '新建中' : '新建任务'}
+                {createOrRunButtonLabel}
               </NeonButton>
             )}
-            <NeonButton variant="ghost" onClick={() => navigate('/settings')}>
-              <Settings size={20} />
-              打开设置
+            <NeonButton variant={loadedTask ? 'outline' : 'ghost'} onClick={() => void handleOpenTaskLoadDialog()} disabled={isBusy || isScanning}>
+              {loadedTask ? <X size={20} /> : <Clipboard size={20} />}
+              {loadedTask ? '取消读取' : '读取任务'}
             </NeonButton>
           </div>
         </GlassPanel>
@@ -917,7 +1078,11 @@ export function AnalyzePage() {
           </div>
 
           <div className="status-message-block">
-            <p className="status-message" title={statusTitle}>{statusTitle}</p>
+            {statusTitle ? (
+              <p className="status-message" title={statusTitle}>{statusTitle}</p>
+            ) : (
+              <p className="status-message muted">当前没有运行任务</p>
+            )}
             {stageDetail && (
               <div className="stage-detail-card">
                 {(stageDetail.title || stageDetail.videoName) && (
@@ -939,7 +1104,7 @@ export function AnalyzePage() {
           </div>
 
           <div className="status-list">
-            {statusRows.map((row) => (
+            {statusRows.length > 0 ? statusRows.map((row) => (
               <div className={row.active ? 'status-item is-active' : 'status-item'} key={row.label} title={row.message}>
                 <span className={row.done ? 'status-dot blue' : row.active ? 'status-dot cyan' : 'status-dot pink'} />
                 <span className="status-stage-name">{row.label}</span>
@@ -949,7 +1114,9 @@ export function AnalyzePage() {
                 <time>{row.time}</time>
                 {row.done ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
               </div>
-            ))}
+            )) : (
+              <p className="empty-state-text run-status-empty">读取任务并运行后，这里会显示实时阶段状态。</p>
+            )}
           </div>
 
           {(errorMessage || runningStatus === 'cancelled') && (
@@ -961,7 +1128,7 @@ export function AnalyzePage() {
           <div className="panel-heading-row">
             <h2 className="section-title">
               <History />
-              历史任务
+              任务列表
             </h2>
             <NeonButton variant="ghost" type="button" onClick={() => void refreshHistoryTasks(true)} disabled={historyLoading}>
               <RefreshCw size={17} className={historyLoading ? 'spin-slow' : ''} />
@@ -981,7 +1148,8 @@ export function AnalyzePage() {
                         <span className={`analysis-history-status ${analysisTaskStatusClass(task, isActive)}`}>
                           {analysisTaskStatusLabel(task)}
                         </span>
-                        <strong title={task.videoDir}>{task.videoCount} 个视频</strong>
+                        <strong title={task.id}>{displayTaskName(task)}</strong>
+                        <small title={task.videoDir}>{task.videoCount} 个视频</small>
                       </div>
                       <span className="analysis-history-percent">{Math.round(task.progress)}%</span>
                     </div>
@@ -1040,7 +1208,7 @@ export function AnalyzePage() {
             </div>
           ) : (
             <p className="empty-state-text">
-              {!historyReady ? '正在读取历史任务...' : '暂无任务。请先在“分析任务”页新建任务。'}
+              {!historyReady ? '正在读取任务列表...' : '暂无任务。请先在“分析任务”页新建任务。'}
             </p>
           )}
         </GlassPanel>
@@ -1276,6 +1444,23 @@ export function AnalyzePage() {
         onClose={() => setCacheTaskId('')}
         onConfirm={(paths) => void handleClearTaskCache(paths)}
       />
+      <TaskLoadDialog
+        open={taskLoadDialogOpen}
+        tasks={historyTasks}
+        loading={historyLoading}
+        selectedTaskId={loadedTaskId}
+        busy={isBusy}
+        historyReady={historyReady}
+        onClose={() => setTaskLoadDialogOpen(false)}
+        onRefresh={() => void refreshHistoryTasks(true)}
+        onConfirm={handleLoadExistingTask}
+      />
+      <TaskCreateDialog
+        draft={taskCreateDialogOpen ? pendingTaskDraft : null}
+        busy={isPreparing || isScanning}
+        onClose={() => setTaskCreateDialogOpen(false)}
+        onConfirm={(draft, runAfterCreate) => void handleConfirmTaskDraft(draft, runAfterCreate)}
+      />
       {videoContextMenu && createPortal(
         <Translated>
         <div
@@ -1292,6 +1477,10 @@ export function AnalyzePage() {
           <button type="button" role="menuitem" onClick={() => void moveVideoFiles(selectedVideosForAction(videoContextMenu.video))} disabled={videoFileBusy}>
             <FolderOpen size={15} />
             移动到目录
+          </button>
+          <button type="button" role="menuitem" onClick={() => addVideosToMergeList(selectedVideosForAction(videoContextMenu.video))}>
+            <ListPlus size={15} />
+            加入合并列表
           </button>
           <button type="button" role="menuitem" onClick={() => {
             if (!videoMultiSelect) setVideoMultiSelect(true)
@@ -1311,6 +1500,367 @@ export function AnalyzePage() {
       )}
     </div>
     </Translated>
+  )
+}
+
+function TaskLoadDialog({
+  open,
+  tasks,
+  loading,
+  selectedTaskId,
+  busy,
+  historyReady,
+  onClose,
+  onRefresh,
+  onConfirm,
+}: {
+  open: boolean
+  tasks: AnalysisTaskRecord[]
+  loading: boolean
+  selectedTaskId: string
+  busy: boolean
+  historyReady: boolean
+  onClose: () => void
+  onRefresh: () => void
+  onConfirm: (task: AnalysisTaskRecord) => void
+}) {
+  const [draftTaskId, setDraftTaskId] = useState(selectedTaskId)
+
+  useEffect(() => {
+    if (!open) return
+    setDraftTaskId(selectedTaskId || tasks[0]?.id || '')
+  }, [open, selectedTaskId, tasks])
+
+  if (!open) return null
+  const selectedTask = tasks.find((task) => task.id === draftTaskId) ?? null
+
+  return createPortal(
+    <Translated>
+    <div
+      className="modal-backdrop cache-cleanup-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose()
+      }}
+    >
+      <section className="cache-cleanup-dialog task-load-dialog" role="dialog" aria-modal="true" aria-label="读取任务">
+        <div className="cache-cleanup-head">
+          <div>
+            <h3>读取任务</h3>
+            <p>从任务列表选择一个已有任务，读取后可在分析任务页面运行或查看状态。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭读取任务" disabled={busy}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="task-load-toolbar">
+          <span>{tasks.length} 个任务</span>
+          <button type="button" onClick={onRefresh} disabled={loading || busy}>
+            <RefreshCw size={15} className={loading ? 'spin-slow' : undefined} />
+            刷新
+          </button>
+        </div>
+
+        {tasks.length > 0 ? (
+          <div className="task-load-list" role="radiogroup" aria-label="任务列表">
+            {tasks.map((task) => {
+              const selected = task.id === draftTaskId
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  className={selected ? 'task-load-item selected' : 'task-load-item'}
+                  key={task.id}
+                  onClick={() => setDraftTaskId(task.id)}
+                >
+                  <span className={`analysis-history-status ${analysisTaskStatusClass(task)}`}>
+                    {analysisTaskStatusLabel(task)}
+                  </span>
+                  <strong title={task.id}>{displayTaskName(task)}</strong>
+                  <small title={task.stage || task.videoDir}>{task.videoCount} 个视频 · {Math.round(task.progress)}% · {formatDateTime(task.updatedAt)}</small>
+                  <div className="analysis-history-progress">
+                    <span style={{ width: `${clampPercent(task.progress)}%` }} />
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="empty-state-text">
+            {!historyReady || loading ? '正在读取任务列表...' : '暂无任务。请先在“分析任务”页新建任务。'}
+          </p>
+        )}
+
+        <div className="cache-cleanup-actions">
+          <NeonButton variant="outline" type="button" onClick={onClose} disabled={busy}>
+            取消
+          </NeonButton>
+          <NeonButton type="button" disabled={busy || !selectedTask} onClick={() => selectedTask && onConfirm(selectedTask)}>
+            <Clipboard size={18} />
+            读取任务
+          </NeonButton>
+        </div>
+      </section>
+    </div>
+    </Translated>,
+    document.body,
+  )
+}
+
+function TaskCreateDialog({
+  draft,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  draft: PendingTaskDraft | null
+  busy: boolean
+  onClose: () => void
+  onConfirm: (draft: PendingTaskDraft, runAfterCreate: boolean) => void
+}) {
+  if (!draft) return null
+  return (
+    <TaskCreateDialogContent
+      draft={draft}
+      busy={busy}
+      onClose={onClose}
+      onConfirm={onConfirm}
+    />
+  )
+}
+
+function TaskCreateDialogContent({
+  draft,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  draft: PendingTaskDraft
+  busy: boolean
+  onClose: () => void
+  onConfirm: (draft: PendingTaskDraft, runAfterCreate: boolean) => void
+}) {
+  const [taskName, setTaskName] = useState(draft.taskName)
+  const [config, setConfig] = useState<RunBatchCompareConfig>(draft.config)
+
+  useEffect(() => {
+    setTaskName(draft.taskName)
+    setConfig(draft.config)
+  }, [draft])
+
+  function updateConfig<K extends keyof RunBatchCompareConfig>(key: K, value: RunBatchCompareConfig[K]) {
+    setConfig((current) => ({ ...current, [key]: value }))
+  }
+
+  const videoDirChanged = normalizeVideoPath(config.videoDir) !== normalizeVideoPath(draft.loadedVideoDir)
+  const estimatedPairs = config.analysisMode === 'duplicate_file' ? draft.videos.length : pairCountFor(draft.videos.length)
+  const canConfirm = config.videoDir.trim() && config.outputDir.trim() && config.cacheDir.trim()
+
+  return createPortal(
+    <Translated>
+    <div className="modal-backdrop cache-cleanup-backdrop" role="presentation">
+      <section className="cache-cleanup-dialog task-create-dialog" role="dialog" aria-modal="true" aria-label="新建分析任务">
+        <div className="cache-cleanup-head">
+          <div>
+            <h3>新建分析任务</h3>
+            <p>检查并修改本次任务配置，确认后会创建并运行任务。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭新建任务" disabled={busy}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="task-create-summary">
+          <span title={draft.loadedVideoDir}>已读取视频：{draft.videos.length}</span>
+          <strong>{config.analysisMode === 'duplicate_file' ? '检查文件数' : '预计比较对数'}：{estimatedPairs}</strong>
+          {videoDirChanged ? <em>视频目录已修改，确认时会重新扫描。</em> : <em>视频列表已按当前扫描范围载入。</em>}
+        </div>
+
+        <div className="task-create-body">
+          <section className="task-create-section">
+            <h4>任务名称</h4>
+            <label className="task-create-field wide">
+              <span>任务名称</span>
+              <TextInput
+                value={taskName}
+                maxLength={80}
+                placeholder="留空自动生成 analysis-时间戳"
+                onChange={(event) => setTaskName(event.target.value)}
+              />
+            </label>
+          </section>
+
+          <section className="task-create-section">
+            <h4>基础设置</h4>
+            <label className="task-create-field wide">
+              <span>视频目录</span>
+              <TextInput value={config.videoDir} onChange={(event) => updateConfig('videoDir', event.target.value)} />
+            </label>
+            <label className="task-create-field wide">
+              <span>报告目录</span>
+              <TextInput value={config.outputDir} onChange={(event) => updateConfig('outputDir', event.target.value)} />
+            </label>
+            <label className="task-create-field wide">
+              <span>缓存目录</span>
+              <TextInput value={config.cacheDir} onChange={(event) => updateConfig('cacheDir', event.target.value)} />
+            </label>
+            <label className="task-create-field wide">
+              <span>Python 路径</span>
+              <TextInput value={config.pythonPath} onChange={(event) => updateConfig('pythonPath', event.target.value)} />
+            </label>
+            <label className="task-create-field wide">
+              <span>项目目录</span>
+              <TextInput value={config.projectRoot} onChange={(event) => updateConfig('projectRoot', event.target.value)} />
+            </label>
+            <label className="task-create-field">
+              <span>分析模式</span>
+              <SelectInput value={config.analysisMode || 'video_similarity'} onChange={(event) => updateConfig('analysisMode', event.target.value)}>
+                <option value="video_similarity">视频相似度分析</option>
+                <option value="duplicate_file">对比相同文件</option>
+              </SelectInput>
+            </label>
+            <label className="task-create-field">
+              <span>运行设备</span>
+              <SelectInput value={config.device || 'auto'} onChange={(event) => updateConfig('device', event.target.value)}>
+                <option value="auto">自动(auto)</option>
+                <option value="cuda">显卡加速(CUDA)</option>
+                <option value="cpu">处理器(CPU)</option>
+              </SelectInput>
+            </label>
+            <TaskNumberField label="并行设置" value={config.compareWorkers} min={1} step={1} integer onChange={(value) => updateConfig('compareWorkers', value)} />
+          </section>
+
+          <section className="task-create-section">
+            <h4>分析配置</h4>
+            <TaskNumberField label="跳帧阈值" value={config.skipThreshold} min={0} step={0.01} onChange={(value) => updateConfig('skipThreshold', value)} />
+            <TaskNumberField label="匹配阈值" value={config.matchThreshold} min={0} step={0.01} onChange={(value) => updateConfig('matchThreshold', value)} />
+            <TaskNumberField label="时间窗口" value={config.windowSize} min={1} step={1} integer onChange={(value) => updateConfig('windowSize', value)} />
+            <TaskNumberField label="候选数(Top-K)" value={config.topK} min={1} step={1} integer onChange={(value) => updateConfig('topK', value)} />
+            <TaskNumberField label="精确比较候选数" value={config.candidateLimit} min={0} step={1} integer onChange={(value) => updateConfig('candidateLimit', value)} />
+            <TaskNumberField label="最大间隔" value={config.maxGapSec} min={0} step={0.1} onChange={(value) => updateConfig('maxGapSec', value)} />
+            <TaskNumberField label="扫描步长" value={config.frameStep} min={1} step={1} integer onChange={(value) => updateConfig('frameStep', value)} />
+            <TaskNumberField label="最短片段" value={config.minSegmentDuration} min={0} step={0.1} onChange={(value) => updateConfig('minSegmentDuration', value)} />
+            <TaskNumberField label="最少匹配点" value={config.minSegmentMatches} min={1} step={1} integer onChange={(value) => updateConfig('minSegmentMatches', value)} />
+            <TaskNumberField label="偏移容忍" value={config.offsetTolerance} min={0} step={0.1} onChange={(value) => updateConfig('offsetTolerance', value)} />
+            <TaskNumberField label="匹配分辨率" value={config.inputSize} min={64} step={16} integer onChange={(value) => updateConfig('inputSize', value)} />
+            <label className="task-create-field">
+              <span>缩放模式</span>
+              <SelectInput value={config.resizeMode || 'center_crop'} onChange={(event) => updateConfig('resizeMode', event.target.value)}>
+                <option value="center_crop">居中裁剪(center_crop)</option>
+                <option value="letterbox">等比留边(letterbox)</option>
+              </SelectInput>
+            </label>
+            <label className="task-create-field">
+              <span>竖屏旋转</span>
+              <SelectInput value={config.portraitRotation || 'left_90'} onChange={(event) => updateConfig('portraitRotation', event.target.value)}>
+                <option value="left_90">左转 90 度</option>
+                <option value="right_90">右转 90 度</option>
+              </SelectInput>
+            </label>
+            <label className="task-create-check">
+              <input type="checkbox" checked={Boolean(config.cropBlackBorders)} onChange={(event) => updateConfig('cropBlackBorders', event.target.checked)} />
+              <span>自动裁剪黑边</span>
+            </label>
+            <label className="task-create-check">
+              <input type="checkbox" checked={Boolean(config.force)} onChange={(event) => updateConfig('force', event.target.checked)} />
+              <span>强制重建缓存</span>
+            </label>
+            <label className="task-create-check">
+              <input type="checkbox" checked={config.earlyStop !== false} onChange={(event) => updateConfig('earlyStop', event.target.checked)} />
+              <span>启用早停加速</span>
+            </label>
+          </section>
+
+          <section className="task-create-section">
+            <h4>错误容忍设置</h4>
+            <label className="task-create-field">
+              <span>错误容忍</span>
+              <SelectInput value={config.errorTolerancePreset || 'balanced'} onChange={(event) => updateConfig('errorTolerancePreset', event.target.value)}>
+                <option value="strict">严格</option>
+                <option value="balanced">标准</option>
+                <option value="lenient">宽松</option>
+                <option value="failure_only">仅失败时</option>
+                <option value="custom">自定义</option>
+              </SelectInput>
+            </label>
+            <TaskNumberField label="严重码流错误上限" value={config.errorToleranceSevereLimit} min={0} step={1} integer onChange={(value) => updateConfig('errorToleranceSevereLimit', value)} />
+            <TaskNumberField label="缺失画面上限" value={config.errorToleranceMissingPictureLimit} min={0} step={1} integer onChange={(value) => updateConfig('errorToleranceMissingPictureLimit', value)} />
+            <label className="task-create-check">
+              <input
+                type="checkbox"
+                checked={Boolean(config.errorTolerancePreflightValidation)}
+                onChange={(event) => updateConfig('errorTolerancePreflightValidation', event.target.checked)}
+              />
+              <span>分析前完整码流校验</span>
+            </label>
+          </section>
+        </div>
+
+        <div className="cache-cleanup-actions">
+          <NeonButton variant="outline" type="button" onClick={onClose} disabled={busy}>
+            取消
+          </NeonButton>
+          <NeonButton
+            variant="outline"
+            type="button"
+            disabled={busy || !canConfirm}
+            onClick={() => onConfirm({
+              ...draft,
+              taskName,
+              config,
+            }, false)}
+          >
+            <Clipboard size={18} />
+            {busy ? '处理中' : '确认新建'}
+          </NeonButton>
+          <NeonButton
+            type="button"
+            disabled={busy || !canConfirm}
+            onClick={() => onConfirm({
+              ...draft,
+              taskName,
+              config,
+            }, true)}
+          >
+            <Play size={18} />
+            {busy ? '处理中' : '确认新建并运行'}
+          </NeonButton>
+        </div>
+      </section>
+    </div>
+    </Translated>,
+    document.body,
+  )
+}
+
+function TaskNumberField({
+  label,
+  value,
+  min,
+  step,
+  integer,
+  onChange,
+}: {
+  label: string
+  value: number | undefined
+  min?: number
+  step?: number
+  integer?: boolean
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="task-create-field">
+      <span>{label}</span>
+      <TextInput
+        type="number"
+        value={Number.isFinite(Number(value)) ? String(value) : '0'}
+        min={min}
+        step={step}
+        onChange={(event) => onChange(parseTaskNumber(event.target.value, min, integer))}
+      />
+    </label>
   )
 }
 
@@ -1445,10 +1995,10 @@ function TaskDeleteDialog({
   return createPortal(
     <Translated>
     <div className="task-detail-backdrop" role="presentation">
-      <section className="task-delete-dialog" role="dialog" aria-modal="true" aria-label="删除历史任务">
+      <section className="task-delete-dialog" role="dialog" aria-modal="true" aria-label="删除任务">
         <div className="task-detail-head">
           <div>
-            <h3>删除历史任务</h3>
+            <h3>删除任务</h3>
             <p title={task.videoDir}>{task.videoDir}</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭删除任务提示" disabled={busy}>
@@ -1513,7 +2063,7 @@ function TaskDetailDialog({
         <div className="task-detail-head">
           <div>
             <h3>分析任务详情</h3>
-            <p title={task.id}>{task.id}</p>
+            <p title={task.id}>{displayTaskName(task)}</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭任务详情">
             <X size={18} />
@@ -1554,6 +2104,10 @@ function TaskDetailDialog({
         </div>
 
         <dl className="task-detail-grid">
+          <div className="wide">
+            <dt>任务名称</dt>
+            <dd title={task.id}>{displayTaskName(task)}</dd>
+          </div>
           <div className="wide">
             <dt>视频路径</dt>
             <dd title={task.videoDir}>{task.videoDir || '-'}</dd>
@@ -1696,7 +2250,6 @@ async function filterScannedVideos(
   } = {},
 ) {
   const enabled = new Set(filters.enabledKeys)
-  if (enabled.size === 0) return videos
 
   const sizeMultiplier = videoScanSizeUnitBytes(filters.sizeUnit)
   const minBytes = positiveNumber(filters.minSizeGb) * sizeMultiplier
@@ -1705,7 +2258,7 @@ async function filterScannedVideos(
   const includes = splitFilterTokens(filters.nameIncludes).map((item) => item.toLocaleLowerCase())
   const extensions = splitFilterTokens(filters.extensions).map((item) => item.replace(/^\./, '').toLocaleLowerCase())
 
-  let next = videos.filter((video) => {
+  let next = enabled.size === 0 ? videos : videos.filter((video) => {
     if (enabled.has('size')) {
       if (minBytes > 0 && video.sizeBytes < minBytes) return false
       if (maxBytes > 0 && video.sizeBytes > maxBytes) return false
@@ -1911,6 +2464,17 @@ function buildTaskCachePath(task: AnalysisTaskRecord) {
   return joinDisplayPath(cacheDir, 'cache', 'tasks', task.id || '-')
 }
 
+function displayTaskName(task: Pick<AnalysisTaskRecord, 'id' | 'name'>) {
+  return task.name?.trim() || task.id || '-'
+}
+
+function parseTaskNumber(value: string, min = 0, integer = false) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return min
+  const normalized = Math.max(min, numeric)
+  return integer ? Math.round(normalized) : normalized
+}
+
 function buildTaskConfigSections(config: RunBatchCompareConfig): TaskConfigSection[] {
   const safeConfig = config || ({} as RunBatchCompareConfig)
   const candidateLimit = Number(safeConfig.candidateLimit)
@@ -1958,6 +2522,7 @@ function buildTaskConfigSections(config: RunBatchCompareConfig): TaskConfigSecti
       rows: [
         { label: '运行设备', value: formatDevice(safeConfig.device) },
         { label: '强制重建缓存', value: formatBoolean(safeConfig.force) },
+        { label: '启用早停加速', value: formatBoolean(safeConfig.earlyStop !== false) },
         { label: '错误容忍', value: formatErrorTolerancePreset(safeConfig.errorTolerancePreset) },
         { label: '严重码流错误上限', value: formatLimit(safeConfig.errorToleranceSevereLimit, ' 条') },
         { label: '缺失画面上限', value: formatLimit(safeConfig.errorToleranceMissingPictureLimit, ' 条') },
@@ -2053,6 +2618,7 @@ function taskListsEqual(left: AnalysisTaskRecord[], right: AnalysisTaskRecord[])
   return left.every((task, index) => {
     const next = right[index]
     return task.id === next?.id
+      && task.name === next.name
       && task.updatedAt === next.updatedAt
       && task.status === next.status
       && task.progress === next.progress

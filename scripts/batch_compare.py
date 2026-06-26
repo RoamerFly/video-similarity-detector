@@ -32,6 +32,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Lock, RLock
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -526,17 +527,18 @@ def emit_progress(
         ])
     log("|".join(parts))
     if globals().get("ACTIVE_TASK_MANIFEST_PATH") is not None:
-        ratio = min(1.0, max(0.0, float(current) / max(float(total), 1.0)))
-        stage_id = PHASE_TO_TASK_STAGE.get(phase)
-        if stage_id and (not TARGET_TASK_STAGE or stage_id == TARGET_TASK_STAGE):
-            update_task_stage(
-                stage_id,
-                "completed" if ratio >= 1.0 else "running",
-                ratio * 100.0,
-                message,
-            )
-        elif phase == "done":
-            update_task_manifest(status="completed", progress=100.0, stage=message, activeStage="")
+        with TASK_MANIFEST_LOCK:
+            ratio = min(1.0, max(0.0, float(current) / max(float(total), 1.0)))
+            stage_id = PHASE_TO_TASK_STAGE.get(phase)
+            if stage_id and (not TARGET_TASK_STAGE or stage_id == TARGET_TASK_STAGE):
+                update_task_stage(
+                    stage_id,
+                    "completed" if ratio >= 1.0 else "running",
+                    ratio * 100.0,
+                    message,
+                )
+            elif phase == "done":
+                update_task_manifest(status="completed", progress=100.0, stage=message, activeStage="")
 
 
 def emit_candidate_progress(
@@ -558,6 +560,28 @@ def emit_candidate_progress(
         sub_total,
         sub_label,
     )
+
+
+def comparison_sub_progress(
+    direction: str,
+    done: int,
+    total: int,
+    total_frames_a: int,
+    total_frames_b: int,
+    first_direction: str | None = None,
+) -> tuple[int, int, str]:
+    total_frames_a = max(1, int(total_frames_a))
+    total_frames_b = max(1, int(total_frames_b))
+    pair_total_frames = max(1, total_frames_a + total_frames_b)
+    total = max(1, int(total))
+    done = min(max(0, int(done)), total)
+    first_direction = first_direction or ("a_to_b" if total_frames_a <= total_frames_b else "b_to_a")
+    if first_direction == "a_to_b":
+        pair_done = done if direction == "a_to_b" else total_frames_a + done
+    else:
+        pair_done = done if direction == "b_to_a" else total_frames_b + done
+    direction_label = "A→B" if direction == "a_to_b" else "B→A"
+    return min(max(0, pair_done), pair_total_frames), pair_total_frames, direction_label
 
 
 def probe_video_frame_count(video_path: Path, ffmpeg: str = "") -> int:
@@ -848,6 +872,7 @@ def save_resume_pairs(
 ACTIVE_TASK_MANIFEST_PATH: Path | None = None
 ACTIVE_TASK_CACHE_DIR: Path | None = None
 ACTIVE_TASK_MANIFEST: dict = {}
+TASK_MANIFEST_LOCK = RLock()
 TARGET_TASK_STAGE = ""
 
 
@@ -1089,14 +1114,15 @@ def activate_task_manifest(
 
 
 def update_task_manifest(**patch) -> None:
-    if ACTIVE_TASK_MANIFEST_PATH is None or not ACTIVE_TASK_MANIFEST:
-        return
-    ACTIVE_TASK_MANIFEST.update(patch)
-    ACTIVE_TASK_MANIFEST["updatedAt"] = datetime.now().isoformat()
-    try:
-        write_json_atomic(ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST)
-    except OSError as error:
-        log(f"Warning: Failed to update task history: {compact_error(error)}")
+    with TASK_MANIFEST_LOCK:
+        if ACTIVE_TASK_MANIFEST_PATH is None or not ACTIVE_TASK_MANIFEST:
+            return
+        ACTIVE_TASK_MANIFEST.update(patch)
+        ACTIVE_TASK_MANIFEST["updatedAt"] = datetime.now().isoformat()
+        try:
+            write_json_atomic(ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST)
+        except OSError as error:
+            log(f"Warning: Failed to update task history: {compact_error(error)}")
 
 
 def resume_pair_database_path(state_path: Path, signature: dict) -> Path:
@@ -1326,6 +1352,11 @@ def main():
         type=int,
         default=1,
         help="Number of video pairs to compare concurrently during the exact pass (default: 1)",
+    )
+    parser.add_argument(
+        "--disable-early-stop",
+        action="store_true",
+        help="Disable conservative early-stop and force complete bidirectional comparison for every pair",
     )
     parser.add_argument(
         "--min-segment-duration",
@@ -2014,15 +2045,63 @@ def main():
         )
 
     compare_workers = max(1, min(8, int(args.compare_workers or 1)))
-    log(f"Exact comparison workers: {compare_workers}; conservative early-stop enabled.")
+    early_stop_enabled = not bool(args.disable_early_stop)
+    log(
+        f"Exact comparison workers: {compare_workers}; "
+        f"conservative early-stop {'enabled' if early_stop_enabled else 'disabled'}."
+    )
 
     if compare_workers > 1:
-        def check_cancel_progress(_direction: str, _done: int, _total: int):
-            raise_if_cancelled(cancel_file)
+        progress_lock = Lock()
+        in_flight_pair_units: dict[str, float] = {}
 
-        def compute_exact_pair(video_a: Path, video_b: Path):
+        def compute_exact_pair(
+            pair_index: int,
+            video_a: Path,
+            video_b: Path,
+            current_pair_key: str,
+            current_pair_units: float,
+            pair_sub_label: str,
+        ):
             cache_a = video_caches[video_a]
             cache_b = video_caches[video_b]
+            total_frames_a = max(1, len(cache_a.embeddings))
+            total_frames_b = max(1, len(cache_b.embeddings))
+
+            def on_parallel_compare_progress(direction: str, done: int, total: int):
+                raise_if_cancelled(cancel_file)
+                pair_done, pair_total_frames, direction_label = comparison_sub_progress(
+                    direction,
+                    done,
+                    total,
+                    total_frames_a,
+                    total_frames_b,
+                    None if early_stop_enabled else "a_to_b",
+                )
+                pair_fraction = min(1.0, max(0.0, pair_done / max(1, pair_total_frames)))
+                with progress_lock:
+                    in_flight_pair_units[current_pair_key] = current_pair_units * pair_fraction
+                    aggregate_done = min(
+                        compare_units_total,
+                        compare_units_done + sum(in_flight_pair_units.values()),
+                    )
+                    aggregate_pairs = min(
+                        float(max(1, total_pairs)),
+                        completed_pair_count + sum(
+                            min(1.0, max(0.0, value / max(pair_units.get(key, 1.0), 1.0)))
+                            for key, value in in_flight_pair_units.items()
+                        ),
+                    )
+                emit_progress(
+                    "compare",
+                    aggregate_done,
+                    compare_units_total,
+                    f"并行比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name} · {direction_label} {done}/{max(1, int(total))} 帧",
+                    aggregate_pairs,
+                    max(1, total_pairs),
+                    pair_sub_label,
+                )
+
             return compare_frame_indexes_bidirectional(
                 cache_a=cache_a,
                 cache_b=cache_b,
@@ -2030,8 +2109,8 @@ def main():
                 index_b=frame_indexes[video_b],
                 match_threshold=args.match_threshold,
                 top_k=args.top_k,
-                progress_callback=check_cancel_progress,
-                early_stop=True,
+                progress_callback=on_parallel_compare_progress,
+                early_stop=early_stop_enabled,
             )
 
         def store_parallel_pair(current_pair_key: str, result, cache_a, cache_b):
@@ -2084,14 +2163,23 @@ def main():
                     report_data.video_pairs.append(cached_pair)
                     log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
                     continue
-                future = executor.submit(compute_exact_pair, video_a, video_b)
+                pair_sub_label = f"当前比较：{video_a.name} ↔ {video_b.name}"
+                future = executor.submit(
+                    compute_exact_pair,
+                    pair_index,
+                    video_a,
+                    video_b,
+                    current_pair_key,
+                    current_pair_units,
+                    pair_sub_label,
+                )
                 future_meta[future] = (
                     pair_index,
                     video_a,
                     video_b,
                     current_pair_key,
                     current_pair_units,
-                    f"当前比较：{video_a.name} -> {video_b.name}",
+                    pair_sub_label,
                 )
 
             for future in as_completed(future_meta):
@@ -2100,8 +2188,10 @@ def main():
                     raise_if_cancelled(cancel_file)
                     result = future.result()
                     store_parallel_pair(current_pair_key, result, video_caches[video_a], video_caches[video_b])
-                    compare_units_done += current_pair_units
-                    completed_pair_count += 1
+                    with progress_lock:
+                        in_flight_pair_units.pop(current_pair_key, None)
+                        compare_units_done += current_pair_units
+                        completed_pair_count += 1
                     update_task_manifest(
                         completedPairs=completed_pair_count,
                         progress=round(completed_pair_count / max(1, total_pairs) * 100.0, 2),
@@ -2127,7 +2217,9 @@ def main():
                     )
                     log(f"\nWarning: {warning_msg}")
                     report_data.add_warning(warning_msg)
-                    compare_units_done += current_pair_units
+                    with progress_lock:
+                        in_flight_pair_units.pop(current_pair_key, None)
+                        compare_units_done += current_pair_units
                     emit_progress(
                         "compare",
                         compare_units_done,
@@ -2163,21 +2255,24 @@ def main():
         try:
             cache_a = video_caches[video_a]
             cache_b = video_caches[video_b]
-            pair_total_frames = max(1, len(cache_a.embeddings) + len(cache_b.embeddings))
-            a_query_total = max(1, len(cache_a.embeddings))
+            total_frames_a = max(1, len(cache_a.embeddings))
+            total_frames_b = max(1, len(cache_b.embeddings))
 
             def on_compare_progress(direction: str, done: int, total: int):
                 raise_if_cancelled(cancel_file)
-                total = max(1, int(total))
-                done = min(max(0, int(done)), total)
-                pair_done = done if direction == "a_to_b" else a_query_total + done
-                pair_done = min(pair_done, pair_total_frames)
-                direction_label = "A→B" if direction == "a_to_b" else "B→A"
+                pair_done, pair_total_frames, direction_label = comparison_sub_progress(
+                    direction,
+                    done,
+                    total,
+                    total_frames_a,
+                    total_frames_b,
+                    None if early_stop_enabled else "a_to_b",
+                )
                 emit_progress(
                     "compare",
                     compare_units_done + (pair_done / pair_total_frames) * current_pair_units,
                     compare_units_total,
-                    f"比较视频对 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name} · {direction_label} {done}/{total} 帧",
+                    f"比较视频对 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name} · {direction_label} {min(max(0, int(done)), max(1, int(total)))}/{max(1, int(total))} 帧",
                     pair_done,
                     pair_total_frames,
                     pair_sub_label,
@@ -2192,7 +2287,7 @@ def main():
                 match_threshold=args.match_threshold,
                 top_k=args.top_k,
                 progress_callback=on_compare_progress,
-                early_stop=True,
+                early_stop=early_stop_enabled,
             )
 
             # Compute directional window similarity so A→B and B→A are not mixed.

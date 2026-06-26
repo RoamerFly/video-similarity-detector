@@ -64,6 +64,7 @@ export interface SettingsSnapshot {
   defaultInputSize: number
   defaultPortraitRotation: PortraitRotation
   defaultForce: boolean
+  defaultEarlyStop: boolean
   defaultDevice: DeviceMode
   errorTolerancePreset: ErrorTolerancePreset
   errorToleranceSevereLimit: number
@@ -100,6 +101,7 @@ export interface AnalysisConfig {
   inputSize: number
   portraitRotation: PortraitRotation
   force: boolean
+  earlyStop: boolean
   errorTolerancePreset: ErrorTolerancePreset
   errorToleranceSevereLimit: number
   errorToleranceMissingPictureLimit: number
@@ -125,6 +127,7 @@ export type AnalysisPresetConfig = Pick<
   | 'defaultInputSize'
   | 'defaultPortraitRotation'
   | 'defaultForce'
+  | 'defaultEarlyStop'
   | 'defaultDevice'
 >
 
@@ -145,6 +148,7 @@ const normalAnalysisPreset: AnalysisPresetConfig = {
   defaultInputSize: 224,
   defaultPortraitRotation: 'right_90',
   defaultForce: false,
+  defaultEarlyStop: true,
   defaultDevice: 'auto',
 }
 
@@ -294,6 +298,7 @@ export function analysisConfigFromSettings(settings: SettingsSnapshot): Analysis
     inputSize: settings.defaultInputSize,
     portraitRotation: settings.defaultPortraitRotation,
     force: settings.defaultForce,
+    earlyStop: settings.defaultEarlyStop,
     errorTolerancePreset: settings.errorTolerancePreset,
     errorToleranceSevereLimit: settings.errorToleranceSevereLimit,
     errorToleranceMissingPictureLimit: settings.errorToleranceMissingPictureLimit,
