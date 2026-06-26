@@ -342,6 +342,14 @@ export interface MoveFilesResult {
   message: string
 }
 
+export interface FileMoveStatus {
+  running: boolean
+  cancelRequested: boolean
+  targetDir: string
+  currentPath: string | null
+  pendingPaths: string[]
+}
+
 export interface ReportPairIdentity {
   videoA: string
   videoB: string
@@ -816,6 +824,32 @@ export async function moveFiles(paths: string[], targetDir: string) {
   })
 }
 
+export async function cancelMoveFiles() {
+  if (!hasTauriRuntime()) {
+    return {
+      running: false,
+      cancelRequested: false,
+      targetDir: '',
+      currentPath: null,
+      pendingPaths: [],
+    } satisfies FileMoveStatus
+  }
+  return invoke<FileMoveStatus>('cancel_move_files')
+}
+
+export async function getFileMoveStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      running: false,
+      cancelRequested: false,
+      targetDir: '',
+      currentPath: null,
+      pendingPaths: [],
+    } satisfies FileMoveStatus
+  }
+  return invoke<FileMoveStatus>('get_file_move_status')
+}
+
 export async function openFile(path: string) {
   if (!hasTauriRuntime()) return
   return invoke<void>('open_file', {
@@ -929,6 +963,14 @@ export async function listenMergeEvents(handlers: {
 export async function listenAppCloseRequested(handler: () => void) {
   if (!hasTauriRuntime()) return () => undefined
   const unlisten = await listen('app-close-requested', () => handler())
+  return () => {
+    unlisten()
+  }
+}
+
+export async function listenAppExitRequested(handler: () => void) {
+  if (!hasTauriRuntime()) return () => undefined
+  const unlisten = await listen('app-exit-requested', () => handler())
   return () => {
     unlisten()
   }

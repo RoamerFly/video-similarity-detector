@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { useI18n } from '@/i18n/useI18n'
 import { cn } from '@/utils/cn'
 import { type VideoRelation, getRelationInfo } from '@/utils/relation'
 
@@ -16,6 +17,7 @@ export function RelationBadge({
   className,
 }: RelationBadgeProps) {
   const info = getRelationInfo(relation)
+  const { t } = useI18n()
 
   const sizeClasses = {
     sm: 'px-2 py-0.5 text-xs',
@@ -46,10 +48,10 @@ export function RelationBadge({
           className="w-2 h-2 rounded-full mr-2"
           style={{ backgroundColor: info.color }}
         />
-        {info.label}
+        {t(info.label)}
       </span>
       {showDescription && (
-        <p className="text-xs text-white/50 ml-1">{info.description}</p>
+        <p className="text-xs text-white/50 ml-1">{t(info.description)}</p>
       )}
     </motion.div>
   )

@@ -3,6 +3,7 @@ import type {
   AnalysisMode,
   AnalysisPresetConfig,
   AnalysisPresetId,
+  AppLanguage,
   BuiltInAnalysisPresetId,
   CloseBehavior,
   DeviceMode,
@@ -52,6 +53,7 @@ interface SettingsActions {
   setCheckEnvOnStartup: (value: boolean) => void
   setOpenMaximized: (value: boolean) => void
   setCloseBehavior: (value: CloseBehavior) => void
+  setAppLanguage: (value: AppLanguage) => void
   setVideoScanFilterKeys: (value: VideoScanFilterKey[]) => void
   setVideoScanFilterValue: <K extends keyof VideoScanFilters>(key: K, value: VideoScanFilters[K]) => void
   setAnalysisMode: (value: AnalysisMode) => void
@@ -177,6 +179,7 @@ export const useSettingsStore = create<SettingsState>()(
       setCheckEnvOnStartup: (checkEnvOnStartup) => set({ checkEnvOnStartup }),
       setOpenMaximized: (openMaximized) => set({ openMaximized }),
       setCloseBehavior: (closeBehavior) => set({ closeBehavior }),
+      setAppLanguage: (appLanguage) => set({ appLanguage }),
       setVideoScanFilterKeys: (enabledKeys) => set({
         videoScanFilters: {
           ...useSettingsStore.getState().videoScanFilters,
@@ -268,6 +271,7 @@ export const useSettingsStore = create<SettingsState>()(
           checkEnvOnStartup: defaultSettings.checkEnvOnStartup,
           openMaximized: defaultSettings.openMaximized,
           closeBehavior: defaultSettings.closeBehavior,
+          appLanguage: defaultSettings.appLanguage,
           defaultCompareWorkers: defaultSettings.defaultCompareWorkers,
         }),
       resetAnalysisSettings: () =>
@@ -344,6 +348,7 @@ export function settingsSnapshotFromState(settings: SettingsSnapshot): SettingsS
     checkEnvOnStartup: settings.checkEnvOnStartup,
     openMaximized: settings.openMaximized,
     closeBehavior: settings.closeBehavior,
+    appLanguage: settings.appLanguage,
     analysisMode: settings.analysisMode,
     selectedAnalysisPreset: settings.selectedAnalysisPreset,
     customAnalysisPresetSource: settings.customAnalysisPresetSource,
@@ -445,6 +450,7 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
     : legacyCloseToBackground === true
       ? 'tray'
       : defaultSettings.closeBehavior
+  const appLanguage: AppLanguage = snapshot.appLanguage === 'en-US' ? 'en-US' : defaultSettings.appLanguage
   const errorTolerancePreset: ErrorTolerancePreset =
     snapshot.errorTolerancePreset === 'strict'
     || snapshot.errorTolerancePreset === 'lenient'
@@ -480,6 +486,7 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
     defaultOffsetTolerance: Number.isFinite(offsetTolerance) ? clampMin(offsetTolerance, 1) : defaultSettings.defaultOffsetTolerance,
     defaultPortraitRotation: portraitRotation,
     closeBehavior,
+    appLanguage,
     errorTolerancePreset,
     errorToleranceSevereLimit: Number.isFinite(severeLimit)
       ? clampMin(severeLimit, 0)

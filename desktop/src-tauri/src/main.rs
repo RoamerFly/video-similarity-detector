@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -446,6 +447,82 @@ struct DeleteFilesRequest {
     paths: Vec<String>,
 }
 
+#[derive(Clone, Default)]
+struct FileMoveState {
+    inner: Arc<FileMoveStateInner>,
+}
+
+#[derive(Default)]
+struct FileMoveStateInner {
+    is_running: AtomicBool,
+    cancel_requested: AtomicBool,
+    target_dir: Mutex<String>,
+    current_path: Mutex<Option<String>>,
+    pending_paths: Mutex<Vec<String>>,
+}
+
+impl FileMoveState {
+    fn try_begin(&self, target_dir: String, pending_paths: Vec<String>) -> bool {
+        if self
+            .inner
+            .is_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.inner.cancel_requested.store(false, Ordering::SeqCst);
+        *self.inner.target_dir.lock().unwrap() = target_dir;
+        *self.inner.current_path.lock().unwrap() = None;
+        *self.inner.pending_paths.lock().unwrap() = pending_paths;
+        true
+    }
+
+    fn finish(&self) {
+        self.inner.is_running.store(false, Ordering::SeqCst);
+        self.inner.cancel_requested.store(false, Ordering::SeqCst);
+        *self.inner.target_dir.lock().unwrap() = String::new();
+        *self.inner.current_path.lock().unwrap() = None;
+        self.inner.pending_paths.lock().unwrap().clear();
+    }
+
+    fn request_cancel(&self) {
+        self.inner.cancel_requested.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancel_requested(&self) -> bool {
+        self.inner.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    fn is_running(&self) -> bool {
+        self.inner.is_running.load(Ordering::SeqCst)
+    }
+
+    fn set_current_path(&self, path: Option<String>) {
+        *self.inner.current_path.lock().unwrap() = path;
+    }
+
+    fn snapshot(&self) -> FileMoveStatus {
+        FileMoveStatus {
+            running: self.is_running(),
+            cancel_requested: self.is_cancel_requested(),
+            target_dir: self.inner.target_dir.lock().unwrap().clone(),
+            current_path: self.inner.current_path.lock().unwrap().clone(),
+            pending_paths: self.inner.pending_paths.lock().unwrap().clone(),
+        }
+    }
+}
+
+struct FileMoveGuard {
+    state: FileMoveState,
+}
+
+impl Drop for FileMoveGuard {
+    fn drop(&mut self) {
+        self.state.finish();
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MoveFilesRequest {
@@ -517,6 +594,16 @@ struct MoveFilesResult {
     moved_paths: Vec<MoveFileRecord>,
     failed: Vec<DeleteFileFailure>,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileMoveStatus {
+    running: bool,
+    cancel_requested: bool,
+    target_dir: String,
+    current_path: Option<String>,
+    pending_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3873,13 +3960,31 @@ fn delete_files(request: DeleteFilesRequest) -> Result<DeleteFilesResult, String
 }
 
 #[tauri::command]
-async fn move_files(request: MoveFilesRequest) -> Result<MoveFilesResult, String> {
-    tauri::async_runtime::spawn_blocking(move || move_files_impl(request))
+async fn move_files(
+    state: State<'_, FileMoveState>,
+    request: MoveFilesRequest,
+) -> Result<MoveFilesResult, String> {
+    let move_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || move_files_impl(request, move_state))
         .await
         .map_err(|error| format!("移动文件任务异常: {error}"))?
 }
 
-fn move_files_impl(request: MoveFilesRequest) -> Result<MoveFilesResult, String> {
+#[tauri::command]
+fn cancel_move_files(state: State<FileMoveState>) -> Result<FileMoveStatus, String> {
+    if !state.is_running() {
+        return Err("当前没有正在移动的文件".to_string());
+    }
+    state.request_cancel();
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn get_file_move_status(state: State<FileMoveState>) -> Result<FileMoveStatus, String> {
+    Ok(state.snapshot())
+}
+
+fn move_files_impl(request: MoveFilesRequest, state: FileMoveState) -> Result<MoveFilesResult, String> {
     let target_dir_text = normalize_display_path(request.target_dir.trim()).trim().to_string();
     if target_dir_text.is_empty() {
         return Err("请选择目标目录".to_string());
@@ -3893,55 +3998,76 @@ fn move_files_impl(request: MoveFilesRequest) -> Result<MoveFilesResult, String>
     let mut moved_paths = Vec::new();
     let mut failed = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut requested_paths = Vec::new();
 
     for raw_path in request.paths {
         let path_text = normalize_display_path(raw_path.trim()).trim().to_string();
         if path_text.is_empty() || !seen.insert(path_text.clone()) {
             continue;
         }
+        requested_paths.push(path_text);
+    }
 
-        let source = PathBuf::from(&path_text);
+    if !state.try_begin(target_dir_text.clone(), requested_paths.clone()) {
+        return Err("已有文件移动任务正在运行，请等待完成或先中断当前移动。".to_string());
+    }
+    let _guard = FileMoveGuard {
+        state: state.clone(),
+    };
+
+    for (index, path_text) in requested_paths.iter().enumerate() {
+        if state.is_cancel_requested() {
+            push_move_cancel_failures(&mut failed, &requested_paths, index);
+            break;
+        }
+
+        state.set_current_path(Some(path_text.clone()));
+        let source = PathBuf::from(path_text);
         let metadata = match fs::metadata(&source) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => {
                 failed.push(DeleteFileFailure {
-                    path: path_text,
+                    path: path_text.clone(),
                     error: "路径不是文件，已跳过".to_string(),
                 });
+                state.set_current_path(None);
                 continue;
             }
             Err(error) => {
                 failed.push(DeleteFileFailure {
-                    path: path_text,
+                    path: path_text.clone(),
                     error: error.to_string(),
                 });
+                state.set_current_path(None);
                 continue;
             }
         };
         let Some(file_name) = source.file_name() else {
             failed.push(DeleteFileFailure {
-                path: path_text,
+                path: path_text.clone(),
                 error: "无法识别文件名".to_string(),
             });
+            state.set_current_path(None);
             continue;
         };
         let destination = unique_move_destination(&target_dir, file_name);
         if source == destination {
             failed.push(DeleteFileFailure {
-                path: path_text,
+                path: path_text.clone(),
                 error: "源文件已在目标目录中".to_string(),
             });
+            state.set_current_path(None);
             continue;
         }
 
         let move_result = fs::rename(&source, &destination).or_else(|rename_error| {
-            fs::copy(&source, &destination)
-                .and_then(|bytes| {
-                    if bytes != metadata.len() {
+            copy_file_interruptible(&source, &destination, metadata.len(), &state)
+                .and_then(|_| {
+                    if state.is_cancel_requested() {
                         let _ = fs::remove_file(&destination);
                         return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "复制后的文件大小不一致",
+                            std::io::ErrorKind::Interrupted,
+                            "移动已中断",
                         ));
                     }
                     fs::remove_file(&source)
@@ -3959,14 +4085,30 @@ fn move_files_impl(request: MoveFilesRequest) -> Result<MoveFilesResult, String>
                 from: path_to_string(source),
                 to: path_to_string(destination),
             }),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                failed.push(DeleteFileFailure {
+                    path: path_text.clone(),
+                    error: "移动已中断，该文件未完成移动；已尽量清理未完成的目标文件。".to_string(),
+                });
+                push_move_cancel_failures(&mut failed, &requested_paths, index + 1);
+                break;
+            }
             Err(error) => failed.push(DeleteFileFailure {
-                path: path_text,
+                path: path_text.clone(),
                 error: error.to_string(),
             }),
         }
+        state.set_current_path(None);
     }
 
-    let message = if failed.is_empty() {
+    let interrupted = failed.iter().any(|item| item.error.contains("移动已中断"));
+    let message = if interrupted {
+        format!(
+            "移动已中断：已移动 {} 个文件，{} 个文件未完成或未处理",
+            moved_paths.len(),
+            failed.len()
+        )
+    } else if failed.is_empty() {
         format!("已移动 {} 个文件", moved_paths.len())
     } else {
         format!(
@@ -3981,6 +4123,59 @@ fn move_files_impl(request: MoveFilesRequest) -> Result<MoveFilesResult, String>
         failed,
         message,
     })
+}
+
+fn push_move_cancel_failures(
+    failed: &mut Vec<DeleteFileFailure>,
+    paths: &[String],
+    start_index: usize,
+) {
+    for path in paths.iter().skip(start_index) {
+        failed.push(DeleteFileFailure {
+            path: path.clone(),
+            error: "移动已中断，未处理该文件。".to_string(),
+        });
+    }
+}
+
+fn copy_file_interruptible(
+    source: &Path,
+    destination: &Path,
+    expected_bytes: u64,
+    state: &FileMoveState,
+) -> std::io::Result<u64> {
+    let mut input = File::open(source)?;
+    let mut output = File::create(destination)?;
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    let mut copied = 0u64;
+
+    loop {
+        if state.is_cancel_requested() {
+            drop(output);
+            let _ = fs::remove_file(destination);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "移动已中断",
+            ));
+        }
+
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read])?;
+        copied = copied.saturating_add(read as u64);
+    }
+
+    output.flush()?;
+    if copied != expected_bytes {
+        let _ = fs::remove_file(destination);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "复制后的文件大小不一致",
+        ));
+    }
+    Ok(copied)
 }
 
 fn unique_move_destination(target_dir: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
@@ -4556,7 +4751,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             if event.id() == "show_window" {
                 show_main_window(app);
             } else if event.id() == "quit_app" {
-                app.exit(0);
+                show_main_window(app);
+                let _ = app.emit("app-exit-requested", ());
             }
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -4588,6 +4784,7 @@ fn main() {
         }))
         .manage(TaskState::default())
         .manage(MergeTaskState::default())
+        .manage(FileMoveState::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -4614,7 +4811,8 @@ fn main() {
                         let _ = window.emit("app-close-requested", ());
                     }
                     _ => {
-                        set_tray_visible(window.app_handle(), false);
+                        api.prevent_close();
+                        let _ = window.emit("app-exit-requested", ());
                     }
                 }
             }
@@ -4656,6 +4854,8 @@ fn main() {
             update_report_entries,
             delete_files,
             move_files,
+            cancel_move_files,
+            get_file_move_status,
             clear_cache,
             scan_cache,
             clear_cache_items,

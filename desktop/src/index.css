@@ -5811,6 +5811,24 @@ select {
   color: #42d5ff;
 }
 
+.scan-progress-overlay button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  color: #ffbdc9;
+  font-size: 12px;
+  font-weight: 900;
+  border: 1px solid rgba(255, 92, 138, 0.34);
+  border-radius: 7px;
+  background: rgba(91, 20, 45, 0.34);
+}
+
+.scan-progress-overlay button svg {
+  color: currentColor;
+}
+
 .scan-empty-state {
   display: grid;
   min-height: 124px;
@@ -10837,6 +10855,69 @@ select {
 
 .settings-panel-grid.analysis {
   grid-template-rows: auto auto auto;
+}
+
+/* English labels are longer than the Chinese originals. Keep settings navigation readable. */
+.settings-tab-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-tab-toolbar .settings-tabs {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.settings-tab-toolbar .settings-tabs::-webkit-scrollbar {
+  height: 5px;
+}
+
+.settings-tab-toolbar .settings-tabs button {
+  flex: 0 0 max-content;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.settings-tab-toolbar .settings-tabs button svg,
+.settings-fixed-actions .neon-button svg {
+  flex: 0 0 auto;
+}
+
+.settings-fixed-actions {
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible;
+}
+
+.settings-fixed-actions .neon-button {
+  flex: 0 0 auto;
+  min-width: max-content;
+  max-width: none;
+}
+
+@media (max-width: 1180px) {
+  .settings-tab-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-fixed-actions {
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
 }
 
 .analyze-simple-page.show-analysis {

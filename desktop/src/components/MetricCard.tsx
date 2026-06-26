@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { useI18n } from '@/i18n/useI18n'
 import { cn } from '@/utils/cn'
 import { GlassCard } from './GlassCard'
 
@@ -57,12 +58,13 @@ export function MetricCard({
   className,
 }: MetricCardProps) {
   const colors = colorMap[color]
+  const { t } = useI18n()
 
   return (
     <GlassCard className={cn('p-5', className)} hover>
       <div className="flex items-start justify-between">
         <div className="flex-1">
-          <p className="text-sm text-white/50 mb-1">{title}</p>
+          <p className="text-sm text-white/50 mb-1">{t(title)}</p>
           <motion.p
             className={cn('text-2xl font-bold', colors.value)}
             initial={{ opacity: 0, scale: 0.5 }}
@@ -72,7 +74,7 @@ export function MetricCard({
             {value}
           </motion.p>
           {subtitle && (
-            <p className="text-xs text-white/40 mt-1">{subtitle}</p>
+            <p className="text-xs text-white/40 mt-1">{t(subtitle)}</p>
           )}
           {trend && trendValue && (
             <div className="flex items-center gap-1 mt-2">
@@ -86,7 +88,7 @@ export function MetricCard({
                 {trend === 'up' && '↑'}
                 {trend === 'down' && '↓'}
                 {trend === 'neutral' && '→'}
-                {' '}{trendValue}
+                {' '}{t(trendValue)}
               </span>
             </div>
           )}

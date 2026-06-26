@@ -32,9 +32,11 @@ import {
 } from 'lucide-react'
 import { GlassPanel, NeonButton, StatCard } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
+import { Translated } from '@/i18n/useI18n'
 import {
   buildRunBatchCompareConfig,
   buildAnalysisTaskMatchKey,
+  cancelMoveFiles,
   cancelCurrentTask,
   clearCacheItems,
   createAnalysisTask,
@@ -127,6 +129,8 @@ export function AnalyzePage() {
   const [videoContextMenu, setVideoContextMenu] = useState<VideoContextMenuState | null>(null)
   const [videoFileBusy, setVideoFileBusy] = useState(false)
   const [videoFileAction, setVideoFileAction] = useState('')
+  const [isMovingFiles, setIsMovingFiles] = useState(false)
+  const [movingVideoTargets, setMovingVideoTargets] = useState<VideoFile[]>([])
   const [isScanning, setIsScanning] = useState(false)
   const pauseRequestedTaskId = useRef('')
   const historyRefreshInFlight = useRef(false)
@@ -769,6 +773,8 @@ export function AnalyzePage() {
       const targetDir = await selectOutputDirectory()
       if (!targetDir) return
       setVideoFileBusy(true)
+      setIsMovingFiles(true)
+      setMovingVideoTargets(targets)
       setVideoFileAction(`正在移动 ${targets.length} 个视频...`)
       const result = await moveFiles(targets.map((video) => video.path), targetDir)
       const moved = new Set(result.movedPaths.map((item) => normalizeVideoPath(item.from)))
@@ -789,11 +795,39 @@ export function AnalyzePage() {
       setErrorMessage(normalizeBackendError(error))
     } finally {
       setVideoFileBusy(false)
+      setIsMovingFiles(false)
+      setMovingVideoTargets([])
       setVideoFileAction('')
     }
   }
 
+  async function interruptVideoMove() {
+    if (!isMovingFiles) return
+    const affected = movingVideoTargets
+      .slice(0, 8)
+      .map((video) => `- ${video.name}`)
+      .join('\n')
+    const more = movingVideoTargets.length > 8 ? `\n- 以及另外 ${movingVideoTargets.length - 8} 个文件` : ''
+    const confirmed = window.confirm(
+      [
+        '确认中断本次移动吗？',
+        '此次中断可能影响以下视频文件：',
+        affected ? `${affected}${more}` : '- 当前移动队列',
+        '',
+        '已完成移动的文件不会自动移回；正在复制的文件会尽量清理未完成的目标文件。',
+      ].join('\n'),
+    )
+    if (!confirmed) return
+    try {
+      setVideoFileAction('正在中断移动...')
+      await cancelMoveFiles()
+    } catch (error) {
+      setErrorMessage(normalizeBackendError(error))
+    }
+  }
+
   return (
+    <Translated>
     <div className="route-fill analyze-workspace">
       <div className="analysis-page-content">
         <div className="analysis-subpage-tabs" role="tablist" aria-label="分析任务页面">
@@ -1032,9 +1066,17 @@ export function AnalyzePage() {
                       <button type="button" onClick={clearVideoSelection} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
                         清空
                       </button>
-                      <button type="button" onClick={() => void moveVideoFiles(selectedVideosForAction())} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
-                        <FolderOpen size={15} />
-                        移动
+                      <button
+                        type="button"
+                        className={isMovingFiles ? 'danger' : ''}
+                        onClick={() => {
+                          if (isMovingFiles) void interruptVideoMove()
+                          else void moveVideoFiles(selectedVideosForAction())
+                        }}
+                        disabled={!isMovingFiles && (videoFileBusy || selectedVideoPaths.size === 0)}
+                      >
+                        {isMovingFiles ? <Square size={15} /> : <FolderOpen size={15} />}
+                        {isMovingFiles ? '中断' : '移动'}
                       </button>
                       <button type="button" className="danger" onClick={() => void deleteVideoFiles(selectedVideosForAction())} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
                         <Trash2 size={15} />
@@ -1099,6 +1141,12 @@ export function AnalyzePage() {
                 <div className="scan-progress-overlay" role="status" aria-live="polite">
                   <RefreshCw size={20} className="spin-slow" />
                   <span>{videoFileAction}</span>
+                  {isMovingFiles && (
+                    <button type="button" onClick={() => void interruptVideoMove()}>
+                      <Square size={15} />
+                      中断移动
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1229,6 +1277,7 @@ export function AnalyzePage() {
         onConfirm={(paths) => void handleClearTaskCache(paths)}
       />
       {videoContextMenu && createPortal(
+        <Translated>
         <div
           className="video-context-menu analysis-video-context-menu"
           style={{ left: videoContextMenu.x, top: videoContextMenu.y }}
@@ -1256,10 +1305,12 @@ export function AnalyzePage() {
             <Trash2 size={15} />
             删除
           </button>
-        </div>,
+        </div>
+        </Translated>,
         document.body,
       )}
     </div>
+    </Translated>
   )
 }
 
@@ -1284,6 +1335,7 @@ function TaskStagesDialog({
   const stages = analysisTaskStages(task)
 
   return createPortal(
+    <Translated>
     <div className="task-detail-backdrop" role="presentation">
       <section className="task-stage-dialog" role="dialog" aria-modal="true" aria-label="分阶段处理">
         <div className="task-detail-head">
@@ -1368,7 +1420,8 @@ function TaskStagesDialog({
           })}
         </div>
       </section>
-    </div>,
+    </div>
+    </Translated>,
     document.body,
   )
 }
@@ -1390,6 +1443,7 @@ function TaskDeleteDialog({
 }) {
   if (!task) return null
   return createPortal(
+    <Translated>
     <div className="task-detail-backdrop" role="presentation">
       <section className="task-delete-dialog" role="dialog" aria-modal="true" aria-label="删除历史任务">
         <div className="task-detail-head">
@@ -1422,7 +1476,8 @@ function TaskDeleteDialog({
           </NeonButton>
         </div>
       </section>
-    </div>,
+    </div>
+    </Translated>,
     document.body,
   )
 }
@@ -1446,6 +1501,7 @@ function TaskDetailDialog({
   const taskCachePath = buildTaskCachePath(task)
 
   return createPortal(
+    <Translated>
     <div
       className="modal-backdrop task-detail-backdrop"
       role="presentation"
@@ -1578,7 +1634,8 @@ function TaskDetailDialog({
           </NeonButton>
         </div>
       </section>
-    </div>,
+    </div>
+    </Translated>,
     document.body,
   )
 }
@@ -1596,6 +1653,7 @@ function PathSummary({
 }) {
   const title = hint ? `${hint}：${value}` : value
   return (
+    <Translated>
     <div
       className={onDoubleClick ? 'path-summary-item interactive' : 'path-summary-item'}
       role={onDoubleClick ? 'button' : undefined}
@@ -1613,6 +1671,7 @@ function PathSummary({
       <span>{label}{hint ? <em>{hint}</em> : null}</span>
       <strong title={value}>{value}</strong>
     </div>
+    </Translated>
   )
 }
 

@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom'
 import { CheckCircle2, Trash2, X } from 'lucide-react'
 import { NeonButton } from '@/components/DesignSystem'
+import { useI18n } from '@/i18n/useI18n'
 import { formatBytes, type CacheScanResult } from '@/services/backend'
 
 export function CacheCleanupDialog({
@@ -32,6 +33,7 @@ export function CacheCleanupDialog({
   onClose: () => void
   onConfirm: (paths: string[]) => void
 }) {
+  const { t } = useI18n()
   if (!open) return null
 
   const items = scan?.items ?? []
@@ -43,23 +45,23 @@ export function CacheCleanupDialog({
       <section className="cache-cleanup-dialog" role="dialog" aria-modal="true" aria-label={ariaLabel}>
         <div className="cache-cleanup-head">
           <div>
-            <h3>{title}</h3>
-            <p title={scan?.cacheDir || ''}>{scan?.message || '正在检查缓存目录...'}</p>
+            <h3>{t(title)}</h3>
+            <p title={scan?.cacheDir || ''}>{t(scan?.message || '正在检查缓存目录...')}</p>
           </div>
-          <button type="button" onClick={onClose} aria-label={`关闭${ariaLabel}`} disabled={busy}>
+          <button type="button" onClick={onClose} aria-label={t(`关闭${ariaLabel}`)} disabled={busy}>
             <X size={18} />
           </button>
         </div>
 
         <div className="cache-cleanup-summary">
-          <span title={scan?.cacheDir || '-'}>目录：{scan?.cacheDir || '-'}</span>
-          <strong>总大小：{formatBytes(scan?.totalSizeBytes ?? 0)}</strong>
-          <strong>已选：{selectedItems.length} 项 / {formatBytes(selectedSize)}</strong>
+          <span title={scan?.cacheDir || '-'}>{t('目录：')}{scan?.cacheDir || '-'}</span>
+          <strong>{t('总大小：')}{formatBytes(scan?.totalSizeBytes ?? 0)}</strong>
+          <strong>{t('已选：')}{selectedItems.length} {t('项')} / {formatBytes(selectedSize)}</strong>
         </div>
 
         <div className="cache-cleanup-toolbar">
-          <button type="button" onClick={onSelectAll} disabled={busy || items.length === 0}>全选</button>
-          <button type="button" onClick={onClearSelection} disabled={busy || selectedItems.length === 0}>取消选择</button>
+          <button type="button" onClick={onSelectAll} disabled={busy || items.length === 0}>{t('全选')}</button>
+          <button type="button" onClick={onClearSelection} disabled={busy || selectedItems.length === 0}>{t('取消选择')}</button>
         </div>
 
         <div className="cache-cleanup-list">
@@ -78,19 +80,19 @@ export function CacheCleanupDialog({
                 <em title={item.path}>{item.path}</em>
               </div>
               <b>{formatBytes(item.sizeBytes)}</b>
-              <i>{item.entryCount} 项</i>
+              <i>{item.entryCount} {t('项')}</i>
             </label>
           )) : (
             <div className="cache-cleanup-empty">
               <CheckCircle2 size={22} />
-              <span>{emptyMessage}</span>
+              <span>{t(emptyMessage)}</span>
             </div>
           )}
         </div>
 
         <div className="cache-cleanup-actions">
           <NeonButton variant="outline" type="button" onClick={onClose} disabled={busy}>
-            取消
+            {t('取消')}
           </NeonButton>
           <NeonButton
             tone="red"
@@ -99,7 +101,7 @@ export function CacheCleanupDialog({
             onClick={() => onConfirm(Array.from(selectedPaths))}
           >
             <Trash2 size={18} />
-            {busy ? '清理中' : `${confirmLabel}(${selectedItems.length})`}
+            {busy ? t('清理中') : `${t(confirmLabel)}(${selectedItems.length})`}
           </NeonButton>
         </div>
       </section>

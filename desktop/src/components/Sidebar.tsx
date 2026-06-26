@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { BarChart3, Clapperboard, Grid2X2, Images, Settings } from 'lucide-react'
+import { useI18n } from '@/i18n/useI18n'
 import { cn } from '@/utils/cn'
 
 const navItems = [
@@ -11,22 +12,24 @@ const navItems = [
 ]
 
 export function Sidebar() {
+  const { t } = useI18n()
   return (
     <aside className="app-sidebar">
-      <nav className="sidebar-nav" aria-label="主导航">
+      <nav className="sidebar-nav" aria-label={t('主导航')}>
         {navItems.map((item) => {
           const Icon = item.icon
+          const label = t(item.label)
 
           return (
             <NavLink
               key={item.path}
               to={item.path}
               end={item.path === '/'}
-              title={item.label}
+              title={label}
               className={({ isActive }) => cn('sidebar-link', isActive && 'active')}
             >
               <Icon />
-              <span>{item.label}</span>
+              <span>{label}</span>
             </NavLink>
           )
         })}

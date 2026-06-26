@@ -27,6 +27,7 @@ export const parameterHints = {
   checkEnvOnStartup: '打开设置页时自动检查 Python、脚本、报告目录和 GPU 状态。',
   openMaximized: '启动应用后自动最大化窗口，减少页面拥挤和滚动。',
   closeBehavior: '设置点击关闭按钮时是每次询问、进入托盘，还是直接退出。',
+  appLanguage: '切换整个桌面界面的显示语言。设置会在保存后保留。',
 } as const
 
 export function withEnglish(cn: string, en: string) {

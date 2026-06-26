@@ -32,6 +32,7 @@ import {
   StatCard,
   TextInput,
 } from '@/components/DesignSystem'
+import { Translated } from '@/i18n/useI18n'
 import {
   deleteFiles,
   deleteReport,
@@ -672,6 +673,7 @@ export function ResultsPage() {
   }
 
   return (
+    <Translated>
     <div className="route-fill results-page">
       <GlassPanel className="results-summary-panel">
         <div className="results-stat-grid">
@@ -1054,6 +1056,7 @@ export function ResultsPage() {
         </div>
       </GlassPanel>
       {videoContextMenu && createPortal(
+        <Translated>
         <div
           className="video-context-menu"
           style={{ left: videoContextMenu.x, top: videoContextMenu.y }}
@@ -1087,7 +1090,8 @@ export function ResultsPage() {
           <button className="danger" type="button" role="menuitem" onClick={() => void deleteContextVideoFile()}>
             <Trash2 />删除视频文件
           </button>
-        </div>,
+        </div>
+        </Translated>,
         document.body,
       )}
       <DeleteAllResultsDialog
@@ -1100,6 +1104,7 @@ export function ResultsPage() {
         onDeleteReport={() => void handleDeleteAllResults(true)}
       />
     </div>
+    </Translated>
   )
 }
 
@@ -1122,6 +1127,7 @@ function DeleteAllResultsDialog({
 }) {
   if (!open) return null
   return createPortal(
+    <Translated>
     <div className="task-detail-backdrop" role="presentation">
       <section className="results-delete-dialog" role="dialog" aria-modal="true" aria-label="删除全部结果">
         <div className="task-detail-head">
@@ -1153,7 +1159,8 @@ function DeleteAllResultsDialog({
           </NeonButton>
         </div>
       </section>
-    </div>,
+    </div>
+    </Translated>,
     document.body,
   )
 }
@@ -1174,12 +1181,14 @@ function SortableHeader({
   const active = sortState.key === sortKey
   const Icon = !active ? ChevronsUpDown : sortState.direction === 'asc' ? ArrowUp : ArrowDown
   return (
+    <Translated>
     <th className={className}>
       <button className={`sort-header-button ${active ? 'active' : ''}`} type="button" title={label} onClick={() => onSort(sortKey)}>
         <span>{label}</span>
         <Icon size={15} />
       </button>
     </th>
+    </Translated>
   )
 }
 

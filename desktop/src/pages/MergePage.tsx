@@ -37,6 +37,7 @@ import {
   TextInput,
   Toggle,
 } from '@/components/DesignSystem'
+import { Translated } from '@/i18n/useI18n'
 import {
   cancelVideoMerge,
   fileName,
@@ -1230,6 +1231,7 @@ export function MergePage() {
   }
 
   return (
+    <Translated>
     <div className={`route-fill merge-editor-page ${dropActive ? 'drop-active' : ''}`}>
       <GlassPanel className="editor-toolbar">
         <div className="editor-toolbar-group">
@@ -1842,6 +1844,7 @@ export function MergePage() {
 
       {dropActive && <div className="editor-drop-overlay"><Upload /><strong>松开以加入视频线或音频线</strong></div>}
       {trackContextMenu && createPortal(
+        <Translated>
         <div
           className="video-context-menu clip-context-menu track-context-menu"
           style={{
@@ -1874,10 +1877,12 @@ export function MergePage() {
           >
             <Trash2 />删除当前{trackContextMenu.kind === 'video' ? '视频线' : '音频线'}
           </button>
-        </div>,
+        </div>
+        </Translated>,
         document.body,
       )}
       {clipContextMenu && createPortal(
+        <Translated>
         <div
           className="video-context-menu clip-context-menu"
           style={{
@@ -1992,10 +1997,12 @@ export function MergePage() {
           <button className="danger" type="button" role="menuitem" onClick={() => removeClip(clipContextMenu.layout)}>
             <Trash2 />删除片段
           </button>
-        </div>,
+        </div>
+        </Translated>,
         document.body,
       )}
       {audioContextMenu && createPortal(
+        <Translated>
         <div
           className="video-context-menu clip-context-menu audio-context-menu"
           style={{
@@ -2042,10 +2049,12 @@ export function MergePage() {
           }}>
             <Trash2 />删除音频片段
           </button>
-        </div>,
+        </div>
+        </Translated>,
         document.body,
       )}
     </div>
+    </Translated>
   )
 }
 
@@ -2069,6 +2078,7 @@ function NumberField({
   onChange: (value: number) => void
 }) {
   return (
+    <Translated>
     <label>
       {tip ? <ParameterHint label={label} tip={tip} /> : <span>{label}</span>}
       <TextInput
@@ -2081,6 +2091,7 @@ function NumberField({
         onChange={(event) => onChange(clamp(numeric(event.target.value), min, max))}
       />
     </label>
+    </Translated>
   )
 }
 

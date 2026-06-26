@@ -4,7 +4,21 @@ import { FolderOpen, GitBranch } from 'lucide-react'
 import { NeonButton } from '@/components/DesignSystem'
 import { Sidebar } from '@/components/Sidebar'
 import { WindowControls } from '@/components/WindowControls'
-import { closeWindow, listenAnalysisEvents, listenAppCloseRequested, listenMergeEvents, maximizeWindow, normalizeBackendError, revealInFolder, setCloseBehavior } from '@/services/backend'
+import { translateMultiline } from '@/i18n/messages'
+import { useI18n } from '@/i18n/useI18n'
+import {
+  closeWindow,
+  getFileMoveStatus,
+  listenAnalysisEvents,
+  listenAppCloseRequested,
+  listenAppExitRequested,
+  listenMergeEvents,
+  maximizeWindow,
+  normalizeBackendError,
+  revealInFolder,
+  setCloseBehavior,
+  type FileMoveStatus,
+} from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -20,9 +34,12 @@ export function AppLayout() {
   const reportDir = useSettingsStore((state) => state.reportDir)
   const closeBehavior = useSettingsStore((state) => state.closeBehavior)
   const resultSummary = useAnalysisStore((state) => state.resultSummary)
+  const { t } = useI18n()
   const copy = getRouteCopy(location.pathname, resultSummary)
 
   const performCloseAction = useCallback(async (action: Exclude<CloseBehavior, 'ask'>, remember = false) => {
+    if (action === 'exit' && !(await confirmExitWhileMoving())) return
+
     if (remember) {
       const settings = useSettingsStore.getState()
       settings.setCloseBehavior(action)
@@ -32,6 +49,12 @@ export function AppLayout() {
 
     await closeWindow(action === 'tray')
   }, [])
+
+  const handleExitRequest = useCallback(() => {
+    void performCloseAction('exit').catch((error) => {
+      useAnalysisStore.getState().setErrorMessage(normalizeBackendError(error))
+    })
+  }, [performCloseAction])
 
   const handleCloseRequest = useCallback(() => {
     const behavior = useSettingsStore.getState().closeBehavior
@@ -74,6 +97,25 @@ export function AppLayout() {
       dispose()
     }
   }, [handleCloseRequest])
+
+  useEffect(() => {
+    let dispose = () => undefined
+    let disposed = false
+
+    listenAppExitRequested(handleExitRequest)
+      .then((unlisten) => {
+        if (disposed) unlisten()
+        else dispose = unlisten
+      })
+      .catch((error) => {
+        useAnalysisStore.getState().setErrorMessage(normalizeBackendError(error))
+      })
+
+    return () => {
+      disposed = true
+      dispose()
+    }
+  }, [handleExitRequest])
 
   useEffect(() => {
     let dispose = () => undefined
@@ -174,10 +216,10 @@ export function AppLayout() {
     <div className="app-frame">
       <header className="brand-header" data-tauri-drag-region>
         <div className="brand-left" data-tauri-drag-region>
-          <img className="brand-logo" src={appIcon} alt="视频相似度分析" />
+          <img className="brand-logo" src={appIcon} alt={t('视频相似度分析')} />
           <div data-tauri-drag-region>
-            <h1 className="brand-title" title={copy.title}>{copy.title}</h1>
-            {copy.subtitle && <p className="brand-subtitle" title={copy.subtitle}>{copy.subtitle}</p>}
+            <h1 className="brand-title" title={t(copy.title)}>{t(copy.title)}</h1>
+            {copy.subtitle && <p className="brand-subtitle" title={t(copy.subtitle)}>{t(copy.subtitle)}</p>}
           </div>
         </div>
 
@@ -217,6 +259,40 @@ export function AppLayout() {
   )
 }
 
+async function confirmExitWhileMoving() {
+  let status: FileMoveStatus
+  try {
+    status = await getFileMoveStatus()
+  } catch {
+    return true
+  }
+
+  if (!status.running) return true
+  const language = useSettingsStore.getState().appLanguage
+  return window.confirm(translateMultiline(formatMovingExitWarning(status), language))
+}
+
+function formatMovingExitWarning(status: FileMoveStatus) {
+  const affected = status.pendingPaths
+    .slice(0, 6)
+    .map((path) => `- ${fileNameFromPath(path)}`)
+    .join('\n')
+  const more = status.pendingPaths.length > 6 ? `\n- 以及另外 ${status.pendingPaths.length - 6} 个文件` : ''
+  const current = status.currentPath ? `\n当前文件：${fileNameFromPath(status.currentPath)}` : ''
+  const target = status.targetDir ? `\n目标目录：${status.targetDir}` : ''
+  return [
+    '尚有文件在移动，是否确认退出？',
+    '退出程序会中断移动任务，正在复制的文件可能需要重新整理。',
+    current,
+    target,
+    affected ? `\n可能受影响的视频：\n${affected}${more}` : '',
+  ].filter(Boolean).join('\n')
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path
+}
+
 function CloseChoiceDialog({
   remember,
   onRememberChange,
@@ -228,12 +304,13 @@ function CloseChoiceDialog({
   onCancel: () => void
   onChoose: (action: Exclude<CloseBehavior, 'ask'>) => void
 }) {
+  const { t } = useI18n()
   return (
     <div className="close-dialog-backdrop" role="presentation">
       <section className="close-dialog" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
         <div>
-          <h2 id="close-dialog-title">关闭程序</h2>
-          <p>请选择本次关闭方式。未勾选“记住此选项”时，下次关闭仍会再次询问。</p>
+          <h2 id="close-dialog-title">{t('关闭程序')}</h2>
+          <p>{t('请选择本次关闭方式。未勾选“记住此选项”时，下次关闭仍会再次询问。')}</p>
         </div>
 
         <label className="close-dialog-remember">
@@ -242,7 +319,7 @@ function CloseChoiceDialog({
             checked={remember}
             onChange={(event) => onRememberChange(event.target.checked)}
           />
-          <span>记住此选项</span>
+          <span>{t('记住此选项')}</span>
         </label>
 
         <div className="close-dialog-actions">

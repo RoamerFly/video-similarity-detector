@@ -9,6 +9,7 @@ import type {
 import { useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Info } from 'lucide-react'
+import { useI18n } from '@/i18n/useI18n'
 import type { Tone } from '@/types/ui'
 import { cn } from '@/utils/cn'
 
@@ -47,9 +48,10 @@ export function NeonButton({
   tone = 'purple',
   ...props
 }: NeonButtonProps) {
+  const { tn } = useI18n()
   return (
     <button className={cn('neon-button', `neon-button-${variant}`, toneClass[tone], className)} {...props}>
-      {children}
+      {tn(children)}
     </button>
   )
 }
@@ -64,14 +66,16 @@ interface StatCardProps {
 }
 
 export function StatCard({ title, value, unit, icon, tone = 'blue', className }: StatCardProps) {
+  const { t } = useI18n()
+  const localizedTitle = t(title)
   return (
     <div className={cn('stat-card', toneClass[tone], className)}>
       <div className="stat-icon">{icon}</div>
       <div>
-        <p className="stat-title" title={title}>{title}</p>
+        <p className="stat-title" title={localizedTitle}>{localizedTitle}</p>
         <div className="stat-value-row">
           <span className="stat-value" title={String(value)}>{value}</span>
-          {unit && <span className="stat-unit">{unit}</span>}
+          {unit && <span className="stat-unit">{t(unit)}</span>}
         </div>
       </div>
     </div>
@@ -79,14 +83,29 @@ export function StatCard({ title, value, unit, icon, tone = 'blue', className }:
 }
 
 export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  const { t } = useI18n()
   const title = props.title ?? (typeof props.value === 'string' ? props.value : undefined)
-  return <input className={cn('design-input', className)} {...props} title={title} />
+  return (
+    <input
+      className={cn('design-input', className)}
+      {...props}
+      placeholder={typeof props.placeholder === 'string' ? t(props.placeholder) : props.placeholder}
+      title={typeof title === 'string' ? t(title) : title}
+      aria-label={typeof props['aria-label'] === 'string' ? t(props['aria-label']) : props['aria-label']}
+    />
+  )
 }
 
 export function SelectInput({ className, children, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+  const { t, tn } = useI18n()
   return (
-    <select className={cn('design-select', className)} {...props}>
-      {children}
+    <select
+      className={cn('design-select', className)}
+      {...props}
+      title={typeof props.title === 'string' ? t(props.title) : props.title}
+      aria-label={typeof props['aria-label'] === 'string' ? t(props['aria-label']) : props['aria-label']}
+    >
+      {tn(children)}
     </select>
   )
 }
@@ -128,11 +147,12 @@ export function Slider({
   tone = 'purple',
   onChange,
 }: SliderProps) {
+  const { t } = useI18n()
   const percentage = ((value - min) / (max - min)) * 100
 
   return (
     <label className={cn('slider-control', toneClass[tone])}>
-      {label && <span>{label}</span>}
+      {label && <span>{t(label)}</span>}
       <input
         type="range"
         min={min}
@@ -153,7 +173,8 @@ interface BadgeProps {
 }
 
 export function Badge({ children, tone = 'blue', className }: BadgeProps) {
-  return <span className={cn('design-badge', toneClass[tone], className)}>{children}</span>
+  const { tn } = useI18n()
+  return <span className={cn('design-badge', toneClass[tone], className)}>{tn(children)}</span>
 }
 
 interface MetricBarProps {
@@ -176,6 +197,7 @@ interface ParameterHintProps {
 }
 
 export function ParameterHint({ label, tip, className }: ParameterHintProps) {
+  const { t, tn } = useI18n()
   const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number; placement: 'top' | 'bottom' } | null>(null)
 
   const showTooltip = useCallback((element: HTMLElement) => {
@@ -189,11 +211,11 @@ export function ParameterHint({ label, tip, className }: ParameterHintProps) {
   }, [])
 
   return (
-    <span className={cn('parameter-hint', className)} title={tip}>
-      <span>{label}</span>
+    <span className={cn('parameter-hint', className)} title={t(tip)}>
+      <span>{tn(label)}</span>
       <span
         className="parameter-hint-icon"
-        aria-label={tip}
+        aria-label={t(tip)}
         tabIndex={0}
         onMouseEnter={(event) => showTooltip(event.currentTarget)}
         onMouseLeave={() => setTooltipPosition(null)}
@@ -210,7 +232,7 @@ export function ParameterHint({ label, tip, className }: ParameterHintProps) {
             top: tooltipPosition.top,
           }}
         >
-          {tip}
+          {t(tip)}
         </span>,
         document.body,
       )}

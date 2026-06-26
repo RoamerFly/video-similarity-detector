@@ -30,6 +30,7 @@ import {
   Toggle,
 } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
+import { Translated } from '@/i18n/useI18n'
 import {
   checkPythonEnv,
   checkForUpdates,
@@ -58,6 +59,7 @@ import { analysisPresetFromSettings, settingsSnapshotFromState, useSettingsStore
 import type {
   AnalysisPresetConfig,
   AnalysisPresetId,
+  AppLanguage,
   CloseBehavior,
   DeviceMode,
   ErrorTolerancePreset,
@@ -245,6 +247,7 @@ export function SettingsPage() {
   const [selectedCachePaths, setSelectedCachePaths] = useState<Set<string>>(() => new Set())
   const [savedMessage, setSavedMessage] = useState('')
   const [error, setError] = useState('')
+  const tabsRef = useRef<HTMLDivElement | null>(null)
   const saveMessageTimer = useRef<number | null>(null)
   const saveFeedbackTimer = useRef<number | null>(null)
   const savedSettingsRef = useRef<SettingsSnapshot>(settingsSnapshotFromState(useSettingsStore.getState()))
@@ -318,6 +321,11 @@ export function SettingsPage() {
       current.replaceSettings(savedSettingsRef.current)
     }
   }, [])
+
+  useEffect(() => {
+    const activeButton = tabsRef.current?.querySelector<HTMLButtonElement>('button.active')
+    activeButton?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [activeTab, settings.appLanguage])
 
   const environmentRows = useMemo(() => [
     {
@@ -495,13 +503,15 @@ export function SettingsPage() {
   const toastMessage = error || savedMessage || (saveFeedback === 'saved' ? '设置保存成功' : '')
 
   return (
+    <Translated>
     <div className="route-fill settings-shell">
       <GlassPanel className="settings-tab-panel">
         <div className="settings-tab-toolbar">
-          <div className="settings-tabs" role="tablist" aria-label="设置分类">
+          <div className="settings-tabs" role="tablist" aria-label="设置分类" ref={tabsRef}>
             <button
               type="button"
               className={activeTab === 'base' ? 'active' : ''}
+              title="基础设置"
               onClick={() => setActiveTab('base')}
             >
               <Settings size={18} />
@@ -510,6 +520,7 @@ export function SettingsPage() {
             <button
               type="button"
               className={activeTab === 'analysis' ? 'active' : ''}
+              title="分析配置"
               onClick={() => setActiveTab('analysis')}
             >
               <SlidersHorizontal size={18} />
@@ -518,6 +529,7 @@ export function SettingsPage() {
             <button
               type="button"
               className={activeTab === 'error_tolerance' ? 'active' : ''}
+              title="错误容忍设置"
               onClick={() => setActiveTab('error_tolerance')}
             >
               <ShieldCheck size={18} />
@@ -526,6 +538,7 @@ export function SettingsPage() {
             <button
               type="button"
               className={activeTab === 'video_scan' ? 'active' : ''}
+              title="视频扫描范围"
               onClick={() => setActiveTab('video_scan')}
             >
               <ScanSearch size={18} />
@@ -640,6 +653,7 @@ export function SettingsPage() {
         onConfirm={(paths) => void handleConfirmClearCache(paths)}
       />
     </div>
+    </Translated>
   )
 }
 
@@ -661,6 +675,7 @@ function BaseSettings({
   const settings = useSettingsStore()
 
   return (
+    <Translated>
     <div className="settings-panel-grid base">
       <div className="settings-compact-grid">
         <label className="settings-row settings-python-row">
@@ -708,6 +723,16 @@ function BaseSettings({
           </SelectInput>
         </label>
         <NumberSetting label="并行设置" tip={parameterHints.compareWorkers} value={settings.defaultCompareWorkers} min={1} max={8} onChange={settings.setDefaultCompareWorkers} />
+        <label className="settings-toggle-row language-row">
+          <ParameterHint label="界面语言" tip={parameterHints.appLanguage} />
+          <SelectInput
+            value={settings.appLanguage}
+            onChange={(event) => settings.setAppLanguage(event.target.value as AppLanguage)}
+          >
+            <option value="zh-CN">简体中文</option>
+            <option value="en-US">English</option>
+          </SelectInput>
+        </label>
       </div>
 
       <div className="settings-side-stack">
@@ -741,6 +766,7 @@ function BaseSettings({
         </div>
       </div>
     </div>
+    </Translated>
   )
 }
 
@@ -842,6 +868,7 @@ function UpdateDialog({
   if (!open) return null
 
   return createPortal(
+    <Translated>
     <div className="modal-backdrop cache-cleanup-backdrop settings-update-backdrop" role="presentation">
       <section className="cache-cleanup-dialog settings-update-dialog" role="dialog" aria-modal="true" aria-label="检查更新">
         <div className="cache-cleanup-head settings-update-dialog-head">
@@ -945,7 +972,8 @@ function UpdateDialog({
       <small className="update-preserve-note">覆盖升级仅替换程序文件，保留 data、videos、embeddings、报告和界面设置。</small>
         </div>
       </section>
-    </div>,
+    </div>
+    </Translated>,
     document.body,
   )
 }
@@ -1053,6 +1081,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
   }
 
   return (
+    <Translated>
     <div className="settings-panel-grid analysis">
       <div className="analysis-preset-section">
         <div className="analysis-preset-row" aria-label="分析预设">
@@ -1183,6 +1212,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
       </div>
       )}
     </div>
+    </Translated>
   )
 }
 
@@ -1250,6 +1280,7 @@ function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) =>
   }
 
   return (
+    <Translated>
     <div className="settings-panel-grid error-tolerance-page">
       <div className="error-tolerance-heading">
         <div>
@@ -1342,6 +1373,7 @@ function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) =>
       />
       {templateMessage && <p className="settings-note template-message">{templateMessage}</p>}
     </div>
+    </Translated>
   )
 }
 
@@ -1358,6 +1390,7 @@ function VideoScanRangeSettings() {
   }
 
   return (
+    <Translated>
     <div className="settings-panel-grid video-scan-page">
       <div className="video-scan-heading">
         <div>
@@ -1540,6 +1573,7 @@ function VideoScanRangeSettings() {
         </section>
       </div>
     </div>
+    </Translated>
   )
 }
 
@@ -1571,6 +1605,7 @@ function TemplateToolbar<T>({
   onDelete: () => void
 }) {
   return (
+    <Translated>
     <div className="config-template-toolbar">
       <span>
         <BookOpen size={16} />
@@ -1596,6 +1631,7 @@ function TemplateToolbar<T>({
         <Trash2 size={16} />
       </button>
     </div>
+    </Translated>
   )
 }
 
@@ -1613,6 +1649,7 @@ function PathSetting({
   onChoose: () => Promise<void>
 }) {
   return (
+    <Translated>
     <label className="settings-row">
       <ParameterHint label={label} tip={tip} />
       <TextInput value={value} onChange={(event) => onChange(event.target.value)} />
@@ -1621,6 +1658,7 @@ function PathSetting({
         选择目录
       </NeonButton>
     </label>
+    </Translated>
   )
 }
 
@@ -1634,11 +1672,13 @@ function ReadOnlyPathSetting({
   value: string
 }) {
   return (
+    <Translated>
     <label className="settings-row settings-row-readonly">
       <ParameterHint label={label} tip={tip} />
       <TextInput value={value || '未检测到项目目录'} readOnly title={value} />
       <span className="readonly-path-tag" title="项目目录由程序运行位置决定，不能手动编辑。">自动</span>
     </label>
+    </Translated>
   )
 }
 
@@ -1662,6 +1702,7 @@ function NumberSetting({
   onChange: (value: number) => void
 }) {
   return (
+    <Translated>
     <label className="param-input-row">
       <ParameterHint label={label} tip={tip} />
       <div className={suffix ? 'number-suffix' : undefined}>
@@ -1676,6 +1717,7 @@ function NumberSetting({
         {suffix && <span>{suffix}</span>}
       </div>
     </label>
+    </Translated>
   )
 }
 
@@ -1693,6 +1735,7 @@ function VideoScanUnitSelect<T extends string>({
   onChange: (value: T) => void
 }) {
   return (
+    <Translated>
     <label className="video-scan-unit-select" aria-label={ariaLabel} title={ariaLabel}>
       <SelectInput value={value} disabled={disabled} onChange={(event) => onChange(event.target.value as T)}>
         {options.map((option) => (
@@ -1700,6 +1743,7 @@ function VideoScanUnitSelect<T extends string>({
         ))}
       </SelectInput>
     </label>
+    </Translated>
   )
 }
 
@@ -1723,6 +1767,7 @@ function VideoScanNumberSetting({
   onChange: (value: VideoScanNumericValue) => void
 }) {
   return (
+    <Translated>
     <label className="param-input-row">
       <ParameterHint label={label} tip="0 表示不限。" />
       <div className={suffix ? 'number-suffix' : undefined}>
@@ -1738,6 +1783,7 @@ function VideoScanNumberSetting({
         {suffix && <span>{suffix}</span>}
       </div>
     </label>
+    </Translated>
   )
 }
 
@@ -1794,6 +1840,7 @@ function buildSettingsSignature(settings: SettingsSnapshot) {
     checkEnvOnStartup: settings.checkEnvOnStartup,
     openMaximized: settings.openMaximized,
     closeBehavior: settings.closeBehavior,
+    appLanguage: settings.appLanguage,
     defaultCompareWorkers: settings.defaultCompareWorkers,
     analysisMode: settings.analysisMode,
     selectedAnalysisPreset: settings.selectedAnalysisPreset,

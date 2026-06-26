@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { AlertCircle, ArrowLeft, CheckCircle2, Clapperboard, ExternalLink, Film, FolderOpen, Images, ListPlus, Pause, PlaySquare, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { Badge, GlassPanel, MetricBar, NeonButton, SelectInput } from '@/components/DesignSystem'
+import { Translated } from '@/i18n/useI18n'
 import { captureComparisonFrame, captureVideoFrame, deleteFiles, fileName, formatBytes, localFileSrc, normalizeBackendError, openFile, pathStatus, revealInFolder, type ComparisonFrameOptions, type PathStatus } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
@@ -257,6 +258,7 @@ export function ComparePage() {
 
   if (!selectedPair) {
     return (
+      <Translated>
       <GlassPanel className="route-fill page-card compare-empty-page">
         <div className="compare-empty-content">
           <AlertCircle size={34} />
@@ -268,6 +270,7 @@ export function ComparePage() {
           </NeonButton>
         </div>
       </GlassPanel>
+      </Translated>
     )
   }
 
@@ -277,6 +280,7 @@ export function ComparePage() {
     const fileSize = numericRawValue(selectedPair.raw.file_size_bytes)
 
     return (
+      <Translated>
       <div className="route-fill compare-page duplicate-compare-page">
         <GlassPanel className="compare-toolbar-panel">
           <div className="compare-title">
@@ -394,6 +398,7 @@ export function ComparePage() {
           </div>
         </GlassPanel>
       </div>
+      </Translated>
     )
   }
 
@@ -454,6 +459,7 @@ export function ComparePage() {
   }
 
   return (
+    <Translated>
     <div className="route-fill compare-page">
       <GlassPanel className="compare-toolbar-panel">
         <div className="compare-title">
@@ -743,6 +749,7 @@ export function ComparePage() {
         </GlassPanel>
       </div>
       {videoContextMenu && createPortal(
+        <Translated>
         <div
           className="video-context-menu"
           style={{ left: videoContextMenu.x, top: videoContextMenu.y }}
@@ -764,10 +771,12 @@ export function ComparePage() {
           <button className="danger" type="button" role="menuitem" onClick={() => void deleteContextVideoFile()}>
             <Trash2 />删除视频文件
           </button>
-        </div>,
+        </div>
+        </Translated>,
         document.body,
       )}
     </div>
+    </Translated>
   )
 }
 
@@ -931,6 +940,7 @@ function VideoPreview({
   }, [comparisonKey, comparisonOptions, frameIndex, normalizedPath, pathExists, timestamp, viewMode])
 
   return (
+    <Translated>
     <article className="frame-preview-card video-preview-card" onContextMenu={onContextMenu}>
       <div className="frame-preview-head">
         <div>
@@ -1001,6 +1011,7 @@ function VideoPreview({
         )}
       </dl>
     </article>
+    </Translated>
   )
 }
 

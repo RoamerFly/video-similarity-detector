@@ -2,6 +2,7 @@ export type ResizeMode = 'center_crop' | 'letterbox'
 export type DeviceMode = 'cpu' | 'cuda' | 'auto'
 export type PortraitRotation = 'left_90' | 'right_90'
 export type AnalysisMode = 'video_similarity' | 'duplicate_file'
+export type AppLanguage = 'zh-CN' | 'en-US'
 export type ErrorTolerancePreset = 'strict' | 'balanced' | 'lenient' | 'failure_only' | 'custom'
 export type BuiltInAnalysisPresetId = 'ultra_fast' | 'fast' | 'normal' | 'precise' | 'perfect'
 export type EditableAnalysisPresetId = BuiltInAnalysisPresetId | 'custom'
@@ -71,6 +72,7 @@ export interface SettingsSnapshot {
   checkEnvOnStartup: boolean
   openMaximized: boolean
   closeBehavior: CloseBehavior
+  appLanguage: AppLanguage
   analysisMode: AnalysisMode
   selectedAnalysisPreset: AnalysisPresetId
   customAnalysisPresetSource: BuiltInAnalysisPresetId
@@ -241,6 +243,7 @@ export const defaultSettings: SettingsSnapshot = {
   checkEnvOnStartup: true,
   openMaximized: true,
   closeBehavior: 'ask',
+  appLanguage: 'zh-CN',
   selectedAnalysisPreset: 'normal',
   customAnalysisPresetSource: 'normal',
   customAnalysisPresets: cloneEditableAnalysisPresets(),
