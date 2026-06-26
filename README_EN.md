@@ -83,23 +83,23 @@ The images below are captured from the real desktop app.
 
 #### Analysis Tasks
 
-![Analysis Tasks](docs/screenshots/analyze.png)
+![Analysis Tasks](docs/screenshots-en/analyze.png)
 
 #### Results Overview
 
-![Results Overview](docs/screenshots/results.png)
+![Results Overview](docs/screenshots-en/results.png)
 
 #### Compare View
 
-![Compare View](docs/screenshots/compare.png)
+![Compare View](docs/screenshots-en/compare.png)
 
 #### Multi-track Merge Editor
 
-![Multi-track Merge Editor](docs/screenshots/merge.png)
+![Multi-track Merge Editor](docs/screenshots-en/merge.png)
 
 #### Settings
 
-![Settings](docs/screenshots/settings.png)
+![Settings](docs/screenshots-en/settings.png)
 
 ### Supported Formats
 
