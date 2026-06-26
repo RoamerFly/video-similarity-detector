@@ -89,6 +89,15 @@ jobs:
           chmod +x scripts/prepare-ffmpeg-runtime.sh
           ./scripts/prepare-ffmpeg-runtime.sh linux-x64
 
+      - name: Set up updater signing key
+        shell: bash
+        run: |
+          mkdir -p desktop/.tauri
+          echo "$TAURI_UPDATER_PRIVATE_KEY" > desktop/.tauri/updater-key.private
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$PWD/desktop/.tauri/updater-key.private" >> "$GITHUB_ENV"
+        env:
+          TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+
       - name: Build portable application directory
         working-directory: desktop
         run: |
@@ -255,6 +264,15 @@ jobs:
           .\scripts\prepare-ffmpeg-runtime.ps1 `
             -DestinationDir "desktop\${{ matrix.env_dir }}"
 
+      - name: Set up updater signing key
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop\.tauri | Out-Null
+          $env:TAURI_UPDATER_PRIVATE_KEY | Out-File -Encoding ASCII -NoNewline -FilePath desktop\.tauri\updater-key.private
+          "TAURI_SIGNING_PRIVATE_KEY_PATH=$pwd\desktop\.tauri\updater-key.private" | Out-File -Append -Encoding UTF8 -FilePath $env:GITHUB_ENV
+        env:
+          TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+
       - name: Build portable directory and installer
         shell: pwsh
         working-directory: desktop
@@ -384,6 +402,15 @@ jobs:
         run: |
           chmod +x scripts/prepare-ffmpeg-runtime.sh
           ./scripts/prepare-ffmpeg-runtime.sh macos-${{ matrix.arch }}
+
+      - name: Set up updater signing key
+        shell: bash
+        run: |
+          mkdir -p desktop/.tauri
+          echo "$TAURI_UPDATER_PRIVATE_KEY" > desktop/.tauri/updater-key.private
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$PWD/desktop/.tauri/updater-key.private" >> "$GITHUB_ENV"
+        env:
+          TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
 
       - name: Build portable application directory
         working-directory: desktop
