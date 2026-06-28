@@ -824,7 +824,7 @@ if ($SkipTauriBuild) {
         }
     } | ConvertTo-Json -Depth 5
     Set-Content -LiteralPath $tauriConfigOverride -Value $tauriOverride -Encoding ASCII
-    Invoke-Checked { npx tauri build --features custom-protocol --config $tauriConfigOverride } "Tauri installer build failed."
+    Invoke-Checked { npx tauri build --ci --features custom-protocol --config $tauriConfigOverride } "Tauri installer build failed."
 } else {
     $tauriConfigOverride = Join-Path $env:TEMP "video-similarity-tauri-build-override.json"
     $tauriOverride = @{
@@ -839,7 +839,7 @@ if ($SkipTauriBuild) {
         }
     } | ConvertTo-Json -Depth 5
     Set-Content -LiteralPath $tauriConfigOverride -Value $tauriOverride -Encoding ASCII
-    Invoke-Checked { npx tauri build --no-bundle --features custom-protocol --config $tauriConfigOverride } "Portable release exe build failed."
+    Invoke-Checked { npx tauri build --ci --no-bundle --features custom-protocol --config $tauriConfigOverride } "Portable release exe build failed."
 }
 
 Write-Step "[8/9] Creating portable $DistName package..."

@@ -208,7 +208,7 @@ $override = @{
 Set-Content -LiteralPath $overridePath -Value $override -Encoding ASCII
 try {
     Invoke-Checked {
-        npx tauri build --no-bundle --features custom-protocol --config $overridePath
+        npx tauri build --ci --no-bundle --features custom-protocol --config $overridePath
     } "Tauri GPU test EXE build failed."
 } finally {
     Remove-Item -LiteralPath $overridePath -Force -ErrorAction SilentlyContinue

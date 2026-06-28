@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Video Similarity",
-  "version": "0.2.12",
+  "version": "1.0.0",
   "identifier": "com.videosimilarity.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -64,6 +64,9 @@
         "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEzRDI1QjdFMzcxODYwMjUKUldRbFlCZzNmbHZTRS9pM0t2WXAzc3hZNSszVU5VN0VjYkl5MG9zVkFKbmpQRGVvRzh0Y2xpWHUK",
+      "windows": {
+        "installMode": "passive"
+      },
       "dialog": false
     },
     "shell": {

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.2.8"
+        description: "Release tag, for example v1.0.0"
         required: true
-        default: "v0.2.8"
+        default: "v1.0.0"
         type: string
       release_name:
         description: "Optional release title"
@@ -93,10 +93,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/.tauri
-          echo "$TAURI_UPDATER_PRIVATE_KEY" > desktop/.tauri/updater-key.private
+          key="${TAURI_UPDATER_PRIVATE_KEY:-${TAURI_SIGNING_PRIVATE_KEY:-}}"
+          if [ -z "$key" ]; then
+            echo "::error::Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
+            exit 1
+          fi
+          printf '%s' "$key" > desktop/.tauri/updater-key.private
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
           echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$PWD/desktop/.tauri/updater-key.private" >> "$GITHUB_ENV"
+          password="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password" >> "$GITHUB_ENV"
         env:
           TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build portable application directory
         working-directory: desktop
@@ -268,10 +279,36 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path desktop\.tauri | Out-Null
-          $env:TAURI_UPDATER_PRIVATE_KEY | Out-File -Encoding ASCII -NoNewline -FilePath desktop\.tauri\updater-key.private
+          $key = if ($env:TAURI_UPDATER_PRIVATE_KEY) {
+            $env:TAURI_UPDATER_PRIVATE_KEY
+          } elseif ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            $env:TAURI_SIGNING_PRIVATE_KEY
+          } else {
+            ""
+          }
+          if (-not $key) {
+            throw "Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
+          }
+          $key | Out-File -Encoding ASCII -NoNewline -FilePath desktop\.tauri\updater-key.private
+          "TAURI_SIGNING_PRIVATE_KEY=$key" | Out-File -Append -Encoding UTF8 -FilePath $env:GITHUB_ENV
           "TAURI_SIGNING_PRIVATE_KEY_PATH=$pwd\desktop\.tauri\updater-key.private" | Out-File -Append -Encoding UTF8 -FilePath $env:GITHUB_ENV
+          $password = if ($env:TAURI_UPDATER_PRIVATE_KEY_PASSWORD) {
+            $env:TAURI_UPDATER_PRIVATE_KEY_PASSWORD
+          } elseif ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+            $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          } else {
+            ""
+          }
+          if ($password) {
+            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password" | Out-File -Append -Encoding UTF8 -FilePath $env:GITHUB_ENV
+          } else {
+            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" | Out-File -Append -Encoding UTF8 -FilePath $env:GITHUB_ENV
+          }
         env:
           TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build portable directory and installer
         shell: pwsh
@@ -347,6 +384,25 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $installerOutput)) {
             throw "Interactive Windows installer was not generated."
           }
+          $passwordArg = "--password=$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          npm run tauri -- signer sign $passwordArg $installerOutput
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path "$installerOutput.sig")) {
+            throw "Interactive Windows installer signature was not generated."
+          }
+          $nsisDir = Join-Path $bundleDir "nsis"
+          $updaterSource = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $updaterSource) {
+            throw "Tauri updater installer was not generated."
+          }
+          $updaterSig = Get-Item -LiteralPath "$($updaterSource.FullName).sig" -ErrorAction SilentlyContinue
+          if (-not $updaterSig) {
+            throw "Tauri updater signature was not generated. Check the updater signing key secret."
+          }
+          $updaterOutput = "release-assets\$base-updater.exe"
+          Copy-Item -LiteralPath $updaterSource.FullName -Destination $updaterOutput -Force
+          Copy-Item -LiteralPath $updaterSig.FullName -Destination "$updaterOutput.sig" -Force
           $uninstallerEntry = & 7z l -ba $portableZip | Select-String "uninstall\.exe$"
           if ($LASTEXITCODE -ne 0 -or $null -eq $uninstallerEntry) {
             throw "uninstall.exe was not added to the Windows package."
@@ -407,10 +463,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/.tauri
-          echo "$TAURI_UPDATER_PRIVATE_KEY" > desktop/.tauri/updater-key.private
+          key="${TAURI_UPDATER_PRIVATE_KEY:-${TAURI_SIGNING_PRIVATE_KEY:-}}"
+          if [ -z "$key" ]; then
+            echo "::error::Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
+            exit 1
+          fi
+          printf '%s' "$key" > desktop/.tauri/updater-key.private
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
           echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$PWD/desktop/.tauri/updater-key.private" >> "$GITHUB_ENV"
+          password="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password" >> "$GITHUB_ENV"
         env:
           TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build portable application directory
         working-directory: desktop
@@ -527,6 +594,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
@@ -600,9 +672,15 @@ jobs:
             "${APP_NAME}-${TAG_NAME}-macos-x64-installer.dmg"
             "${APP_NAME}-${TAG_NAME}-macos-x64-portable.zip"
             "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-installer.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-installer.exe.sig"
             "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-portable.zip"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-updater.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-updater.exe.sig"
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-installer.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-installer.exe.sig"
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-portable.zip"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-updater.exe"
+            "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-updater.exe.sig"
           )
           test -f "model-assets/clip-vit-base-patch32.zip" || {
             echo "Missing model asset: clip-vit-base-patch32.zip" >&2
@@ -650,6 +728,13 @@ jobs:
             fi
           } > release_body.md
           cat release_body.md
+
+      - name: Generate updater metadata
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/finalize-updater-metadata.mjs "$TAG_NAME" "$GITHUB_REPOSITORY" release-assets release_body.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

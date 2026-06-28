@@ -1,6 +1,8 @@
+import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { BarChart3, Clapperboard, Grid2X2, Images, Settings } from 'lucide-react'
 import { useI18n } from '@/i18n/useI18n'
+import { getAppInfo } from '@/services/backend'
 import { cn } from '@/utils/cn'
 
 const navItems = [
@@ -13,6 +15,22 @@ const navItems = [
 
 export function Sidebar() {
   const { t } = useI18n()
+  const [version, setVersion] = useState('')
+
+  useEffect(() => {
+    let active = true
+    getAppInfo()
+      .then((info) => {
+        if (active) setVersion(info.version)
+      })
+      .catch(() => {
+        if (active) setVersion('')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
   return (
     <aside className="app-sidebar">
       <nav className="sidebar-nav" aria-label={t('主导航')}>
@@ -35,7 +53,7 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="version-pill">v1.0.0</div>
+      <div className="version-pill">{version ? `v${version}` : 'v...'}</div>
     </aside>
   )
 }

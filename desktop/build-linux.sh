@@ -434,7 +434,7 @@ if [[ "$SKIP_TAURI_BUILD" == "1" ]]; then
 else
   override="$(mktemp)"
   printf '{"build":{"beforeBuildCommand":""}}\n' > "$override"
-  npx tauri build --no-bundle --features custom-protocol --config "$override"
+  npx tauri build --ci --no-bundle --features custom-protocol --config "$override"
   rm -f "$override"
 fi
 

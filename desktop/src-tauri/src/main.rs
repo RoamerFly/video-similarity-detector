@@ -96,6 +96,41 @@ struct UpdateDownloadProgress {
     stage: String,
 }
 
+fn updater_target_for_build(build_flavor: &str) -> Option<String> {
+    if cfg!(target_os = "windows") {
+        Some(format!("windows-x86_64-{build_flavor}"))
+    } else {
+        None
+    }
+}
+
+fn updater_metadata_unavailable_message(error: impl std::fmt::Display) -> String {
+    let detail = error.to_string();
+    if detail.contains("Could not fetch a valid release JSON") {
+        format!(
+            "自动更新元数据暂不可用，请打开 GitHub 发布页下载最新版。详情：{detail}"
+        )
+    } else {
+        format!("检查更新通道暂不可用，请打开 GitHub 发布页下载最新版。详情：{detail}")
+    }
+}
+
+fn updater_install_error_message(error: impl std::fmt::Display) -> String {
+    let detail = error.to_string();
+    if detail.contains("os error 225")
+        || detail.contains("contains a virus")
+        || detail.contains("potentially unwanted")
+        || detail.contains("病毒")
+        || detail.contains("潜在的垃圾软件")
+    {
+        format!(
+            "Windows 安全中心拦截了更新安装包，已停止自动安装。请从 GitHub 发布页手动下载，并只在确认来源可信后按系统安全提示处理。详情：{detail}"
+        )
+    } else {
+        format!("下载并安装更新失败: {detail}")
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct VideoFile {
@@ -930,8 +965,11 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> 
     let install_type = detect_install_type(&root);
     let install_root = resolve_install_root()?;
 
-    let updater = app
-        .updater_builder()
+    let mut updater_builder = app.updater_builder();
+    if let Some(target) = updater_target_for_build(&build_flavor) {
+        updater_builder = updater_builder.target(target);
+    }
+    let updater = updater_builder
         .build()
         .map_err(|e| format!("初始化更新检查失败: {e}"))?;
 
@@ -972,65 +1010,77 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> 
                 message,
             })
         }
-        Ok(None) => {
-            Ok(UpdateInfo {
-                current_version: current_version.clone(),
-                latest_version: current_version.clone(),
-                update_available: false,
-                release_url: RELEASES_LATEST_PAGE_URL.to_string(),
-                release_notes: String::new(),
-                published_at: String::new(),
-                asset_name: String::new(),
-                asset_url: String::new(),
-                asset_size: 0,
-                build_flavor,
-                install_type,
-                install_root: path_to_string(install_root),
-                can_auto_install: false,
-                message: format!("当前已是最新版本 v{current_version}"),
-            })
-        }
-        Err(e) => Err(format!("检查更新失败: {e}")),
+        Ok(None) => Ok(UpdateInfo {
+            current_version: current_version.clone(),
+            latest_version: current_version.clone(),
+            update_available: false,
+            release_url: RELEASES_LATEST_PAGE_URL.to_string(),
+            release_notes: String::new(),
+            published_at: String::new(),
+            asset_name: String::new(),
+            asset_url: String::new(),
+            asset_size: 0,
+            build_flavor,
+            install_type,
+            install_root: path_to_string(install_root),
+            can_auto_install: false,
+            message: format!("当前已是最新版本 v{current_version}"),
+        }),
+        Err(e) => Ok(UpdateInfo {
+            current_version: current_version.clone(),
+            latest_version: current_version,
+            update_available: false,
+            release_url: RELEASES_LATEST_PAGE_URL.to_string(),
+            release_notes: String::new(),
+            published_at: String::new(),
+            asset_name: String::new(),
+            asset_url: String::new(),
+            asset_size: 0,
+            build_flavor,
+            install_type,
+            install_root: path_to_string(install_root),
+            can_auto_install: false,
+            message: updater_metadata_unavailable_message(e),
+        }),
     }
-}
-
-
-#[cfg(windows)]
-fn powershell_quote_path(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
 }
 
 #[tauri::command]
 async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let current_exe = std::env::current_exe().map_err(|e| format!("无法读取当前程序路径: {e}"))?;
-    let exe_stem = current_exe
-        .file_stem()
-        .and_then(|v| v.to_str())
-        .unwrap_or("video-similarity-desktop");
-    let temp_dir = std::env::temp_dir().join("video-similarity-updates");
-    fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("创建更新临时目录失败: {e}"))?;
-    let installer_path = temp_dir.join(format!("{exe_stem}-installer.exe"));
-
-    let updater = app
-        .updater_builder()
+    let root = resolve_project_root(&app)?;
+    let build_flavor = detect_build_flavor(&root);
+    let install_root = resolve_install_root()?;
+    let mut updater_builder = app.updater_builder();
+    if let Some(target) = updater_target_for_build(&build_flavor) {
+        updater_builder = updater_builder.target(target);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        updater_builder = updater_builder
+            .installer_arg("--update")
+            .installer_arg("--auto-start")
+            .installer_arg("--target")
+            .installer_arg(path_to_string(&install_root))
+            .installer_arg("--wait-pid")
+            .installer_arg(std::process::id().to_string());
+    }
+    let updater = updater_builder
         .build()
         .map_err(|e| format!("初始化更新器失败: {e}"))?;
 
     let update = updater
         .check()
         .await
-        .map_err(|e| format!("检查更新失败: {e}"))?
+        .map_err(updater_install_error_message)?
         .ok_or_else(|| "没有可用的更新。".to_string())?;
 
     let progress_app = app.clone();
+    let finished_app = app.clone();
     let total = Arc::new(std::sync::Mutex::new(None::<u64>));
     let total_for_cb = total.clone();
     let mut downloaded = 0u64;
-    let bytes = update
-        .download(
+    update
+        .download_and_install(
             move |chunk_len, content_len| {
                 downloaded += chunk_len as u64;
                 if content_len.is_some() {
@@ -1046,83 +1096,26 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
                             .filter(|t| *t > 0)
                             .map(|t| downloaded as f64 / t as f64 * 100.0)
                             .unwrap_or(0.0),
-                        stage: "正在下载更新安装包".to_string(),
+                        stage: "正在下载并验证更新安装包".to_string(),
                     },
                 );
             },
-            || {},
+            move || {
+                let _ = finished_app.emit(
+                    "update-download-progress",
+                    UpdateDownloadProgress {
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        progress: 100.0,
+                        stage: "更新包已验证，正在启动安装器".to_string(),
+                    },
+                );
+            },
         )
         .await
-        .map_err(|e| format!("下载更新安装包失败: {e}"))?;
+        .map_err(updater_install_error_message)?;
 
-    fs::write(&installer_path, &bytes)
-        .map_err(|e| format!("写入更新安装包失败: {e}"))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        let install_root = resolve_install_root()?;
-        let script_path = installer_path.with_extension("update.ps1");
-
-        let ps_installer = powershell_quote_path(&installer_path);
-        let ps_script = powershell_quote_path(&script_path);
-        let ps_root = powershell_quote_path(&install_root);
-        let pid = std::process::id();
-
-        let script = format!(
-            r#"$ErrorActionPreference = 'Stop'
-$pidToWait = {pid}
-$installer = {ps_installer}
-$log = "$installer.log"
-try {{
-  Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 1500
-  $proc = Start-Process -FilePath $installer -ArgumentList '--update','--auto-start','--target',{ps_root} -PassThru -Wait
-  if ($proc.ExitCode -ne 0) {{
-    throw "Installer exited with code $($proc.ExitCode)"
-  }}
-}} catch {{
-  Add-Content -LiteralPath $log -Value $_.Exception.ToString()
-}} finally {{
-  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath {ps_script} -Force -ErrorAction SilentlyContinue
-}}
-"#
-        );
-
-        fs::write(&script_path, &script)
-            .map_err(|e| format!("写入更新脚本失败: {e}"))?;
-
-        Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-File",
-            ])
-            .arg(&script_path)
-            .spawn()
-            .map_err(|e| format!("启动更新安装器失败: {e}"))?;
-
-        let _ = app.emit(
-            "update-download-progress",
-            UpdateDownloadProgress {
-                downloaded_bytes: 0,
-                total_bytes: 0,
-                progress: 100.0,
-                stage: "安装器已启动，应用即将退出".to_string(),
-            },
-        );
-        app.exit(0);
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = installer_path;
-        Err("当前平台暂不支持应用内覆盖安装，请从发布页下载安装包。".to_string())
-    }
+    Ok(())
 }
 
 #[tauri::command]
