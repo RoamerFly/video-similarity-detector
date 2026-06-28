@@ -100,11 +100,7 @@ jobs:
           fi
           printf '%s' "$key" > desktop/.tauri/updater-key.private
           password="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
-          delimiter="TAURI_SIGNING_KEY_$(date +%s%N)"
           {
-            echo "TAURI_SIGNING_PRIVATE_KEY<<$delimiter"
-            printf '%s\n' "$key"
-            echo "$delimiter"
             echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$PWD/desktop/.tauri/updater-key.private"
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password"
           } >> "$GITHUB_ENV"
@@ -302,11 +298,7 @@ jobs:
           } else {
             ""
           }
-          $delimiter = "TAURI_SIGNING_KEY_$([guid]::NewGuid().ToString('N'))"
           @(
-            "TAURI_SIGNING_PRIVATE_KEY<<$delimiter",
-            $key,
-            $delimiter,
             "TAURI_SIGNING_PRIVATE_KEY_PATH=$pwd\desktop\.tauri\updater-key.private",
             "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password"
           ) | Out-File -Append -Encoding UTF8 -FilePath $env:GITHUB_ENV
@@ -465,11 +457,7 @@ jobs:
           fi
           printf '%s' "$key" > desktop/.tauri/updater-key.private
           password="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
-          delimiter="TAURI_SIGNING_KEY_$(date +%s%N)"
           {
-            echo "TAURI_SIGNING_PRIVATE_KEY<<$delimiter"
-            printf '%s\n' "$key"
-            echo "$delimiter"
             echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$PWD/desktop/.tauri/updater-key.private"
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password"
           } >> "$GITHUB_ENV"
