@@ -446,6 +446,11 @@ export async function downloadAndInstallUpdate() {
   return invoke<void>('download_and_install_update')
 }
 
+export async function cancelUpdateDownload() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('cancel_update_download')
+}
+
 export async function openReleasePage(url: string) {
   if (!hasTauriRuntime()) {
     window.open(url, '_blank', 'noopener,noreferrer')

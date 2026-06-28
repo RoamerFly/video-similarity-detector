@@ -20,6 +20,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+tokio = { version = "1", features = ["time", "macros"] }
 
 [features]
 # this feature is used for production builds or when `devPath` points to the filesystem

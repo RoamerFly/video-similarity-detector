@@ -47,6 +47,11 @@ struct TaskState {
 }
 
 #[derive(Default)]
+struct UpdateCancelState {
+    cancel_requested: AtomicBool,
+}
+
+#[derive(Default)]
 struct MergeTaskState {
     current_pid: Mutex<Option<u32>>,
     cancel_requested: Mutex<bool>,
@@ -1047,7 +1052,12 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> 
 }
 
 #[tauri::command]
-async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
+async fn download_and_install_update(
+    app: tauri::AppHandle,
+    cancel_state: State<'_, UpdateCancelState>,
+) -> Result<(), String> {
+    cancel_state.cancel_requested.store(false, Ordering::SeqCst);
+
     let root = resolve_project_root(&app)?;
     let build_flavor = detect_build_flavor(&root);
     let install_root = resolve_install_root()?;
@@ -1080,42 +1090,63 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
     let total = Arc::new(std::sync::Mutex::new(None::<u64>));
     let total_for_cb = total.clone();
     let mut downloaded = 0u64;
-    update
-        .download_and_install(
-            move |chunk_len, content_len| {
-                downloaded += chunk_len as u64;
-                if content_len.is_some() {
-                    *total_for_cb.lock().unwrap() = content_len;
-                }
-                let total = *total_for_cb.lock().unwrap();
-                let _ = progress_app.emit(
-                    "update-download-progress",
-                    UpdateDownloadProgress {
-                        downloaded_bytes: downloaded,
-                        total_bytes: total.unwrap_or(0),
-                        progress: total
-                            .filter(|t| *t > 0)
-                            .map(|t| downloaded as f64 / t as f64 * 100.0)
-                            .unwrap_or(0.0),
-                        stage: "正在下载并验证更新安装包".to_string(),
-                    },
-                );
-            },
-            move || {
-                let _ = finished_app.emit(
-                    "update-download-progress",
-                    UpdateDownloadProgress {
-                        downloaded_bytes: 0,
-                        total_bytes: 0,
-                        progress: 100.0,
-                        stage: "更新包已验证，正在启动安装器".to_string(),
-                    },
-                );
-            },
-        )
-        .await
-        .map_err(updater_install_error_message)?;
 
+    let download_future = update.download_and_install(
+        move |chunk_len, content_len| {
+            downloaded += chunk_len as u64;
+            if content_len.is_some() {
+                *total_for_cb.lock().unwrap() = content_len;
+            }
+            let total = *total_for_cb.lock().unwrap();
+            let _ = progress_app.emit(
+                "update-download-progress",
+                UpdateDownloadProgress {
+                    downloaded_bytes: downloaded,
+                    total_bytes: total.unwrap_or(0),
+                    progress: total
+                        .filter(|t| *t > 0)
+                        .map(|t| downloaded as f64 / t as f64 * 100.0)
+                        .unwrap_or(0.0),
+                    stage: "正在下载并验证更新安装包".to_string(),
+                },
+            );
+        },
+        move || {
+            let _ = finished_app.emit(
+                "update-download-progress",
+                UpdateDownloadProgress {
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    progress: 100.0,
+                    stage: "更新包已验证，正在启动安装器".to_string(),
+                },
+            );
+        },
+    );
+
+    tokio::select! {
+        result = download_future => {
+            result.map_err(updater_install_error_message)?;
+            Ok(())
+        }
+        _ = cancel_check(cancel_state) => {
+            Err("下载已被用户取消".to_string())
+        }
+    }
+}
+
+async fn cancel_check(cancel_state: State<'_, UpdateCancelState>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if cancel_state.cancel_requested.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_update_download(cancel_state: State<'_, UpdateCancelState>) -> Result<(), String> {
+    cancel_state.cancel_requested.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -4390,6 +4421,7 @@ fn main() {
             show_main_window(app);
         }))
         .manage(TaskState::default())
+        .manage(UpdateCancelState::default())
         .manage(MergeTaskState::default())
         .manage(FileMoveState::default())
         .plugin(tauri_plugin_shell::init())
@@ -4429,6 +4461,7 @@ fn main() {
             get_app_info,
             check_for_updates,
             download_and_install_update,
+            cancel_update_download,
             open_release_page,
             select_video_directory,
             select_video_files,

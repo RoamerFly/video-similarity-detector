@@ -4,6 +4,7 @@ import {
   AlertCircle,
   BookOpen,
   CheckCircle2,
+  CircleStop,
   Download,
   ExternalLink,
   FileSearch,
@@ -32,6 +33,7 @@ import {
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
 import { Translated } from '@/i18n/useI18n'
 import {
+  cancelUpdateDownload,
   checkPythonEnv,
   checkForUpdates,
   clearCacheItems,
@@ -957,10 +959,22 @@ function UpdateDialog({
           <RefreshCw size={17} className={checking ? 'spin-slow' : ''} />
           {checking ? '检查中' : '检查更新'}
         </NeonButton>
-        {update?.canAutoInstall ? (
+        {installing ? (
+          <NeonButton
+            type="button"
+            onClick={() => {
+              cancelUpdateDownload().catch(() => {})
+              setInstalling(false)
+              setProgress(null)
+            }}
+          >
+            <CircleStop size={17} />
+            取消下载
+          </NeonButton>
+        ) : update?.canAutoInstall ? (
           <NeonButton type="button" onClick={() => void handleInstallUpdate()} disabled={installing}>
             <Download size={17} />
-            {installing ? '下载中' : '立即更新'}
+            立即更新
           </NeonButton>
         ) : update?.updateAvailable && update.releaseUrl ? (
           <NeonButton variant="outline" type="button" onClick={() => void openReleasePage(update.releaseUrl)}>
