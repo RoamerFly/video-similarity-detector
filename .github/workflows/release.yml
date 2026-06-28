@@ -98,18 +98,6 @@ jobs:
             echo "::error::Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
             exit 1
           fi
-          key="$(KEY="$key" node <<'NODE'
-          const key = process.env.KEY || ''
-          let normalized = key
-          try {
-            const decoded = Buffer.from(key.trim(), 'base64').toString('utf8')
-            if (/^untrusted comment:/m.test(decoded) && /(secret|private) key/i.test(decoded)) {
-              normalized = decoded
-            }
-          } catch {}
-          process.stdout.write(normalized)
-          NODE
-          )"
           printf '%s' "$key" > desktop/.tauri/updater-key.private
           password="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
           delimiter="TAURI_SIGNING_KEY_$(date +%s%N)"
@@ -306,13 +294,6 @@ jobs:
           if (-not $key) {
             throw "Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
           }
-          try {
-            $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($key.Trim()))
-            if ($decoded -match "(?m)^untrusted comment:" -and $decoded -match "(?i)(secret|private) key") {
-              $key = $decoded
-            }
-          } catch {
-          }
           [System.IO.File]::WriteAllText("$pwd\desktop\.tauri\updater-key.private", $key, [System.Text.Encoding]::ASCII)
           $password = if ($env:TAURI_UPDATER_PRIVATE_KEY_PASSWORD) {
             $env:TAURI_UPDATER_PRIVATE_KEY_PASSWORD
@@ -482,18 +463,6 @@ jobs:
             echo "::error::Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
             exit 1
           fi
-          key="$(KEY="$key" node <<'NODE'
-          const key = process.env.KEY || ''
-          let normalized = key
-          try {
-            const decoded = Buffer.from(key.trim(), 'base64').toString('utf8')
-            if (/^untrusted comment:/m.test(decoded) && /(secret|private) key/i.test(decoded)) {
-              normalized = decoded
-            }
-          } catch {}
-          process.stdout.write(normalized)
-          NODE
-          )"
           printf '%s' "$key" > desktop/.tauri/updater-key.private
           password="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
           delimiter="TAURI_SIGNING_KEY_$(date +%s%N)"
