@@ -318,12 +318,14 @@ jobs:
             .\build-windows.ps1 `
               -SkipNpmAudit `
               -CleanPythonEnv `
+              -BuildInstaller `
               -GpuBuild `
               -Python python
           } else {
             .\build-windows.ps1 `
               -SkipNpmAudit `
               -CleanPythonEnv `
+              -BuildInstaller `
               -Python python
           }
           if ($LASTEXITCODE -ne 0) {
@@ -389,10 +391,17 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or !(Test-Path "$installerOutput.sig")) {
             throw "Interactive Windows installer signature was not generated."
           }
+          $bundleDir = "desktop\src-tauri\target\release\bundle"
           $nsisDir = Join-Path $bundleDir "nsis"
           $updaterSource = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
+          if (-not $updaterSource) {
+            $installerDir = Join-Path $dist "installer"
+            $updaterSource = Get-ChildItem -Path $installerDir -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+          }
           if (-not $updaterSource) {
             throw "Tauri updater installer was not generated."
           }

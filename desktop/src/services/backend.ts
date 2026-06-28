@@ -85,9 +85,21 @@ export interface VideoMergeAudioItem {
   trimEnd?: number
 }
 
+export interface VideoMergeTextItem {
+  text: string
+  startTime: number
+  duration: number
+  x: number
+  y: number
+  fontSize: number
+  color: string
+  backgroundColor: string
+}
+
 export interface VideoMergeConfig {
   inputs: VideoMergeItem[]
   audioTracks: VideoMergeAudioItem[]
+  textTracks: VideoMergeTextItem[]
   outputDir: string
   outputName: string
   width: number
@@ -455,6 +467,11 @@ export async function selectVideoFiles() {
 export async function selectAudioFiles() {
   if (!hasTauriRuntime()) throw new Error('音频选择需要在 Tauri 应用中运行。')
   return invoke<string[]>('select_audio_files')
+}
+
+export async function selectSubtitleFiles() {
+  if (!hasTauriRuntime()) throw new Error('字幕选择需要在 Tauri 应用中运行。')
+  return invoke<string[]>('select_subtitle_files')
 }
 
 export async function selectOutputDirectory() {

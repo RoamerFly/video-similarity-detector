@@ -46,6 +46,19 @@ export interface MergeAudioItem {
   sourceClipId?: string
 }
 
+export interface MergeTextItem {
+  id: string
+  text: string
+  trackId: string
+  startTime: number
+  duration: number
+  x: number
+  y: number
+  fontSize: number
+  color: string
+  backgroundColor: string
+}
+
 export interface MergeSettings {
   outputDir: string
   outputName: string
@@ -85,16 +98,20 @@ type MergeVideoPatch = Partial<Pick<
 interface MergeHistorySnapshot {
   items: MergeQueueItem[]
   audioItems: MergeAudioItem[]
+  textItems: MergeTextItem[]
   videoTracks: MergeTrack[]
   audioTracks: MergeTrack[]
+  textTracks: MergeTrack[]
   settings: MergeSettings
 }
 
 interface MergeState {
   items: MergeQueueItem[]
   audioItems: MergeAudioItem[]
+  textItems: MergeTextItem[]
   videoTracks: MergeTrack[]
   audioTracks: MergeTrack[]
+  textTracks: MergeTrack[]
   settings: MergeSettings
   running: boolean
   progress: number
@@ -109,8 +126,10 @@ interface MergeState {
   historyTransaction: MergeHistorySnapshot | null
   addVideoTrack: () => string
   addAudioTrack: () => string
+  addTextTrack: () => string
   removeVideoTrack: (id: string) => boolean
   removeAudioTrack: (id: string) => boolean
+  removeTextTrack: (id: string) => boolean
   addVideo: (path: string, name?: string, trackId?: string) => boolean
   addVideos: (videos: Array<{ path: string; name?: string }>, trackId?: string) => number
   removeVideo: (id: string) => void
@@ -129,6 +148,10 @@ interface MergeState {
   ) => void
   removeAudio: (id: string) => void
   clearAudio: () => void
+  addText: (text?: Partial<Omit<MergeTextItem, 'id'>>) => string
+  updateText: (id: string, patch: Partial<Omit<MergeTextItem, 'id'>>, recordHistory?: boolean) => void
+  removeText: (id: string) => void
+  clearText: () => void
   setSettings: (patch: Partial<MergeSettings>, recordHistory?: boolean) => void
   beginHistoryTransaction: () => void
   endHistoryTransaction: () => void
@@ -144,6 +167,7 @@ interface MergeState {
 
 const defaultVideoTrack: MergeTrack = { id: 'video-track-1', name: '视频线 1' }
 const defaultAudioTrack: MergeTrack = { id: 'audio-track-1', name: '音频线 1' }
+const defaultTextTrack: MergeTrack = { id: 'text-track-1', name: '文本线 1' }
 
 const defaultSettings: MergeSettings = {
   outputDir: 'data/merged',
@@ -168,8 +192,10 @@ export const useMergeStore = create<MergeState>()(
     (set, get) => ({
       items: [],
       audioItems: [],
+      textItems: [],
       videoTracks: [{ ...defaultVideoTrack }],
       audioTracks: [{ ...defaultAudioTrack }],
+      textTracks: [{ ...defaultTextTrack }],
       settings: defaultSettings,
       running: false,
       progress: 0,
@@ -193,6 +219,13 @@ export const useMergeStore = create<MergeState>()(
         const id = createId('audio-track')
         set((state) => commitHistory(state, {
           audioTracks: [...state.audioTracks, { id, name: `音频线 ${state.audioTracks.length + 1}` }],
+        }))
+        return id
+      },
+      addTextTrack: () => {
+        const id = createId('text-track')
+        set((state) => commitHistory(state, {
+          textTracks: [...state.textTracks, { id, name: `文本线 ${state.textTracks.length + 1}` }],
         }))
         return id
       },
@@ -223,6 +256,21 @@ export const useMergeStore = create<MergeState>()(
             ? { ...item, trackId: fallbackTrackId }
             : item)
           return commitHistory(current, { audioTracks, audioItems })
+        })
+        return true
+      },
+      removeTextTrack: (id) => {
+        const state = get()
+        if (state.textTracks.length <= 1 || !state.textTracks.some((track) => track.id === id)) return false
+        set((current) => {
+          const textTracks = current.textTracks
+            .filter((track) => track.id !== id)
+            .map((track, index) => ({ ...track, name: `文本线 ${index + 1}` }))
+          const fallbackTrackId = textTracks[0].id
+          const textItems = current.textItems.map((item) => item.trackId === id
+            ? { ...item, trackId: fallbackTrackId }
+            : item)
+          return commitHistory(current, { textTracks, textItems })
         })
         return true
       },
@@ -364,6 +412,37 @@ export const useMergeStore = create<MergeState>()(
         audioItems: state.audioItems.filter((item) => item.id !== id),
       })),
       clearAudio: () => set((state) => commitHistory(state, { audioItems: [] })),
+      addText: (text) => {
+        const id = createId('text')
+        set((state) => {
+          const trackId = validTrackId(state.textTracks, text?.trackId, defaultTextTrack.id)
+          return commitHistory(state, {
+            textItems: [...state.textItems, normalizeTextItem({
+              id,
+              text: text?.text ?? '自定义文本',
+              trackId,
+              startTime: text?.startTime ?? 0,
+              duration: text?.duration ?? 3,
+              x: text?.x ?? 0.5,
+              y: text?.y ?? 0.82,
+              fontSize: text?.fontSize ?? 48,
+              color: text?.color ?? '#ffffff',
+              backgroundColor: text?.backgroundColor ?? 'rgba(0,0,0,0.45)',
+            }, state.textTracks)],
+          })
+        })
+        return id
+      },
+      updateText: (id, patch, recordHistory = true) => set((state) => {
+        const textItems = state.textItems.map((item) => item.id === id
+          ? normalizeTextItem({ ...item, ...patch }, state.textTracks)
+          : item)
+        return recordHistory ? commitHistory(state, { textItems }) : { textItems }
+      }),
+      removeText: (id) => set((state) => commitHistory(state, {
+        textItems: state.textItems.filter((item) => item.id !== id),
+      })),
+      clearText: () => set((state) => commitHistory(state, { textItems: [] })),
       setSettings: (patch, recordHistory = true) => set((state) => {
         const settings = normalizeSettings({ ...state.settings, ...patch })
         return recordHistory ? commitHistory(state, { settings }) : { settings }
@@ -432,21 +511,26 @@ export const useMergeStore = create<MergeState>()(
       partialize: (state) => ({
         items: state.items,
         audioItems: state.audioItems,
+        textItems: state.textItems,
         videoTracks: state.videoTracks,
         audioTracks: state.audioTracks,
+        textTracks: state.textTracks,
         settings: state.settings,
       }),
       merge: (persisted, current) => {
         const saved = persisted as Partial<MergeState> | undefined
         const videoTracks = normalizeTracks(saved?.videoTracks, defaultVideoTrack, '视频线')
         const audioTracks = normalizeTracks(saved?.audioTracks, defaultAudioTrack, '音频线')
+        const textTracks = normalizeTracks(saved?.textTracks, defaultTextTrack, '文本线')
         return {
           ...current,
           ...saved,
           videoTracks,
           audioTracks,
+          textTracks,
           items: (saved?.items ?? []).map((item) => normalizeVideoItem(item, videoTracks)),
           audioItems: (saved?.audioItems ?? []).map((item) => normalizeAudioItem(item, audioTracks)),
+          textItems: (saved?.textItems ?? []).map((item) => normalizeTextItem(item, textTracks)),
           settings: normalizeSettings(saved?.settings),
           running: false,
           progress: 0,
@@ -467,7 +551,7 @@ export const useMergeStore = create<MergeState>()(
 
 function commitHistory(
   state: MergeState,
-  patch: Partial<Pick<MergeState, 'items' | 'audioItems' | 'videoTracks' | 'audioTracks' | 'settings'>>,
+  patch: Partial<Pick<MergeState, 'items' | 'audioItems' | 'textItems' | 'videoTracks' | 'audioTracks' | 'textTracks' | 'settings'>>,
 ) {
   if (state.historyTransaction) return patch
   const undoStack = [...state.undoStack, createSnapshot(state)].slice(-historyLimit)
@@ -481,13 +565,15 @@ function commitHistory(
 }
 
 function createSnapshot(
-  state: Pick<MergeState, 'items' | 'audioItems' | 'videoTracks' | 'audioTracks' | 'settings'>,
+  state: Pick<MergeState, 'items' | 'audioItems' | 'textItems' | 'videoTracks' | 'audioTracks' | 'textTracks' | 'settings'>,
 ): MergeHistorySnapshot {
   return {
     items: state.items.map((item) => ({ ...item })),
     audioItems: state.audioItems.map((item) => ({ ...item })),
+    textItems: state.textItems.map((item) => ({ ...item })),
     videoTracks: state.videoTracks.map((track) => ({ ...track })),
     audioTracks: state.audioTracks.map((track) => ({ ...track })),
+    textTracks: state.textTracks.map((track) => ({ ...track })),
     settings: { ...state.settings },
   }
 }
@@ -496,8 +582,10 @@ function cloneSnapshot(snapshot: MergeHistorySnapshot): MergeHistorySnapshot {
   return {
     items: snapshot.items.map((item) => ({ ...item })),
     audioItems: snapshot.audioItems.map((item) => ({ ...item })),
+    textItems: snapshot.textItems.map((item) => ({ ...item })),
     videoTracks: snapshot.videoTracks.map((track) => ({ ...track })),
     audioTracks: snapshot.audioTracks.map((track) => ({ ...track })),
+    textTracks: snapshot.textTracks.map((track) => ({ ...track })),
     settings: { ...snapshot.settings },
   }
 }
@@ -578,6 +666,24 @@ function normalizeAudioItem<T extends Partial<MergeAudioItem> & Pick<MergeAudioI
   }
 }
 
+function normalizeTextItem(
+  item: Partial<MergeTextItem>,
+  tracks: MergeTrack[],
+): MergeTextItem {
+  return {
+    id: item.id && item.id.includes('-') ? item.id : createId('text'),
+    text: String(item.text ?? '自定义文本').slice(0, 500),
+    trackId: validTrackId(tracks, item.trackId, tracks[0]?.id ?? defaultTextTrack.id),
+    startTime: Math.max(0, Number(item.startTime) || 0),
+    duration: Math.max(0.05, Number(item.duration) || 3),
+    x: clamp01(Number(item.x) || 0),
+    y: clamp01(Number(item.y) || 0),
+    fontSize: Math.max(8, Math.min(240, Number(item.fontSize) || 48)),
+    color: normalizeColor(item.color, '#ffffff'),
+    backgroundColor: normalizeColor(item.backgroundColor, 'rgba(0,0,0,0.45)'),
+  }
+}
+
 function normalizeSettings(settings?: Partial<MergeSettings>): MergeSettings {
   return {
     ...defaultSettings,
@@ -614,6 +720,13 @@ function normalizeRotation(rotation?: number): MergeRotation {
 
 function clamp01(value: number) {
   return Math.max(0, Math.min(1, value))
+}
+
+function normalizeColor(value: unknown, fallback: string) {
+  const text = String(value ?? '').trim()
+  if (/^#[0-9a-fA-F]{6}$/.test(text)) return text
+  if (/^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$/.test(text)) return text
+  return fallback
 }
 
 function createId(prefix: string) {

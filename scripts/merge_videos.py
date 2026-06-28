@@ -125,6 +125,38 @@ def safe_stem(value: str) -> str:
     return cleaned or f"merged_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
+def escape_drawtext(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace(":", "\\:")
+        .replace(",", "\\,")
+        .replace("%", "\\%")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+        .replace("\r", "\\n")
+    )
+
+
+def ffmpeg_color(value: str, fallback: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return "0x" + text[1:]
+    rgba = re.fullmatch(
+        r"rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(0|1|0?\.\d+))?\s*\)",
+        text,
+    )
+    if rgba:
+        red, green, blue, alpha = rgba.groups()
+        red_i = max(0, min(255, int(red)))
+        green_i = max(0, min(255, int(green)))
+        blue_i = max(0, min(255, int(blue)))
+        alpha_value = max(0.0, min(1.0, float(alpha) if alpha is not None else 1.0))
+        return f"0x{red_i:02x}{green_i:02x}{blue_i:02x}@{alpha_value:.3f}"
+    return fallback
+
+
 def unique_output_path(output_dir: Path, stem: str, suffix: str = ".mp4") -> Path:
     candidate = output_dir / f"{stem}{suffix}"
     if not candidate.exists():
@@ -360,7 +392,16 @@ def build_timeline_filter_graph(
     prepared = prepare_video_items(inputs, metadata)
     if not prepared:
         raise RuntimeError("时间线至少需要一个视频片段。")
-    total_duration = max(clip["timeline_end"] for clip in prepared)
+    text_tracks = config.get("textTracks") or []
+    text_end = max(
+        [0.0]
+        + [
+            max(0.0, number(item.get("startTime"))) + max(0.05, number(item.get("duration"), 3.0))
+            for item in text_tracks
+            if str(item.get("text", "")).strip()
+        ]
+    )
+    total_duration = max(max(clip["timeline_end"] for clip in prepared), text_end)
     intervals = timeline_intervals(prepared)
     width = even(int(number(config.get("width"), 1920)))
     height = even(int(number(config.get("height"), 1080)))
@@ -411,7 +452,35 @@ def build_timeline_filter_graph(
             )
             overlay_index += 1
             segment_index += 1
-    filters.append(f"[canvas{overlay_index}]trim=duration={total_duration:.6f},format=yuv420p[vout]")
+    text_input_label = f"canvas{overlay_index}"
+    for text_index, item in enumerate(text_tracks):
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        start = max(0.0, number(item.get("startTime")))
+        duration = max(0.05, number(item.get("duration"), 3.0))
+        end = min(total_duration, start + duration)
+        if end <= start:
+            continue
+        font_size = max(8, min(240, int(number(item.get("fontSize"), 48))))
+        x_ratio = max(0.0, min(1.0, number(item.get("x"), 0.5)))
+        y_ratio = max(0.0, min(1.0, number(item.get("y"), 0.82)))
+        next_label = f"textcanvas{text_index}"
+        filters.append(
+            f"[{text_input_label}]drawtext="
+            f"text='{escape_drawtext(text)}':"
+            f"x=min(max(0\\,w*{x_ratio:.6f}-text_w/2)\\,w-text_w):"
+            f"y=min(max(0\\,h*{y_ratio:.6f}-text_h/2)\\,h-text_h):"
+            f"fontsize={font_size}:"
+            f"fontcolor={ffmpeg_color(str(item.get('color', '')), 'white')}:"
+            "box=1:"
+            f"boxcolor={ffmpeg_color(str(item.get('backgroundColor', '')), 'black@0.45')}:"
+            "boxborderw=12:"
+            f"enable='between(t,{start:.6f},{end:.6f})'"
+            f"[{next_label}]"
+        )
+        text_input_label = next_label
+    filters.append(f"[{text_input_label}]trim=duration={total_duration:.6f},format=yuv420p[vout]")
 
     audio_labels: list[str] = []
     if bool(config.get("includeAudio", True)):

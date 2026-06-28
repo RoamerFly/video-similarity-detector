@@ -12,6 +12,7 @@ import {
   FolderOpen,
   Gauge,
   GripVertical,
+  Minus,
   Music2,
   Pause,
   Play,
@@ -24,6 +25,7 @@ import {
   SquareDashedMousePointer,
   SkipBack,
   Trash2,
+  Type,
   Undo2,
   Upload,
   Volume2,
@@ -45,10 +47,12 @@ import {
   localFileSrc,
   normalizeBackendError,
   probeVideoMetadata,
+  readTextFile,
   revealInFolder,
   runVideoMerge,
   selectAudioFiles,
   selectOutputDirectory,
+  selectSubtitleFiles,
   selectVideoFiles,
   type VideoMetadata,
 } from '@/services/backend'
@@ -59,6 +63,7 @@ import {
   type MergeQueueItem,
   type MergeRotation,
   type MergeSplitMode,
+  type MergeTextItem,
 } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -67,6 +72,8 @@ const audioExtensions = new Set(['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opu
 const videoExtensions = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'])
 const timelinePixelsPerSecond = 12
 const timelineMinimumWidth = 720
+const timelineZoomMinimum = 0.35
+const timelineZoomMaximum = 6
 const scrubMediaIntervalMs = 32
 const minimumOutputDimension = 16
 const maximumOutputDimension = 16384
@@ -101,11 +108,18 @@ interface AudioContextMenuState {
   audio: MergeAudioItem
 }
 
+interface TextContextMenuState {
+  x: number
+  y: number
+  text: MergeTextItem
+}
+
 interface TrackContextMenuState {
   x: number
   y: number
-  kind: 'video' | 'audio'
+  kind: 'video' | 'audio' | 'text'
   trackId: string
+  time?: number
 }
 
 interface CropGeometry {
@@ -154,6 +168,11 @@ export function MergePage() {
   const timelineSeekFrameRef = useRef<number | null>(null)
   const playheadDragFrameRef = useRef<number | null>(null)
   const playbackFrameRef = useRef<number | null>(null)
+  const keyboardStepRef = useRef<{ delay: number | null; repeat: number | null; direction: -1 | 1 | null }>({
+    delay: null,
+    repeat: null,
+    direction: null,
+  })
   const lastScrubMediaUpdateRef = useRef(0)
   const lastPlaybackSyncRef = useRef(0)
   const lastPlaybackUiUpdateRef = useRef(0)
@@ -163,8 +182,10 @@ export function MergePage() {
   const [audioDurations, setAudioDurations] = useState<Record<string, number>>({})
   const [selectedClipId, setSelectedClipId] = useState('')
   const [selectedAudioId, setSelectedAudioId] = useState('')
+  const [selectedTextId, setSelectedTextId] = useState('')
   const [playhead, setPlayhead] = useState(0)
   const [playing, setPlaying] = useState(false)
+  const [timelineZoom, setTimelineZoom] = useState(1)
   const [logsExpanded, setLogsExpanded] = useState(false)
   const [draggedClipId, setDraggedClipId] = useState('')
   const [draggedAudioId, setDraggedAudioId] = useState('')
@@ -172,6 +193,7 @@ export function MergePage() {
   const [dropActive, setDropActive] = useState(false)
   const [clipContextMenu, setClipContextMenu] = useState<ClipContextMenuState | null>(null)
   const [audioContextMenu, setAudioContextMenu] = useState<AudioContextMenuState | null>(null)
+  const [textContextMenu, setTextContextMenu] = useState<TextContextMenuState | null>(null)
   const [trackContextMenu, setTrackContextMenu] = useState<TrackContextMenuState | null>(null)
   const [cropEditing, setCropEditing] = useState(false)
   const [groupEditingKey, setGroupEditingKey] = useState('')
@@ -189,10 +211,11 @@ export function MergePage() {
   }, [playhead])
 
   useEffect(() => {
-    if (!clipContextMenu && !audioContextMenu && !trackContextMenu) return undefined
+    if (!clipContextMenu && !audioContextMenu && !textContextMenu && !trackContextMenu) return undefined
     const close = () => {
       setClipContextMenu(null)
       setAudioContextMenu(null)
+      setTextContextMenu(null)
       setTrackContextMenu(null)
     }
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -214,7 +237,7 @@ export function MergePage() {
       window.removeEventListener('scroll', closeOnScroll, true)
       window.removeEventListener('keydown', closeOnEscape)
     }
-  }, [audioContextMenu, clipContextMenu, trackContextMenu])
+  }, [audioContextMenu, clipContextMenu, textContextMenu, trackContextMenu])
 
   useEffect(() => {
     const paths = Array.from(new Set(merge.items.map((item) => item.path)))
@@ -272,14 +295,17 @@ export function MergePage() {
   const audioTimelineEnd = Math.max(0, ...merge.audioItems.map(
     (audio) => audio.startTime + audioDuration(audio, audioDurations, metadata),
   ))
-  const totalDuration = Math.max(videoDuration, audioTimelineEnd)
-  const timelineContentWidth = Math.max(timelineMinimumWidth, Math.ceil(totalDuration * timelinePixelsPerSecond))
+  const textTimelineEnd = Math.max(0, ...merge.textItems.map((item) => item.startTime + item.duration))
+  const totalDuration = Math.max(videoDuration, audioTimelineEnd, textTimelineEnd)
+  const timelinePixelsPerSecondScaled = timelinePixelsPerSecond * timelineZoom
+  const timelineContentWidth = Math.max(timelineMinimumWidth, Math.ceil(totalDuration * timelinePixelsPerSecondScaled))
   const effectiveSelectedClipId = clipLayouts.some((layout) => layout.item.id === selectedClipId)
     ? selectedClipId
-    : selectedAudioId ? '' : clipLayouts[0]?.item.id ?? ''
+    : selectedAudioId || selectedTextId ? '' : clipLayouts[0]?.item.id ?? ''
   const selectedLayout = clipLayouts.find((layout) => layout.item.id === effectiveSelectedClipId) ?? null
   const selectedClip = selectedLayout?.item ?? null
   const activeLayouts = activeLayoutsAt(clipLayouts, playhead, videoTrackIds)
+  const activeTextItems = merge.textItems.filter((item) => playhead >= item.startTime && playhead < item.startTime + item.duration)
   const activeLayoutKey = activeLayouts.map((layout) => layout.item.id).join('|')
   const groupEditing = activeLayouts.length > 1 && groupEditingKey === activeLayoutKey
   const currentLayout = activeLayouts.find((layout) => layout.item.id === effectiveSelectedClipId)
@@ -287,6 +313,7 @@ export function MergePage() {
     ?? selectedLayout
   const previewClip = currentLayout?.item ?? selectedClip
   const selectedAudio = merge.audioItems.find((item) => item.id === selectedAudioId) ?? null
+  const selectedText = merge.textItems.find((item) => item.id === selectedTextId) ?? null
   const previewLayout = previewClip
     ? clipLayouts.find((layout) => layout.item.id === previewClip.id) ?? null
     : null
@@ -350,9 +377,10 @@ export function MergePage() {
     width: activeGroupRect.width * outputCanvasGeometry.width,
     height: activeGroupRect.height * outputCanvasGeometry.height,
   } : null
-  const timelineTrackRows = merge.videoTracks.length + merge.audioTracks.length
+  const timelineTrackRows = merge.videoTracks.length + merge.audioTracks.length + merge.textTracks.length
   const timelineTracksTemplate = `repeat(${timelineTrackRows}, 54px)`
   const timelineContentHeight = 30 + timelineTrackRows * 60
+  const frameStep = 1 / Math.max(1, merge.settings.fps || 30)
 
   const updatePreviewGeometry = useCallback(() => {
     const screen = previewScreenRef.current
@@ -452,12 +480,18 @@ export function MergePage() {
 
   const seekGlobal = useCallback((time: number, autoPlay = false) => {
     scrubGlobal(time, true)
+    playbackAnchorRef.current = { time: playheadRef.current, timestamp: performance.now() }
     window.requestAnimationFrame(() => {
       if (!autoPlay) return
       playbackAnchorRef.current = { time: playheadRef.current, timestamp: performance.now() }
       setPlaying(true)
     })
   }, [scrubGlobal])
+
+  useEffect(() => {
+    scrubGlobal(playheadRef.current, true)
+    if (playing) playbackAnchorRef.current = { time: playheadRef.current, timestamp: performance.now() }
+  }, [clipLayouts, playing, scrubGlobal])
 
   const keepTimelineTimeVisible = useCallback((time: number, margin = 56) => {
     const viewport = timelineScrollRef.current
@@ -568,6 +602,47 @@ export function MergePage() {
     }
   }
 
+  async function chooseSubtitles() {
+    try {
+      const paths = await selectSubtitleFiles()
+      if (paths.length === 0) return
+      const trackId = merge.textTracks[0]?.id ?? merge.addTextTrack()
+      let imported = 0
+      let lastId = ''
+      merge.beginHistoryTransaction()
+      try {
+        for (const path of paths) {
+          const content = await readTextFile(path)
+          const cues = parseSubtitleCues(content, extension(path))
+          for (const cue of cues) {
+            lastId = merge.addText({
+              trackId,
+              text: cue.text,
+              startTime: cue.start,
+              duration: Math.max(0.05, cue.end - cue.start),
+              x: 0.5,
+              y: 0.88,
+              fontSize: 42,
+              color: '#ffffff',
+              backgroundColor: 'rgba(0,0,0,0.45)',
+            })
+            imported += 1
+          }
+        }
+      } finally {
+        merge.endHistoryTransaction()
+      }
+      if (lastId) {
+        setSelectedClipId('')
+        setSelectedAudioId('')
+        setSelectedTextId(lastId)
+      }
+      merge.setError(imported > 0 ? `已导入 ${imported} 条字幕。` : '未从字幕文件中解析到有效字幕。')
+    } catch (error) {
+      merge.setError(normalizeBackendError(error))
+    }
+  }
+
   async function chooseOutputDir() {
     try {
       const path = await selectOutputDirectory()
@@ -589,12 +664,80 @@ export function MergePage() {
     setPlaying(true)
   }
 
-  function handleTimelineWheel(event: React.WheelEvent<HTMLDivElement>) {
+  function zoomTimeline(nextZoom: number, anchorClientX?: number) {
     const viewport = timelineScrollRef.current
-    if (!viewport || viewport.scrollWidth <= viewport.clientWidth) return
-    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+    const content = timelineRef.current
+    const currentZoom = timelineZoom
+    const next = clamp(nextZoom, timelineZoomMinimum, timelineZoomMaximum)
+    if (Math.abs(next - currentZoom) < 0.001) return
+    const viewportRect = viewport?.getBoundingClientRect()
+    const contentRect = content?.getBoundingClientRect()
+    const anchorX = anchorClientX ?? (viewportRect ? viewportRect.left + viewportRect.width / 2 : 0)
+    const anchorTime = contentRect ? timelineTimeFromClientX(anchorX, contentRect, totalDuration) : playheadRef.current
+    setTimelineZoom(next)
+    window.requestAnimationFrame(() => {
+      const nextViewport = timelineScrollRef.current
+      const nextContent = timelineRef.current
+      const nextViewportRect = nextViewport?.getBoundingClientRect()
+      if (!nextViewport || !nextContent || !nextViewportRect || totalDuration <= 0) return
+      const anchorOffset = anchorClientX === undefined ? nextViewportRect.width / 2 : anchorX - nextViewportRect.left
+      nextViewport.scrollLeft = Math.max(0, anchorTime / totalDuration * nextContent.offsetWidth - anchorOffset)
+    })
+  }
+
+  function nudgePlayhead(direction: -1 | 1) {
+    seekGlobal(playheadRef.current + frameStep * direction)
+  }
+
+  useEffect(() => {
+    const clearKeyboardStep = () => {
+      const timers = keyboardStepRef.current
+      if (timers.delay !== null) window.clearTimeout(timers.delay)
+      if (timers.repeat !== null) window.clearInterval(timers.repeat)
+      keyboardStepRef.current = { delay: null, repeat: null, direction: null }
+    }
+    const shouldIgnoreKeyTarget = (target: EventTarget | null) => {
+      const element = target instanceof Element ? target : null
+      return Boolean(element?.closest('input, textarea, select, [contenteditable="true"]'))
+    }
+    const step = (direction: -1 | 1) => {
+      if (totalDuration <= 0) return
+      seekGlobal(playheadRef.current + frameStep * direction)
+      keepTimelineTimeVisible(playheadRef.current)
+    }
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+      if (shouldIgnoreKeyTarget(event.target)) return
+      event.preventDefault()
+      const direction = event.key === 'ArrowLeft' ? -1 : 1
+      if (keyboardStepRef.current.direction === direction) return
+      clearKeyboardStep()
+      keyboardStepRef.current.direction = direction
+      step(direction)
+      keyboardStepRef.current.delay = window.setTimeout(() => {
+        keyboardStepRef.current.delay = null
+        keyboardStepRef.current.repeat = window.setInterval(() => step(direction), clamp(1000 / Math.max(1, merge.settings.fps || 30), 16, 90))
+      }, 280)
+    }
+    const keyup = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') clearKeyboardStep()
+    }
+    window.addEventListener('keydown', keydown)
+    window.addEventListener('keyup', keyup)
+    window.addEventListener('blur', clearKeyboardStep)
+    return () => {
+      clearKeyboardStep()
+      window.removeEventListener('keydown', keydown)
+      window.removeEventListener('keyup', keyup)
+      window.removeEventListener('blur', clearKeyboardStep)
+    }
+  }, [frameStep, keepTimelineTimeVisible, merge.settings.fps, seekGlobal, totalDuration])
+
+  function handleTimelineWheel(event: React.WheelEvent<HTMLDivElement>) {
     event.preventDefault()
-    viewport.scrollLeft += event.deltaY
+    const intensity = event.ctrlKey || event.metaKey ? 0.0035 : 0.0018
+    const factor = Math.exp(-event.deltaY * intensity)
+    zoomTimeline(timelineZoom * factor, event.clientX)
   }
 
   function handlePlayheadHandlePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
@@ -648,6 +791,7 @@ export function MergePage() {
 
     event.preventDefault()
     setSelectedAudioId('')
+    setSelectedTextId('')
     const rect = timelineRef.current.getBoundingClientRect()
     const resumeAfterSeek = playing
     if (resumeAfterSeek) setPlaying(false)
@@ -717,6 +861,7 @@ export function MergePage() {
       sourceClipId: layout.item.id,
     })
     setSelectedAudioId('')
+    setSelectedTextId('')
     setSelectedClipId(layout.item.id)
     merge.setError('')
     setClipContextMenu(null)
@@ -726,6 +871,7 @@ export function MergePage() {
     const duplicateId = merge.duplicateVideo(layout.item.id)
     if (duplicateId) setSelectedClipId(duplicateId)
     setSelectedAudioId('')
+    setSelectedTextId('')
     setClipContextMenu(null)
   }
 
@@ -741,12 +887,24 @@ export function MergePage() {
     merge.updateVideo(target.item.id, { startTime: layout.start }, false)
     merge.endHistoryTransaction()
     setSelectedAudioId('')
+    setSelectedTextId('')
     setSelectedClipId(layout.item.id)
     setClipContextMenu(null)
   }
 
   function removeClip(layout: ClipLayout) {
+    const laterLayouts = clipLayouts.filter((candidate) => (
+      candidate.trackId === layout.trackId
+      && candidate.item.id !== layout.item.id
+      && candidate.start >= layout.end - 0.0005
+      && candidate.item.startTime !== null
+    ))
+    merge.beginHistoryTransaction()
     merge.removeVideo(layout.item.id)
+    laterLayouts.forEach((candidate) => {
+      merge.updateVideo(candidate.item.id, { startTime: Math.max(0, candidate.start - layout.duration) }, false)
+    })
+    merge.endHistoryTransaction()
     setSelectedClipId('')
     setClipContextMenu(null)
   }
@@ -774,6 +932,7 @@ export function MergePage() {
     event.preventDefault()
     event.stopPropagation()
     setSelectedAudioId('')
+    setSelectedTextId('')
     setSelectedClipId(layout.item.id)
     setClipContextMenu(null)
     setAudioContextMenu(null)
@@ -857,6 +1016,7 @@ export function MergePage() {
     event.preventDefault()
     event.stopPropagation()
     setSelectedClipId('')
+    setSelectedTextId('')
     setSelectedAudioId(audio.id)
     setClipContextMenu(null)
     setAudioContextMenu(null)
@@ -894,6 +1054,103 @@ export function MergePage() {
       if (longPressActive) merge.endHistoryTransaction()
       setDraggedAudioId('')
     }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end, { once: true })
+    window.addEventListener('pointercancel', end, { once: true })
+  }
+
+  function handleTextPointerDown(event: React.PointerEvent, item: MergeTextItem) {
+    if (event.button !== 0 || !timelineRef.current || totalDuration <= 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedClipId('')
+    setSelectedAudioId('')
+    setSelectedTextId(item.id)
+    setClipContextMenu(null)
+    setAudioContextMenu(null)
+    setTextContextMenu(null)
+    const initialRect = timelineRef.current.getBoundingClientRect()
+    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration) - item.startTime
+    let longPressActive = false
+    let latestX = event.clientX
+    let latestY = event.clientY
+    const longPressTimer = window.setTimeout(() => {
+      longPressActive = true
+      merge.beginHistoryTransaction()
+      setDraggedAudioId(item.id)
+    }, 260)
+    const move = (pointerEvent: PointerEvent) => {
+      latestX = pointerEvent.clientX
+      latestY = pointerEvent.clientY
+      if (!longPressActive) return
+      autoScrollTimelineAtPointer(latestX)
+      if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        const contentRect = timelineRef.current?.getBoundingClientRect()
+        if (!contentRect) return
+        const next = timelineTimeFromClientX(latestX, contentRect, totalDuration) - pointerOffset
+        const trackId = trackIdAtPoint(latestX, latestY, 'text') ?? item.trackId
+        merge.updateText(item.id, { startTime: clamp(next, 0, totalDuration), trackId }, false)
+      })
+    }
+    const end = () => {
+      window.clearTimeout(longPressTimer)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
+      if (longPressActive) merge.endHistoryTransaction()
+      setDraggedAudioId('')
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end, { once: true })
+    window.addEventListener('pointercancel', end, { once: true })
+  }
+
+  function addTextAt(trackId: string, startTime = playheadRef.current) {
+    const id = merge.addText({ trackId, startTime: clamp(startTime, 0, Math.max(totalDuration, startTime)), duration: Math.max(1, Math.min(3, totalDuration || 3)) })
+    setSelectedClipId('')
+    setSelectedAudioId('')
+    setSelectedTextId(id)
+    setTrackContextMenu(null)
+  }
+
+  function editTextItem(item: MergeTextItem) {
+    const nextText = window.prompt('修改文本内容', item.text)
+    if (nextText === null) return
+    merge.updateText(item.id, { text: nextText.trim() || '自定义文本' })
+    setSelectedClipId('')
+    setSelectedAudioId('')
+    setSelectedTextId(item.id)
+  }
+
+  function handlePreviewTextPointerDown(event: React.PointerEvent<HTMLDivElement>, item: MergeTextItem) {
+    if (event.button !== 0 || !outputCanvasRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    const canvasRect = outputCanvasRef.current.getBoundingClientRect()
+    const textId = item.id
+    setSelectedClipId('')
+    setSelectedAudioId('')
+    setSelectedTextId(textId)
+    merge.beginHistoryTransaction()
+
+    const apply = (clientX: number, clientY: number) => {
+      merge.updateText(textId, {
+        x: clamp((clientX - canvasRect.left) / Math.max(1, canvasRect.width), 0, 1),
+        y: clamp((clientY - canvasRect.top) / Math.max(1, canvasRect.height), 0, 1),
+      }, false)
+    }
+    const move = (pointerEvent: PointerEvent) => apply(pointerEvent.clientX, pointerEvent.clientY)
+    const end = (pointerEvent: PointerEvent) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      apply(pointerEvent.clientX, pointerEvent.clientY)
+      merge.endHistoryTransaction()
+    }
+
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', end, { once: true })
     window.addEventListener('pointercancel', end, { once: true })
@@ -942,6 +1199,7 @@ export function MergePage() {
     event.preventDefault()
     event.stopPropagation()
     setSelectedAudioId('')
+    setSelectedTextId('')
     setSelectedClipId(layout.item.id)
 
     const canvasRect = outputCanvasRef.current.getBoundingClientRect()
@@ -1220,6 +1478,16 @@ export function MergePage() {
           trimStart: item.trimStart,
           trimEnd: item.trimEnd > item.trimStart ? item.trimEnd : undefined,
         })),
+        textTracks: merge.textItems.map((item) => ({
+          text: item.text,
+          startTime: item.startTime,
+          duration: item.duration,
+          x: item.x,
+          y: item.y,
+          fontSize: item.fontSize,
+          color: item.color,
+          backgroundColor: item.backgroundColor,
+        })),
         ...merge.settings,
         projectRoot,
         pythonPath,
@@ -1241,18 +1509,27 @@ export function MergePage() {
           <NeonButton variant="outline" type="button" onClick={() => void chooseAudio()}>
             <Music2 size={16} />导入音频
           </NeonButton>
+          <NeonButton variant="outline" type="button" onClick={() => void chooseSubtitles()}>
+            <Upload size={16} />导入字幕
+          </NeonButton>
+          <NeonButton variant="outline" type="button" onClick={() => addTextAt(merge.textTracks[0]?.id ?? 'text-track-1')}>
+            <Type size={16} />添加文本
+          </NeonButton>
           <button type="button" title="在播放头位置拆分当前片段" disabled={!selectedClip} onClick={splitAtPlayhead}>
             <Scissors />拆分
           </button>
           <button
             className="danger"
             type="button"
-            title="移除选中的视频或音频片段"
-            disabled={!selectedClip && !selectedAudio}
+            title="移除选中的视频、音频或文本片段"
+            disabled={!selectedClip && !selectedAudio && !selectedText}
             onClick={() => {
               if (selectedAudio) {
                 merge.removeAudio(selectedAudio.id)
                 setSelectedAudioId('')
+              } else if (selectedText) {
+                merge.removeText(selectedText.id)
+                setSelectedTextId('')
               } else if (selectedClip) {
                 merge.removeVideo(selectedClip.id)
               }
@@ -1358,6 +1635,28 @@ export function MergePage() {
                   <strong>将视频拖入窗口或点击“添加视频”</strong>
                 </div>
               )}
+              {outputCanvasGeometry && activeTextItems.map((item) => (
+                <div
+                  key={item.id}
+                  className={`editor-preview-text ${selectedTextId === item.id ? 'selected' : ''}`}
+                  style={{
+                    left: item.x * outputCanvasGeometry.width,
+                    top: item.y * outputCanvasGeometry.height,
+                    fontSize: clamp(item.fontSize / Math.max(1, merge.settings.width) * outputCanvasGeometry.width, 10, 80),
+                    color: item.color,
+                    backgroundColor: item.backgroundColor,
+                  }}
+                  title="拖动调整文本位置，双击修改文本"
+                  onPointerDown={(event) => handlePreviewTextPointerDown(event, item)}
+                  onDoubleClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    editTextItem(item)
+                  }}
+                >
+                  {item.text}
+                </div>
+              ))}
               {groupEditing && !cropEditing && activeGroupPixelRect && (
                 <div
                   className="editor-group-selection"
@@ -1440,6 +1739,12 @@ export function MergePage() {
             </button>
             <button type="button" title="回到当前片段起点" disabled={!selectedLayout} onClick={() => selectedLayout && seekGlobal(selectedLayout.start)}>
               <RotateCcw />
+            </button>
+            <button type="button" title="后退一帧" disabled={totalDuration <= 0} onClick={() => nudgePlayhead(-1)}>
+              <Minus />
+            </button>
+            <button type="button" title="前进一帧" disabled={totalDuration <= 0} onClick={() => nudgePlayhead(1)}>
+              <Plus />
             </button>
             <time title={`时间线 ${formatPreciseTime(playhead)} / ${formatPreciseTime(totalDuration)}`}>
               片段 {formatPreciseTime(previewLocalTime)} / {formatPreciseTime(previewLayout?.duration ?? 0)}
@@ -1555,6 +1860,24 @@ export function MergePage() {
                 <NumberField label="音频入点" value={selectedAudio.trimStart} min={0} step={0.001} onChange={(trimStart) => merge.updateAudio(selectedAudio.id, { trimStart })} />
               </div>
             </div>
+          ) : selectedText ? (
+            <div className="editor-selected-media text">
+              <span>文本片段</span>
+              <TextInput value={selectedText.text} onChange={(event) => merge.updateText(selectedText.id, { text: event.target.value })} />
+              <div className="editor-time-fields">
+                <NumberField label="开始时间" value={selectedText.startTime} min={0} step={0.001} onChange={(startTime) => merge.updateText(selectedText.id, { startTime })} />
+                <NumberField label="持续秒数" value={selectedText.duration} min={0.05} step={0.001} onChange={(duration) => merge.updateText(selectedText.id, { duration })} />
+              </div>
+              <div className="editor-text-fields">
+                <NumberField label="横向位置" value={selectedText.x} min={0} max={1} step={0.01} onChange={(x) => merge.updateText(selectedText.id, { x })} />
+                <NumberField label="纵向位置" value={selectedText.y} min={0} max={1} step={0.01} onChange={(y) => merge.updateText(selectedText.id, { y })} />
+                <NumberField label="字号" value={selectedText.fontSize} min={8} max={240} onChange={(fontSize) => merge.updateText(selectedText.id, { fontSize })} />
+                <label>
+                  <span>颜色</span>
+                  <TextInput value={selectedText.color} onChange={(event) => merge.updateText(selectedText.id, { color: event.target.value })} />
+                </label>
+              </div>
+            </div>
           ) : <p className="editor-no-selection">选择时间线上的视频或音频片段后可调整属性。</p>}
 
           <div className="editor-output-settings">
@@ -1630,6 +1953,17 @@ export function MergePage() {
       </div>
 
       <GlassPanel className="editor-timeline-panel">
+        <div className="timeline-tool-card">
+          <div>
+            <button type="button" title="缩小时间线" onClick={() => zoomTimeline(timelineZoom / 1.25)}>
+              <Minus />
+            </button>
+            <button type="button" title="放大时间线" onClick={() => zoomTimeline(timelineZoom * 1.25)}>
+              <Plus />
+            </button>
+          </div>
+          <span>{Math.round(timelineZoom * 100)}%</span>
+        </div>
         <div className="timeline-workspace">
           <div className="timeline-track-labels">
             <span><Clock3 />时间线</span>
@@ -1658,6 +1992,26 @@ export function MergePage() {
                   }}
                 >
                   <Music2 />{track.name}
+                </button>
+              ))}
+              {merge.textTracks.map((track) => (
+                <button
+                  type="button"
+                  key={track.id}
+                  title="右键新建或管理文本线"
+                  onContextMenu={(event) => {
+                    event.preventDefault()
+                    const rect = timelineRef.current?.getBoundingClientRect()
+                    setTrackContextMenu({
+                      x: event.clientX,
+                      y: event.clientY,
+                      kind: 'text',
+                      trackId: track.id,
+                      time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration) : playheadRef.current,
+                    })
+                  }}
+                >
+                  <Type />{track.name}
                 </button>
               ))}
             </div>
@@ -1709,8 +2063,10 @@ export function MergePage() {
                           ? clamp(timelineTimeFromClientX(event.clientX, rect, totalDuration), layout.start, layout.end)
                           : layout.start
                         setSelectedAudioId('')
+                        setSelectedTextId('')
                         setSelectedClipId(layout.item.id)
                         setAudioContextMenu(null)
+                        setTextContextMenu(null)
                         setClipContextMenu({
                           x: Math.max(8, Math.min(event.clientX, window.innerWidth - 250)),
                           y: Math.max(8, Math.min(event.clientY, window.innerHeight - 390)),
@@ -1767,8 +2123,10 @@ export function MergePage() {
                           event.preventDefault()
                           event.stopPropagation()
                           setSelectedClipId('')
+                          setSelectedTextId('')
                           setSelectedAudioId(audio.id)
                           setClipContextMenu(null)
+                          setTextContextMenu(null)
                           setAudioContextMenu({
                             x: Math.max(8, Math.min(event.clientX, window.innerWidth - 240)),
                             y: Math.max(8, Math.min(event.clientY, window.innerHeight - 230)),
@@ -1781,6 +2139,65 @@ export function MergePage() {
                       </button>
                     )
                   })}
+                </div>
+                  )
+                })}
+                {merge.textTracks.map((track) => {
+                  const trackText = merge.textItems.filter((item) => item.trackId === track.id)
+                  return (
+                <div
+                  className={`timeline-text-track ${trackText.length === 0 ? 'empty' : ''}`}
+                  key={track.id}
+                  data-track-id={track.id}
+                  data-track-kind="text"
+                  onContextMenu={(event) => {
+                    if ((event.target as Element).closest('.timeline-text-clip')) return
+                    event.preventDefault()
+                    const rect = timelineRef.current?.getBoundingClientRect()
+                    setTrackContextMenu({
+                      x: event.clientX,
+                      y: event.clientY,
+                      kind: 'text',
+                      trackId: track.id,
+                      time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration) : playheadRef.current,
+                    })
+                  }}
+                >
+                  {trackText.length === 0 && <span className="timeline-empty-hint">右键添加文本片段</span>}
+                  {trackText.map((item) => (
+                    <button
+                      type="button"
+                      className={[
+                        'timeline-text-clip',
+                        selectedTextId === item.id ? 'selected' : '',
+                        draggedAudioId === item.id ? 'long-press-dragging' : '',
+                      ].filter(Boolean).join(' ')}
+                      style={{
+                        left: `${percent(item.startTime, totalDuration)}%`,
+                        width: `${Math.max(0.3, percent(item.duration, totalDuration))}%`,
+                      }}
+                      key={item.id}
+                      title={`${item.text}\n长按后拖动可调整时间线位置，右键打开操作菜单`}
+                      onPointerDown={(event) => handleTextPointerDown(event, item)}
+                      onContextMenu={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setSelectedClipId('')
+                        setSelectedAudioId('')
+                        setSelectedTextId(item.id)
+                        setClipContextMenu(null)
+                        setAudioContextMenu(null)
+                        setTextContextMenu({
+                          x: Math.max(8, Math.min(event.clientX, window.innerWidth - 240)),
+                          y: Math.max(8, Math.min(event.clientY, window.innerHeight - 210)),
+                          text: item,
+                        })
+                      }}
+                    >
+                      <Type />
+                      <span>{item.text}</span>
+                    </button>
+                  ))}
                 </div>
                   )
                 })}
@@ -1854,28 +2271,40 @@ export function MergePage() {
           role="menu"
           onPointerDown={(event) => event.stopPropagation()}
         >
+          {trackContextMenu.kind === 'text' && (
+            <button type="button" role="menuitem" onClick={() => addTextAt(trackContextMenu.trackId, trackContextMenu.time ?? playheadRef.current)}>
+              <Type />添加文本片段
+            </button>
+          )}
           <button type="button" role="menuitem" onClick={() => {
             if (trackContextMenu.kind === 'video') merge.addVideoTrack()
-            else merge.addAudioTrack()
+            else if (trackContextMenu.kind === 'audio') merge.addAudioTrack()
+            else merge.addTextTrack()
             setTrackContextMenu(null)
           }}>
-            <Plus />新建{trackContextMenu.kind === 'video' ? '视频线' : '音频线'}
+            <Plus />新建{trackKindLabel(trackContextMenu.kind)}
           </button>
           <button
             className="danger"
             type="button"
             role="menuitem"
-            disabled={trackContextMenu.kind === 'video' ? merge.videoTracks.length <= 1 : merge.audioTracks.length <= 1}
+            disabled={trackContextMenu.kind === 'video'
+              ? merge.videoTracks.length <= 1
+              : trackContextMenu.kind === 'audio'
+                ? merge.audioTracks.length <= 1
+                : merge.textTracks.length <= 1}
             title="删除轨道后，其中的片段会移动到保留的第一条同类轨道"
             onClick={() => {
               const removed = trackContextMenu.kind === 'video'
                 ? merge.removeVideoTrack(trackContextMenu.trackId)
-                : merge.removeAudioTrack(trackContextMenu.trackId)
-              if (!removed) merge.setError(`${trackContextMenu.kind === 'video' ? '视频线' : '音频线'}至少保留一条。`)
+                : trackContextMenu.kind === 'audio'
+                  ? merge.removeAudioTrack(trackContextMenu.trackId)
+                  : merge.removeTextTrack(trackContextMenu.trackId)
+              if (!removed) merge.setError(`${trackKindLabel(trackContextMenu.kind)}至少保留一条。`)
               setTrackContextMenu(null)
             }}
           >
-            <Trash2 />删除当前{trackContextMenu.kind === 'video' ? '视频线' : '音频线'}
+            <Trash2 />删除当前{trackKindLabel(trackContextMenu.kind)}
           </button>
         </div>
         </Translated>,
@@ -2048,6 +2477,46 @@ export function MergePage() {
             setAudioContextMenu(null)
           }}>
             <Trash2 />删除音频片段
+          </button>
+        </div>
+        </Translated>,
+        document.body,
+      )}
+      {textContextMenu && createPortal(
+        <Translated>
+        <div
+          className="video-context-menu clip-context-menu text-context-menu"
+          style={{
+            left: textContextMenu.x,
+            top: textContextMenu.y,
+            maxHeight: Math.max(160, window.innerHeight - textContextMenu.y - 8),
+          }}
+          role="menu"
+          onPointerDown={(event) => event.stopPropagation()}
+          onWheel={(event) => event.stopPropagation()}
+        >
+          <strong title={textContextMenu.text.text}>{textContextMenu.text.text}</strong>
+          <span className="clip-context-menu-range">
+            时间线位置 {formatPreciseTime(textContextMenu.text.startTime)}
+          </span>
+          <button type="button" role="menuitem" onClick={() => {
+            seekGlobal(textContextMenu.text.startTime)
+            setTextContextMenu(null)
+          }}>
+            <SkipBack />定位到文本开头
+          </button>
+          <button type="button" role="menuitem" onClick={() => {
+            merge.updateText(textContextMenu.text.id, { startTime: playheadRef.current })
+            setTextContextMenu(null)
+          }}>
+            <ArrowRight />移动到播放头
+          </button>
+          <button className="danger" type="button" role="menuitem" onClick={() => {
+            merge.removeText(textContextMenu.text.id)
+            setSelectedTextId('')
+            setTextContextMenu(null)
+          }}>
+            <Trash2 />删除文本片段
           </button>
         </div>
         </Translated>,
@@ -2426,10 +2895,16 @@ function layoutRectsOverlap(left: NormalizedLayoutRect, right: NormalizedLayoutR
     && left.y + left.height > right.y + epsilon
 }
 
-function trackIdAtPoint(clientX: number, clientY: number, kind: 'video' | 'audio') {
+function trackIdAtPoint(clientX: number, clientY: number, kind: 'video' | 'audio' | 'text') {
   const element = document.elementFromPoint(clientX, clientY)
   const track = element?.closest<HTMLElement>(`[data-track-kind="${kind}"]`)
   return track?.dataset.trackId ?? null
+}
+
+function trackKindLabel(kind: 'video' | 'audio' | 'text') {
+  if (kind === 'video') return '视频线'
+  if (kind === 'audio') return '音频线'
+  return '文本线'
 }
 
 function previousTrackLayout(layouts: ClipLayout[], layout: ClipLayout, direction: -1 | 1) {
@@ -2484,6 +2959,96 @@ function canSplitClipAt(layout: ClipLayout, timelineTime: number, metadata: Reco
   const sourceTime = layout.item.trimStart + clamp(timelineTime - layout.start, 0, layout.duration)
   const sourceEnd = clipSourceEnd(layout.item, metadata[normalizePath(layout.item.path)])
   return sourceTime > layout.item.trimStart + 0.05 && sourceTime < sourceEnd - 0.05
+}
+
+interface SubtitleCue {
+  start: number
+  end: number
+  text: string
+}
+
+function parseSubtitleCues(content: string, fileExtension: string): SubtitleCue[] {
+  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+  const ext = fileExtension.toLowerCase()
+  if (ext === 'ass' || ext === 'ssa') return parseAssSubtitleCues(normalized)
+  return parseTimedTextSubtitleCues(normalized)
+}
+
+function parseTimedTextSubtitleCues(content: string): SubtitleCue[] {
+  return content
+    .replace(/^WEBVTT[^\n]*(?:\n|$)/i, '')
+    .split(/\n{2,}/)
+    .flatMap((block) => {
+      const lines = block.split('\n').map((line) => line.trim()).filter(Boolean)
+      const timingIndex = lines.findIndex((line) => line.includes('-->'))
+      if (timingIndex < 0) return []
+      const [rawStart, rawEnd] = lines[timingIndex].split('-->').map((part) => part.trim())
+      const start = parseSubtitleTime(rawStart)
+      const end = parseSubtitleTime(rawEnd.split(/\s+/)[0] ?? '')
+      const text = cleanSubtitleText(lines.slice(timingIndex + 1).join('\n'))
+      if (start === null || end === null || end <= start || !text) return []
+      return [{ start, end, text }]
+    })
+}
+
+function parseAssSubtitleCues(content: string): SubtitleCue[] {
+  let format = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text']
+  const cues: SubtitleCue[] = []
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim()
+    if (/^Format:/i.test(line)) {
+      format = line.replace(/^Format:/i, '').split(',').map((part) => part.trim().toLowerCase())
+      continue
+    }
+    if (!/^Dialogue:/i.test(line)) continue
+    const fields = splitAssDialogueFields(line.replace(/^Dialogue:/i, '').trim(), format.length)
+    const startIndex = format.indexOf('start')
+    const endIndex = format.indexOf('end')
+    const textIndex = format.indexOf('text')
+    const start = parseSubtitleTime(fields[startIndex] ?? '')
+    const end = parseSubtitleTime(fields[endIndex] ?? '')
+    const text = cleanSubtitleText((textIndex >= 0 ? fields.slice(textIndex).join(',') : fields.at(-1) ?? '')
+      .replace(/\\[Nn]/g, '\n')
+      .replace(/\{[^}]*}/g, ''))
+    if (start === null || end === null || end <= start || !text) continue
+    cues.push({ start, end, text })
+  }
+  return cues
+}
+
+function splitAssDialogueFields(value: string, fieldCount: number) {
+  if (fieldCount <= 1) return [value]
+  const fields = value.split(',')
+  if (fields.length <= fieldCount) return fields.map((field) => field.trim())
+  return [
+    ...fields.slice(0, fieldCount - 1).map((field) => field.trim()),
+    fields.slice(fieldCount - 1).join(',').trim(),
+  ]
+}
+
+function parseSubtitleTime(value: string) {
+  const match = value.trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[,.](\d{1,3}))?/)
+  if (!match) return null
+  const hours = Number(match[1] ?? 0)
+  const minutes = Number(match[2] ?? 0)
+  const seconds = Number(match[3] ?? 0)
+  const fraction = match[4] ?? ''
+  const milliseconds = fraction ? Number(fraction.padEnd(3, '0').slice(0, 3)) : 0
+  return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
+}
+
+function cleanSubtitleText(value: string) {
+  return value
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
 }
 
 function extension(path: string) {

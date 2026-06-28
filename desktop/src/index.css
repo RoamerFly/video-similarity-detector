@@ -6722,11 +6722,11 @@ select {
   position: relative;
   width: 100%;
   max-width: 100%;
-  min-height: 0;
-  grid-template-rows: auto auto 170px auto;
+  min-height: 100%;
+  grid-template-rows: auto auto auto auto;
   gap: 10px;
   align-content: start;
-  overflow: hidden;
+  overflow: visible;
   overflow-x: hidden;
 }
 
@@ -6802,7 +6802,7 @@ select {
 .editor-timeline-panel,
 .editor-export-status {
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .editor-preview-panel {
@@ -6969,7 +6969,7 @@ select {
 
 .editor-player-controls {
   display: grid;
-  grid-template-columns: 34px 40px 34px auto minmax(120px, 1fr);
+  grid-template-columns: 34px 40px 34px 34px 34px auto minmax(120px, 1fr);
   align-items: center;
   gap: 7px;
 }
@@ -7048,6 +7048,11 @@ select {
   background: rgba(99, 33, 111, 0.2);
 }
 
+.editor-selected-media.text {
+  border-color: rgba(255, 216, 107, 0.34);
+  background: rgba(93, 69, 16, 0.2);
+}
+
 .editor-selected-media > span,
 .editor-selected-media > small,
 .editor-no-selection {
@@ -7065,7 +7070,8 @@ select {
 .editor-time-fields,
 .editor-setting-row,
 .editor-resolution-fields,
-.editor-crop-grid {
+.editor-crop-grid,
+.editor-text-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
@@ -7089,7 +7095,8 @@ select {
 .editor-output-settings label,
 .editor-time-fields label,
 .editor-resolution-fields label,
-.editor-crop-grid label {
+.editor-crop-grid label,
+.editor-text-fields label {
   display: grid;
   min-width: 0;
   gap: 4px;
@@ -7098,7 +7105,8 @@ select {
 .editor-output-settings label > span,
 .editor-time-fields label > span,
 .editor-resolution-fields label > span,
-.editor-crop-grid label > span {
+.editor-crop-grid label > span,
+.editor-text-fields label > span {
   color: rgba(195, 211, 238, 0.68);
   font-size: 11px;
 }
@@ -7107,7 +7115,8 @@ select {
 .editor-output-settings .design-select,
 .editor-time-fields .design-input,
 .editor-resolution-fields .design-input,
-.editor-crop-grid .design-input {
+.editor-crop-grid .design-input,
+.editor-text-fields .design-input {
   min-width: 0;
   height: 32px;
   font-size: 12px;
@@ -7462,8 +7471,49 @@ select {
 .editor-timeline-panel {
   display: grid;
   padding: 8px 10px 10px;
-  grid-template-rows: minmax(0, 1fr);
-  overflow: hidden;
+  grid-template-rows: auto auto;
+  gap: 8px;
+  overflow: visible;
+}
+
+.timeline-tool-card {
+  display: flex;
+  width: max-content;
+  min-height: 34px;
+  padding: 5px 7px;
+  align-items: center;
+  gap: 8px;
+  color: rgba(221, 234, 255, 0.82);
+  border: 1px solid rgba(88, 125, 195, 0.28);
+  border-radius: 7px;
+  background: rgba(5, 17, 43, 0.7);
+}
+
+.timeline-tool-card > div {
+  display: flex;
+  gap: 5px;
+}
+
+.timeline-tool-card button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: rgba(237, 246, 255, 0.9);
+  border: 1px solid rgba(101, 152, 223, 0.3);
+  border-radius: 5px;
+  background: rgba(13, 39, 78, 0.72);
+  place-items: center;
+}
+
+.timeline-tool-card svg {
+  width: 14px;
+  height: 14px;
+}
+
+.timeline-tool-card span {
+  min-width: 38px;
+  font: 11px/1 Consolas, monospace;
 }
 
 .timeline-ruler {
@@ -7487,8 +7537,7 @@ select {
   min-height: 0;
   grid-template-columns: 78px minmax(0, 1fr);
   gap: 8px;
-  overflow: auto;
-  scrollbar-gutter: stable;
+  overflow: visible;
 }
 
 .timeline-track-labels {
@@ -7559,7 +7608,8 @@ select {
 }
 
 .timeline-video-track,
-.timeline-audio-track {
+.timeline-audio-track,
+.timeline-text-track {
   position: relative;
   min-height: 54px;
   overflow: hidden;
@@ -7576,7 +7626,8 @@ select {
 }
 
 .timeline-video-clip,
-.timeline-audio-clip {
+.timeline-audio-clip,
+.timeline-text-clip {
   display: flex;
   position: absolute;
   top: 5px;
@@ -7604,14 +7655,22 @@ select {
   background: linear-gradient(180deg, rgba(153, 55, 170, 0.74), rgba(78, 28, 105, 0.84));
 }
 
+.timeline-text-clip {
+  cursor: grab;
+  border-color: rgba(255, 216, 107, 0.5);
+  background: linear-gradient(180deg, rgba(158, 119, 27, 0.82), rgba(93, 61, 10, 0.86));
+}
+
 .timeline-video-clip.selected,
-.timeline-audio-clip.selected {
+.timeline-audio-clip.selected,
+.timeline-text-clip.selected {
   border-color: #fff;
   box-shadow: 0 0 0 2px rgba(56, 205, 255, 0.24);
 }
 
 .timeline-video-clip.long-press-dragging,
-.timeline-audio-clip.long-press-dragging {
+.timeline-audio-clip.long-press-dragging,
+.timeline-text-clip.long-press-dragging {
   z-index: 7;
   cursor: grabbing;
   opacity: 0.78;
@@ -7625,7 +7684,8 @@ select {
 }
 
 .timeline-video-clip svg,
-.timeline-audio-clip svg {
+.timeline-audio-clip svg,
+.timeline-text-clip svg {
   flex: 0 0 auto;
   width: 13px;
   height: 13px;
@@ -7641,7 +7701,8 @@ select {
 }
 
 .timeline-video-clip span,
-.timeline-audio-clip span {
+.timeline-audio-clip span,
+.timeline-text-clip span {
   min-width: 0;
   overflow: hidden;
   font-size: 11px;
@@ -7720,6 +7781,29 @@ select {
   display: none;
 }
 
+.editor-preview-text {
+  position: absolute;
+  z-index: 13;
+  max-width: 82%;
+  padding: 0.16em 0.36em;
+  cursor: move;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  white-space: pre-wrap;
+  transform: translate(-50%, -50%);
+  user-select: none;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.editor-preview-text.selected {
+  border-color: rgba(255, 216, 107, 0.9);
+  box-shadow: 0 0 0 2px rgba(255, 216, 107, 0.22);
+}
+
 .editor-export-status {
   display: grid;
   padding: 8px 12px;
@@ -7776,7 +7860,7 @@ select {
 
 @media (max-width: 1120px) {
   .merge-editor-page {
-    grid-template-rows: auto auto 160px auto;
+    grid-template-rows: auto auto auto auto;
   }
 
   .editor-main-grid {
@@ -7794,7 +7878,7 @@ select {
 
 @media (max-height: 820px) {
   .merge-editor-page {
-    grid-template-rows: auto auto 148px auto;
+    grid-template-rows: auto auto auto auto;
     gap: 7px;
   }
 

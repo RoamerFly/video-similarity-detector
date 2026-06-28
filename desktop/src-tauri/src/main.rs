@@ -26,6 +26,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv"];
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "aac", "m4a", "ogg", "opus", "wma"];
+const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "vtt", "ass", "ssa"];
 const REPORT_EXTENSIONS: &[&str] = &["json", "csv", "html"];
 const MAIN_TRAY_ID: &str = "main-tray";
 const CLOSE_BEHAVIOR_ASK: u8 = 0;
@@ -1217,6 +1218,21 @@ fn select_audio_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
         .file()
         .set_title("选择要加入音频线的音频文件")
         .add_filter("音频文件", AUDIO_EXTENSIONS)
+        .blocking_pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .map(path_to_string)
+        .collect())
+}
+
+#[tauri::command]
+fn select_subtitle_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    Ok(app
+        .dialog()
+        .file()
+        .set_title("选择要导入到文本线的字幕文件")
+        .add_filter("字幕文件", SUBTITLE_EXTENSIONS)
         .blocking_pick_files()
         .unwrap_or_default()
         .into_iter()
@@ -4417,6 +4433,7 @@ fn main() {
             select_video_directory,
             select_video_files,
             select_audio_files,
+            select_subtitle_files,
             select_output_directory,
             select_python_executable,
             scan_videos,
