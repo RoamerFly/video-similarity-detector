@@ -410,7 +410,7 @@ jobs:
             throw "Interactive Windows installer was not generated."
           }
           $passwordArg = "--password=$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
-          npm run tauri -- signer sign $passwordArg $installerOutput
+          & ".\desktop\node_modules\.bin\tauri.cmd" signer sign $passwordArg $installerOutput
           if ($LASTEXITCODE -ne 0 -or !(Test-Path "$installerOutput.sig")) {
             throw "Interactive Windows installer signature was not generated."
           }
