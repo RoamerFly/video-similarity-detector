@@ -318,14 +318,12 @@ jobs:
             .\build-windows.ps1 `
               -SkipNpmAudit `
               -CleanPythonEnv `
-              -BuildInstaller `
               -GpuBuild `
               -Python python
           } else {
             .\build-windows.ps1 `
               -SkipNpmAudit `
               -CleanPythonEnv `
-              -BuildInstaller `
               -Python python
           }
           if ($LASTEXITCODE -ne 0) {
@@ -391,27 +389,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or !(Test-Path "$installerOutput.sig")) {
             throw "Interactive Windows installer signature was not generated."
           }
-          $bundleDir = "desktop\src-tauri\target\release\bundle"
-          $nsisDir = Join-Path $bundleDir "nsis"
-          $updaterSource = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          if (-not $updaterSource) {
-            $installerDir = Join-Path $dist "installer"
-            $updaterSource = Get-ChildItem -Path $installerDir -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue |
-              Sort-Object LastWriteTime -Descending |
-              Select-Object -First 1
-          }
-          if (-not $updaterSource) {
-            throw "Tauri updater installer was not generated."
-          }
-          $updaterSig = Get-Item -LiteralPath "$($updaterSource.FullName).sig" -ErrorAction SilentlyContinue
-          if (-not $updaterSig) {
-            throw "Tauri updater signature was not generated. Check the updater signing key secret."
-          }
           $updaterOutput = "release-assets\$base-updater.exe"
-          Copy-Item -LiteralPath $updaterSource.FullName -Destination $updaterOutput -Force
-          Copy-Item -LiteralPath $updaterSig.FullName -Destination "$updaterOutput.sig" -Force
+          Copy-Item -LiteralPath $installerOutput -Destination $updaterOutput -Force
+          Copy-Item -LiteralPath "$installerOutput.sig" -Destination "$updaterOutput.sig" -Force
           $uninstallerEntry = & 7z l -ba $portableZip | Select-String "uninstall\.exe$"
           if ($LASTEXITCODE -ne 0 -or $null -eq $uninstallerEntry) {
             throw "uninstall.exe was not added to the Windows package."
