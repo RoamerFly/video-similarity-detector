@@ -32,7 +32,7 @@ import {
 } from 'lucide-react'
 import { GlassPanel, NeonButton, SelectInput, StatCard, TextInput } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
-import { Translated } from '@/i18n/useI18n'
+import { Translated } from '@/i18n/Translated'
 import {
   buildRunBatchCompareConfig,
   buildAnalysisTaskMatchKey,
@@ -207,12 +207,15 @@ export function AnalyzePage() {
   }, [videoContextMenu])
 
   useEffect(() => {
-    setSelectedVideoPaths((current) => {
-      if (current.size === 0) return current
-      const available = new Set(videos.map((video) => normalizeVideoPath(video.path)))
-      const next = new Set(Array.from(current).filter((path) => available.has(path)))
-      return setsEqual(current, next) ? current : next
-    })
+    const timer = window.setTimeout(() => {
+      setSelectedVideoPaths((current) => {
+        if (current.size === 0) return current
+        const available = new Set(videos.map((video) => normalizeVideoPath(video.path)))
+        const next = new Set(Array.from(current).filter((path) => available.has(path)))
+        return setsEqual(current, next) ? current : next
+      })
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [videos])
 
   const refreshHistoryTasks = useCallback(async (showLoading = false) => {
@@ -260,7 +263,10 @@ export function AnalyzePage() {
 
   useEffect(() => {
     if (!loadedTaskId || !historyReady) return
-    if (!historyTasks.some((task) => task.id === loadedTaskId)) setLoadedTaskId('')
+    const timer = window.setTimeout(() => {
+      if (!historyTasks.some((task) => task.id === loadedTaskId)) setLoadedTaskId('')
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [historyReady, historyTasks, loadedTaskId])
 
   useEffect(() => {
@@ -1527,8 +1533,11 @@ function TaskLoadDialog({
   const [draftTaskId, setDraftTaskId] = useState(selectedTaskId)
 
   useEffect(() => {
-    if (!open) return
-    setDraftTaskId(selectedTaskId || tasks[0]?.id || '')
+    if (!open) return undefined
+    const timer = window.setTimeout(() => {
+      setDraftTaskId(selectedTaskId || tasks[0]?.id || '')
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [open, selectedTaskId, tasks])
 
   if (!open) return null
@@ -1646,8 +1655,11 @@ function TaskCreateDialogContent({
   const [config, setConfig] = useState<RunBatchCompareConfig>(draft.config)
 
   useEffect(() => {
-    setTaskName(draft.taskName)
-    setConfig(draft.config)
+    const timer = window.setTimeout(() => {
+      setTaskName(draft.taskName)
+      setConfig(draft.config)
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [draft])
 
   function updateConfig<K extends keyof RunBatchCompareConfig>(key: K, value: RunBatchCompareConfig[K]) {

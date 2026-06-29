@@ -491,6 +491,7 @@ internal sealed class InstallerOptions
     internal string Target;
     internal int WaitPid;
     internal bool IsUpdate;
+    internal bool AutoDetectedExistingInstall;
     internal bool AutoStart;
     internal bool AutoClose;
     internal bool NoLaunch;
@@ -504,11 +505,13 @@ internal sealed class InstallerOptions
             "Programs",
             VideoSimilarityInstaller.InstallFolderName
         );
+        bool explicitTarget = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (String.Equals(args[i], "--target", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
             {
                 options.Target = Path.GetFullPath(args[++i]);
+                explicitTarget = true;
             }
             else if (String.Equals(args[i], "--wait-pid", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
             {
@@ -535,7 +538,84 @@ internal sealed class InstallerOptions
                 options.NoShortcuts = true;
             }
         }
+        if (!explicitTarget && !options.IsUpdate)
+        {
+            string existing = FindExistingInstall();
+            if (!String.IsNullOrWhiteSpace(existing))
+            {
+                options.Target = existing;
+                options.IsUpdate = true;
+                options.AutoDetectedExistingInstall = true;
+            }
+        }
         return options;
+    }
+
+    private static string FindExistingInstall()
+    {
+        foreach (string candidate in RegistryInstallLocations())
+        {
+            if (IsValidInstallRoot(candidate))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+        foreach (string candidate in CommonInstallLocations())
+        {
+            if (IsValidInstallRoot(candidate))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+        return "";
+    }
+
+    private static string[] RegistryInstallLocations()
+    {
+        string keyName = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\VideoSimilarity-" +
+            VideoSimilarityInstaller.InstallFolderName;
+        try
+        {
+            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(keyName))
+            {
+                object value = key == null ? null : key.GetValue("InstallLocation");
+                string installLocation = value == null ? "" : Convert.ToString(value);
+                return String.IsNullOrWhiteSpace(installLocation)
+                    ? new string[0]
+                    : new string[] { installLocation };
+            }
+        }
+        catch
+        {
+            return new string[0];
+        }
+    }
+
+    private static string[] CommonInstallLocations()
+    {
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return new string[] {
+            Path.Combine(local, "Programs", VideoSimilarityInstaller.InstallFolderName),
+            Path.Combine(local, VideoSimilarityInstaller.InstallFolderName)
+        };
+    }
+
+    private static bool IsValidInstallRoot(string path)
+    {
+        if (String.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+        try
+        {
+            string root = Path.GetFullPath(path);
+            return File.Exists(Path.Combine(root, VideoSimilarityInstaller.ExecutableName)) ||
+                File.Exists(Path.Combine(root, ".video-similarity-install.json"));
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
 
@@ -612,14 +692,14 @@ internal sealed class InstallerForm : Form
         targetBox.Location = new Point(30, 145);
         targetBox.Size = new Size(490, 28);
         targetBox.Text = options.Target;
-        targetBox.ReadOnly = options.IsUpdate;
+        targetBox.ReadOnly = options.IsUpdate && !options.AutoDetectedExistingInstall;
         Controls.Add(targetBox);
 
         browseButton = new Button();
         browseButton.Location = new Point(530, 143);
         browseButton.Size = new Size(88, 31);
         browseButton.Text = TextValue.Get("5rWP6KeILi4u");
-        browseButton.Enabled = !options.IsUpdate;
+        browseButton.Enabled = !options.IsUpdate || options.AutoDetectedExistingInstall;
         browseButton.Click += BrowseButtonClick;
         Controls.Add(browseButton);
 
@@ -659,7 +739,9 @@ internal sealed class InstallerForm : Form
         detailsLabel.Location = new Point(30, 294);
         detailsLabel.Size = new Size(588, 44);
         detailsLabel.ForeColor = Color.FromArgb(82, 92, 115);
-        detailsLabel.Text = TextValue.Get("5a6J6KOF5pe25Lya5pu/5o2iIGVuduOAgXNjcmlwdHMg5ZKMIHZpZGVvX3Npbe+8m2RhdGHjgIF2aWRlb3PjgIFlbWJlZGRpbmdzIOS4jeS8muiiq+a4heeQhuOAgg==");
+        detailsLabel.Text = options.AutoDetectedExistingInstall
+            ? TextValue.Get("5bey5qOA5rWL5Yiw5pen54mI5pys77yM5bCG6buY6K6k6KaG55uW5Y6f5a6J6KOF55uu5b2V77yM5bm25L+d55WZIGRhdGHjgIF2aWRlb3PjgIFtb2RlbHPjgIFlbWJlZGRpbmdz44CC")
+            : TextValue.Get("5a6J6KOF5pe25Lya5pu/5o2iIGVuduOAgXNjcmlwdHMg5ZKMIHZpZGVvX3Npbe+8m2RhdGHjgIF2aWRlb3PjgIFlbWJlZGRpbmdzIOS4jeS8muiiq+a4heeQhuOAgg==");
         Controls.Add(detailsLabel);
 
         installButton = new Button();
@@ -909,8 +991,8 @@ internal sealed class InstallerForm : Form
     private void ResetControls()
     {
         targetBox.Enabled = true;
-        targetBox.ReadOnly = options.IsUpdate;
-        browseButton.Enabled = !options.IsUpdate;
+        targetBox.ReadOnly = options.IsUpdate && !options.AutoDetectedExistingInstall;
+        browseButton.Enabled = !options.IsUpdate || options.AutoDetectedExistingInstall;
         desktopShortcut.Enabled = true;
         launchAfterInstall.Enabled = true;
         installButton.Enabled = true;

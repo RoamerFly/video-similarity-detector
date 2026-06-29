@@ -31,7 +31,7 @@ import {
   Toggle,
 } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
-import { Translated } from '@/i18n/useI18n'
+import { Translated } from '@/i18n/Translated'
 import {
   cancelUpdateDownload,
   checkPythonEnv,
@@ -41,7 +41,10 @@ import {
   downloadAndInstallUpdate,
   formatBytes,
   getAppInfo,
+  getClipModelStatus,
+  installClipModel,
   listConfigTemplates,
+  listenClipModelInstallProgress,
   listenUpdateDownloadProgress,
   normalizeBackendError,
   openReleasePage,
@@ -52,6 +55,7 @@ import {
   selectVideoDirectory,
   type AppInfo,
   type CacheScanResult,
+  type ClipModelStatus,
   type ConfigTemplateRecord,
   type UpdateDownloadProgress,
   type UpdateInfo,
@@ -675,6 +679,82 @@ function BaseSettings({
   onChooseReportDir: () => Promise<void>
 }) {
   const settings = useSettingsStore()
+  const [modelStatus, setModelStatus] = useState<ClipModelStatus | null>(null)
+  const [modelLoading, setModelLoading] = useState(false)
+  const [modelInstalling, setModelInstalling] = useState(false)
+  const [modelProgress, setModelProgress] = useState<UpdateDownloadProgress | null>(null)
+  const [modelError, setModelError] = useState('')
+
+  const refreshClipModelStatus = useCallback(async () => {
+    setModelLoading(true)
+    setModelError('')
+    try {
+      setModelStatus(await getClipModelStatus())
+    } catch (err) {
+      setModelError(normalizeBackendError(err))
+    } finally {
+      setModelLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshClipModelStatus(), 0)
+    return () => window.clearTimeout(timer)
+  }, [refreshClipModelStatus])
+
+  useEffect(() => {
+    let active = true
+    let stop = () => undefined
+    void listenClipModelInstallProgress((payload) => {
+      if (!active) return
+      setModelProgress(payload)
+    })
+      .then((unlisten) => {
+        if (!active) unlisten()
+        else stop = unlisten
+      })
+      .catch((err) => {
+        if (active) setModelError(normalizeBackendError(err))
+      })
+    return () => {
+      active = false
+      stop()
+    }
+  }, [])
+
+  async function handleInstallClipModel() {
+    const confirmed = window.confirm(
+      modelStatus?.installed
+        ? '将重新下载并替换本地离线 CLIP 模型，原模型会在安装成功后清理。是否继续？'
+        : '将从 GitHub Releases 下载离线 CLIP 模型，体积较大。是否继续？',
+    )
+    if (!confirmed) return
+    setModelInstalling(true)
+    setModelError('')
+    setModelProgress({
+      downloadedBytes: 0,
+      totalBytes: 0,
+      progress: 0,
+      stage: '正在准备模型安装',
+    })
+    try {
+      const status = await installClipModel()
+      setModelStatus(status)
+      setModelProgress((current) => ({
+        downloadedBytes: current?.downloadedBytes ?? status.sizeBytes,
+        totalBytes: current?.totalBytes ?? status.sizeBytes,
+        progress: 100,
+        stage: '离线 CLIP 模型已安装',
+      }))
+    } catch (err) {
+      setModelError(normalizeBackendError(err))
+    } finally {
+      setModelInstalling(false)
+    }
+  }
+
+  const modelProgressValue = Math.max(0, Math.min(100, modelProgress?.progress || 0))
+  const modelMissingFiles = modelStatus?.missingFiles ?? []
 
   return (
     <Translated>
@@ -764,6 +844,70 @@ function BaseSettings({
               <span>核心引擎</span>
               <strong title="Python 视频相似度引擎(Python Video Similarity Engine)">Python 视频相似度引擎(Python Video Similarity Engine)</strong>
             </div>
+          </div>
+        </div>
+        <div className="settings-about-card">
+          <div className="about-title">
+            {modelStatus?.installed ? <CheckCircle2 size={24} /> : <PackageCheck size={24} />}
+            <h3>离线 CLIP 模型</h3>
+          </div>
+          <div className="about-grid compact">
+            <div>
+              <span>安装状态</span>
+              <strong>{modelLoading ? '检测中' : modelStatus?.installed ? '已安装' : '未安装'}</strong>
+            </div>
+            <div>
+              <span>模型大小</span>
+              <strong>{modelStatus?.sizeBytes ? formatBytes(modelStatus.sizeBytes) : '未检测到'}</strong>
+            </div>
+          </div>
+          {modelStatus?.modelDir ? (
+            <p className="update-install-path" title={modelStatus.modelDir}>
+              模型目录：{modelStatus.modelDir}
+            </p>
+          ) : null}
+          <p className={modelError ? 'inline-error update-status-copy' : 'update-status-copy'}>
+            {modelError || modelStatus?.message || '正在检测离线模型状态。'}
+          </p>
+          {modelMissingFiles.length > 0 ? (
+            <p className="update-install-path">
+              缺失文件：{modelMissingFiles.join(', ')}
+            </p>
+          ) : null}
+          {modelProgress && (
+            <div className="update-progress-block">
+              <div>
+                <span>{modelProgress.stage || '正在处理模型'}</span>
+                <strong>{modelProgressValue.toFixed(0)}%</strong>
+              </div>
+              <div className="update-progress-track">
+                <span style={{ width: `${modelProgressValue}%` }} />
+              </div>
+              <small>
+                {formatBytes(modelProgress.downloadedBytes)}
+                {modelProgress.totalBytes ? ` / ${formatBytes(modelProgress.totalBytes)}` : ''}
+              </small>
+            </div>
+          )}
+          <div className="settings-path-actions">
+            <NeonButton
+              variant="outline"
+              type="button"
+              onClick={() => void refreshClipModelStatus()}
+              disabled={modelLoading || modelInstalling}
+            >
+              <RefreshCw size={17} />
+              刷新
+            </NeonButton>
+            <NeonButton
+              variant="primary"
+              type="button"
+              onClick={() => void handleInstallClipModel()}
+              disabled={modelInstalling}
+            >
+              <Download size={17} />
+              {modelStatus?.installed ? '重装模型' : '安装模型'}
+            </NeonButton>
           </div>
         </div>
       </div>

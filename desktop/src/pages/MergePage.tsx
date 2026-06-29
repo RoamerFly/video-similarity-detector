@@ -39,7 +39,7 @@ import {
   TextInput,
   Toggle,
 } from '@/components/DesignSystem'
-import { Translated } from '@/i18n/useI18n'
+import { Translated } from '@/i18n/Translated'
 import {
   cancelVideoMerge,
   fileName,

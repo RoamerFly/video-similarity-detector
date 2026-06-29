@@ -38,6 +38,15 @@ export interface UpdateDownloadProgress {
   stage: string
 }
 
+export interface ClipModelStatus {
+  installed: boolean
+  modelDir: string
+  sizeBytes: number
+  message: string
+  requiredFiles: string[]
+  missingFiles: string[]
+}
+
 export interface VideoFile {
   path: string
   name: string
@@ -457,6 +466,25 @@ export async function openReleasePage(url: string) {
     return
   }
   return invoke<void>('open_release_page', { url })
+}
+
+export async function getClipModelStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      installed: false,
+      modelDir: 'models/clip-vit-base-patch32',
+      sizeBytes: 0,
+      message: '浏览器预览模式无法检测本地模型。',
+      requiredFiles: ['config.json', 'preprocessor_config.json', 'pytorch_model.bin'],
+      missingFiles: ['config.json', 'preprocessor_config.json', 'pytorch_model.bin'],
+    } satisfies ClipModelStatus
+  }
+  return invoke<ClipModelStatus>('get_clip_model_status')
+}
+
+export async function installClipModel() {
+  if (!hasTauriRuntime()) throw new Error('离线模型安装需要在桌面应用中运行。')
+  return invoke<ClipModelStatus>('install_clip_model')
 }
 
 export async function selectVideoDirectory() {
@@ -1005,6 +1033,19 @@ export async function listenUpdateDownloadProgress(
   if (!hasTauriRuntime()) return () => undefined
   const unlisten = await listen<UpdateDownloadProgress>(
     'update-download-progress',
+    (event) => handler(event.payload),
+  )
+  return () => {
+    unlisten()
+  }
+}
+
+export async function listenClipModelInstallProgress(
+  handler: (payload: UpdateDownloadProgress) => void,
+) {
+  if (!hasTauriRuntime()) return () => undefined
+  const unlisten = await listen<UpdateDownloadProgress>(
+    'clip-model-install-progress',
     (event) => handler(event.payload),
   )
   return () => {

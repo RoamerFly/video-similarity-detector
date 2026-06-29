@@ -27,11 +27,6 @@ export function useI18n() {
   }
 }
 
-export function Translated({ children }: { children: ReactNode }) {
-  const language = useSettingsStore((state) => state.appLanguage)
-  return <>{translateNode(children, language)}</>
-}
-
 export function translateNode(node: ReactNode, language: AppLanguage): ReactNode {
   if (typeof node === 'string') return translateText(node, language)
   if (typeof node === 'number' || node == null || typeof node === 'boolean') return node

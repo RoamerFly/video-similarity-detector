@@ -34,6 +34,9 @@ const CLOSE_BEHAVIOR_TRAY: u8 = 1;
 const CLOSE_BEHAVIOR_EXIT: u8 = 2;
 const RELEASES_LATEST_PAGE_URL: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest";
+const CLIP_MODEL_DOWNLOAD_URL: &str =
+    "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download/clip-vit-base-patch32.zip";
+const CLIP_MODEL_DIR_NAME: &str = "clip-vit-base-patch32";
 const ANALYSIS_VIDEO_CONTEXT_PREFIX: &str = "ANALYSIS_VIDEO_CONTEXT|";
 const ANALYSIS_VIDEO_QUARANTINED_PREFIX: &str = "ANALYSIS_VIDEO_QUARANTINED|";
 static CLOSE_BEHAVIOR: AtomicU8 = AtomicU8::new(CLOSE_BEHAVIOR_ASK);
@@ -102,6 +105,17 @@ struct UpdateDownloadProgress {
     stage: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipModelStatus {
+    installed: bool,
+    model_dir: String,
+    size_bytes: u64,
+    message: String,
+    required_files: Vec<String>,
+    missing_files: Vec<String>,
+}
+
 fn updater_target_for_build(build_flavor: &str) -> Option<String> {
     if cfg!(target_os = "windows") {
         Some(format!("windows-x86_64-{build_flavor}"))
@@ -119,9 +133,7 @@ fn updater_target_for_build(build_flavor: &str) -> Option<String> {
 fn updater_metadata_unavailable_message(error: impl std::fmt::Display) -> String {
     let detail = error.to_string();
     if detail.contains("Could not fetch a valid release JSON") {
-        format!(
-            "自动更新元数据暂不可用，请打开 GitHub 发布页下载最新版。详情：{detail}"
-        )
+        format!("自动更新元数据暂不可用，请打开 GitHub 发布页下载最新版。详情：{detail}")
     } else {
         format!("检查更新通道暂不可用，请打开 GitHub 发布页下载最新版。详情：{detail}")
     }
@@ -1141,6 +1153,93 @@ async fn download_and_install_update(
     }
 }
 
+#[tauri::command]
+fn get_clip_model_status(app: tauri::AppHandle) -> Result<ClipModelStatus, String> {
+    let root = resolve_project_root(&app)?;
+    Ok(clip_model_status_for_root(&root))
+}
+
+#[tauri::command]
+async fn install_clip_model(app: tauri::AppHandle) -> Result<ClipModelStatus, String> {
+    let root = resolve_project_root(&app)?;
+    let model_root = root.join("models");
+    fs::create_dir_all(&model_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "video-similarity-clip-model-{}",
+        timestamp_millis()
+    ));
+    fs::create_dir_all(&temp_root).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let zip_path = temp_root.join("clip-vit-base-patch32.zip");
+
+    emit_model_progress(&app, 0, 0, 2.0, "正在连接 GitHub Releases");
+    let client = reqwest::Client::new();
+    let mut response = client
+        .get(CLIP_MODEL_DOWNLOAD_URL)
+        .header(reqwest::header::USER_AGENT, "video-similarity-desktop")
+        .send()
+        .await
+        .map_err(|e| format!("连接模型下载地址失败: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("模型下载请求失败: {e}"))?;
+
+    let total_bytes = response.content_length().unwrap_or(0);
+    let mut downloaded_bytes = 0u64;
+    let mut output = File::create(&zip_path).map_err(|e| format!("创建模型下载文件失败: {e}"))?;
+    emit_model_progress(&app, 0, total_bytes, 5.0, "正在下载离线 CLIP 模型");
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("读取模型下载数据失败: {e}"))?
+    {
+        output
+            .write_all(&chunk)
+            .map_err(|e| format!("写入模型下载文件失败: {e}"))?;
+        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+        let progress = if total_bytes > 0 {
+            5.0 + downloaded_bytes as f64 / total_bytes as f64 * 65.0
+        } else {
+            5.0
+        };
+        emit_model_progress(
+            &app,
+            downloaded_bytes,
+            total_bytes,
+            progress.min(70.0),
+            "正在下载离线 CLIP 模型",
+        );
+    }
+    output
+        .flush()
+        .map_err(|e| format!("保存模型下载文件失败: {e}"))?;
+
+    let root_for_extract = root.clone();
+    let temp_for_extract = temp_root.clone();
+    let zip_for_extract = zip_path.clone();
+    emit_model_progress(
+        &app,
+        downloaded_bytes,
+        total_bytes,
+        72.0,
+        "正在解压并校验模型",
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        install_clip_model_zip(&root_for_extract, &temp_for_extract, &zip_for_extract)
+    })
+    .await
+    .map_err(|e| format!("模型安装任务异常: {e}"))??;
+
+    let _ = fs::remove_dir_all(&temp_root);
+    emit_model_progress(
+        &app,
+        downloaded_bytes,
+        total_bytes,
+        100.0,
+        "离线 CLIP 模型已安装",
+    );
+    Ok(clip_model_status_for_root(&root))
+}
+
 async fn cancel_check(cancel_state: State<'_, UpdateCancelState>) {
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1188,7 +1287,6 @@ fn open_release_page(url: String) -> Result<(), String> {
         .map_err(|e| format!("打开 GitHub 发布页失败: {e}"))?;
     Ok(())
 }
-
 
 fn resolve_install_root() -> Result<PathBuf, String> {
     std::env::current_exe()
@@ -1387,7 +1485,12 @@ fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
     }
 
     let mut videos = Vec::new();
-    collect_videos(&input_dir, request.recursive.unwrap_or(true), &mut videos, true)?;
+    collect_videos(
+        &input_dir,
+        request.recursive.unwrap_or(true),
+        &mut videos,
+        true,
+    )?;
     videos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(videos)
 }
@@ -2072,7 +2175,12 @@ fn run_batch_compare(
         "--candidate-limit".into(),
         config.candidate_limit.unwrap_or(20).to_string(),
         "--compare-workers".into(),
-        config.compare_workers.unwrap_or(1).max(1).min(8).to_string(),
+        config
+            .compare_workers
+            .unwrap_or(1)
+            .max(1)
+            .min(8)
+            .to_string(),
         "--max-gap-sec".into(),
         config.max_gap_sec.to_string(),
         "--frame-step".into(),
@@ -3628,8 +3736,13 @@ fn get_file_move_status(state: State<FileMoveState>) -> Result<FileMoveStatus, S
     Ok(state.snapshot())
 }
 
-fn move_files_impl(request: MoveFilesRequest, state: FileMoveState) -> Result<MoveFilesResult, String> {
-    let target_dir_text = normalize_display_path(request.target_dir.trim()).trim().to_string();
+fn move_files_impl(
+    request: MoveFilesRequest,
+    state: FileMoveState,
+) -> Result<MoveFilesResult, String> {
+    let target_dir_text = normalize_display_path(request.target_dir.trim())
+        .trim()
+        .to_string();
     if target_dir_text.is_empty() {
         return Err("请选择目标目录".to_string());
     }
@@ -4469,6 +4582,8 @@ fn main() {
             download_and_install_update,
             cancel_update_download,
             open_release_page,
+            get_clip_model_status,
+            install_clip_model,
             select_video_directory,
             select_video_files,
             select_audio_files,
@@ -4630,7 +4745,9 @@ fn resolve_analysis_artifact_path(
     cache_dir: &Path,
     artifact: &AnalysisTaskCacheArtifact,
 ) -> PathBuf {
-    let path_text = normalize_display_path(artifact.path.trim()).trim().to_string();
+    let path_text = normalize_display_path(artifact.path.trim())
+        .trim()
+        .to_string();
     let raw = PathBuf::from(&path_text);
     if raw.is_absolute() {
         return raw;
@@ -5597,6 +5714,189 @@ fn write_text_atomic(target: &Path, content: &str) -> Result<(), String> {
 fn system_time_to_string(time: SystemTime) -> Option<String> {
     let duration = time.duration_since(UNIX_EPOCH).ok()?;
     Some(duration.as_secs().to_string())
+}
+
+fn clip_model_dir(root: &Path) -> PathBuf {
+    root.join("models").join(CLIP_MODEL_DIR_NAME)
+}
+
+fn clip_model_required_files() -> Vec<String> {
+    vec![
+        "config.json".to_string(),
+        "preprocessor_config.json".to_string(),
+        "pytorch_model.bin".to_string(),
+    ]
+}
+
+fn clip_model_missing_files(path: &Path) -> Vec<String> {
+    clip_model_required_files()
+        .into_iter()
+        .filter(|name| !path.join(name).is_file())
+        .collect()
+}
+
+fn is_complete_clip_model(path: &Path) -> bool {
+    path.is_dir() && clip_model_missing_files(path).is_empty()
+}
+
+fn clip_model_status_for_root(root: &Path) -> ClipModelStatus {
+    let model_dir = clip_model_dir(root);
+    let missing_files = clip_model_missing_files(&model_dir);
+    let installed = missing_files.is_empty();
+    let size_bytes = directory_size(&model_dir).unwrap_or(0);
+    ClipModelStatus {
+        installed,
+        model_dir: path_to_string(&model_dir),
+        size_bytes,
+        message: if installed {
+            "Offline CLIP model is ready.".to_string()
+        } else {
+            "Offline CLIP model is not installed. The app will download from Hugging Face when online.".to_string()
+        },
+        required_files: clip_model_required_files(),
+        missing_files,
+    }
+}
+
+fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Result<(), String> {
+    let extract_root = temp_root.join("extracted");
+    if extract_root.exists() {
+        fs::remove_dir_all(&extract_root).map_err(|e| format!("清理临时模型目录失败: {e}"))?;
+    }
+    fs::create_dir_all(&extract_root).map_err(|e| format!("创建临时模型目录失败: {e}"))?;
+
+    let zip_file = File::open(zip_path).map_err(|e| format!("打开模型 zip 失败: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(zip_file).map_err(|e| format!("读取模型 zip 失败: {e}"))?;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| format!("读取模型 zip 条目失败: {e}"))?;
+        let enclosed = file
+            .enclosed_name()
+            .ok_or_else(|| format!("模型 zip 包含不安全路径: {}", file.name()))?
+            .to_path_buf();
+        let destination = extract_root.join(enclosed);
+        if file.is_dir() {
+            fs::create_dir_all(&destination).map_err(|e| format!("创建模型目录失败: {e}"))?;
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建模型目录失败: {e}"))?;
+        }
+        let mut output =
+            File::create(&destination).map_err(|e| format!("写入模型文件失败: {e}"))?;
+        std::io::copy(&mut file, &mut output).map_err(|e| format!("解压模型文件失败: {e}"))?;
+    }
+
+    let extracted_model = if is_complete_clip_model(&extract_root) {
+        extract_root.clone()
+    } else {
+        extract_root.join(CLIP_MODEL_DIR_NAME)
+    };
+    if !is_complete_clip_model(&extracted_model) {
+        let missing = clip_model_missing_files(&extracted_model).join(", ");
+        return Err(format!("模型 zip 校验失败，缺少文件: {missing}"));
+    }
+
+    let models_root = root.join("models");
+    fs::create_dir_all(&models_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
+    let target = clip_model_dir(root);
+    let old = models_root.join(format!(
+        ".{}-old-{}",
+        CLIP_MODEL_DIR_NAME,
+        timestamp_millis()
+    ));
+    if target.exists() {
+        if old.exists() {
+            fs::remove_dir_all(&old).map_err(|e| format!("清理旧模型备份失败: {e}"))?;
+        }
+        fs::rename(&target, &old).map_err(|e| format!("备份旧模型目录失败: {e}"))?;
+    }
+    if let Err(rename_error) = fs::rename(&extracted_model, &target) {
+        if let Err(copy_error) = copy_dir_recursive(&extracted_model, &target) {
+            if let Err(restore_error) = restore_clip_model_backup(&target, &old) {
+                return Err(format!(
+                    "安装模型失败: {rename_error}; 复制回退失败: {copy_error}; 恢复旧模型也失败: {restore_error}"
+                ));
+            }
+            return Err(format!(
+                "安装模型失败: {rename_error}; 复制回退失败: {copy_error}"
+            ));
+        }
+        let _ = fs::remove_dir_all(&extracted_model);
+    }
+    if old.exists() {
+        fs::remove_dir_all(&old).map_err(|e| format!("清理旧模型备份失败: {e}"))?;
+    }
+    Ok(())
+}
+
+fn restore_clip_model_backup(target: &Path, backup: &Path) -> Result<(), String> {
+    if target.exists() {
+        fs::remove_dir_all(target).map_err(|e| format!("清理失败模型目录失败: {e}"))?;
+    }
+    if backup.exists() {
+        fs::rename(backup, target).map_err(|e| format!("恢复旧模型目录失败: {e}"))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    if target.exists() {
+        fs::remove_dir_all(target).map_err(|e| format!("清理目标模型目录失败: {e}"))?;
+    }
+    fs::create_dir_all(target).map_err(|e| format!("创建目标模型目录失败: {e}"))?;
+    for entry in fs::read_dir(source).map_err(|e| format!("读取模型目录失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("读取模型目录项失败: {e}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path).map_err(|e| {
+                format!(
+                    "复制模型文件失败 {} -> {}: {e}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn directory_size(path: &Path) -> std::io::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_file() {
+        return Ok(path.metadata()?.len());
+    }
+    let mut size = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        size = size.saturating_add(directory_size(&entry.path())?);
+    }
+    Ok(size)
+}
+
+fn emit_model_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    progress: f64,
+    stage: &str,
+) {
+    let _ = app.emit(
+        "clip-model-install-progress",
+        UpdateDownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            progress: progress.clamp(0.0, 100.0),
+            stage: stage.to_string(),
+        },
+    );
 }
 
 fn timestamp_millis() -> u128 {

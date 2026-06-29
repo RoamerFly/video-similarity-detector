@@ -629,6 +629,7 @@ jobs:
           printf '%s' "$key" > .tauri/updater-key.private
           export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/.tauri/updater-key.private"
           export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
+          unset TAURI_UPDATER_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY
 
           assets=(
             "release-assets/${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb"
@@ -638,7 +639,9 @@ jobs:
           for asset in "${assets[@]}"; do
             test -f "$asset"
             if [ ! -f "$asset.sig" ]; then
-              npx --yes @tauri-apps/cli@2 signer sign "$asset"
+              npx --yes @tauri-apps/cli@2 signer sign \
+                --password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" \
+                "$asset"
             fi
             test -s "$asset.sig"
           done
