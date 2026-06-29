@@ -15,6 +15,10 @@ on:
         description: "Optional release title"
         required: false
         type: string
+      release_notes:
+        description: "Release notes shown in the app update dialog and at the top of the GitHub release"
+        required: false
+        type: string
       prerelease:
         description: "Mark release as prerelease"
         required: false
@@ -39,7 +43,20 @@ env:
   EXECUTABLE_NAME: video-similarity-desktop
   NODE_VERSION: "22"
   PYTHON_VERSION: "3.10"
+  DOWNLOAD_GUIDE: |
+    ## Download Guide
 
+    - Windows CPU installer, recommended for most users: `Video_Similarity-v*-windows-x64-cpu-installer.exe`
+    - Windows GPU installer, for NVIDIA/CUDA users: `Video_Similarity-v*-windows-x64-gpu-installer.exe`
+    - Windows portable package: matching `windows-x64-*-portable.zip`; unzip it and run the exe inside
+    - macOS Apple Silicon / M-series: `Video_Similarity-v*-macos-arm64-installer.dmg`
+    - macOS Intel: `Video_Similarity-v*-macos-x64-installer.dmg`
+    - Linux Debian/Ubuntu: `Video_Similarity-v*-linux-x64-installer.deb`
+    - Linux Fedora/openSUSE/RHEL: `Video_Similarity-v*-linux-x64-installer.rpm`
+    - Linux portable package: `Video_Similarity-v*-linux-x64-portable.tar.gz`
+    - Offline CLIP model: `clip-vit-base-patch32.zip`; unzip it into the app-local `models/` directory
+
+    `.sig` and `latest.json` / `windows.json` / `darwin.json` / `linux.json` are mainly for automatic updates and signature verification. Most users do not need to download them manually.
 jobs:
   linux:
     name: Build Linux x64
@@ -593,26 +610,71 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Sign non-Windows updater assets
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+          TAURI_UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p .tauri
+          key="${TAURI_UPDATER_PRIVATE_KEY:-${TAURI_SIGNING_PRIVATE_KEY:-}}"
+          if [ -z "$key" ]; then
+            echo "::error::Missing updater signing key secret. Set TAURI_UPDATER_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY."
+            exit 1
+          fi
+          printf '%s' "$key" > .tauri/updater-key.private
+          export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/.tauri/updater-key.private"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_UPDATER_PRIVATE_KEY_PASSWORD:-${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}}"
+
+          assets=(
+            "release-assets/${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb"
+            "release-assets/${APP_NAME}-${TAG_NAME}-macos-arm64-installer.dmg"
+            "release-assets/${APP_NAME}-${TAG_NAME}-macos-x64-installer.dmg"
+          )
+          for asset in "${assets[@]}"; do
+            test -f "$asset"
+            if [ ! -f "$asset.sig" ]; then
+              npx --yes @tauri-apps/cli@2 signer sign "$asset"
+            fi
+            test -s "$asset.sig"
+          done
+
       - name: Resolve release metadata
         id: meta
         shell: bash
+        env:
+          RELEASE_NOTES_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || '' }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             tag_name="${{ inputs.tag_name }}"
             release_name="${{ inputs.release_name }}"
+            release_notes="${RELEASE_NOTES_INPUT:-}"
             prerelease="${{ inputs.prerelease }}"
             draft="${{ inputs.draft }}"
           else
             tag_name="${GITHUB_REF_NAME}"
             release_name=""
+            release_notes=""
             prerelease="false"
             draft="false"
           fi
           if [ -z "$release_name" ]; then
             release_name="${DISPLAY_NAME} ${tag_name}"
           fi
+          if [ -z "$release_notes" ]; then
+            release_notes=$'## Release Notes\n\n- This release includes refreshed app builds, updater metadata, and the offline CLIP model asset.'
+          fi
           echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
           echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_notes<<EOF"
+            echo "$release_notes"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
 
@@ -653,11 +715,14 @@ jobs:
           set -euo pipefail
           expected=(
             "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb"
+            "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb.sig"
             "${APP_NAME}-${TAG_NAME}-linux-x64-installer.rpm"
             "${APP_NAME}-${TAG_NAME}-linux-x64-portable.tar.gz"
             "${APP_NAME}-${TAG_NAME}-macos-arm64-installer.dmg"
+            "${APP_NAME}-${TAG_NAME}-macos-arm64-installer.dmg.sig"
             "${APP_NAME}-${TAG_NAME}-macos-arm64-portable.zip"
             "${APP_NAME}-${TAG_NAME}-macos-x64-installer.dmg"
+            "${APP_NAME}-${TAG_NAME}-macos-x64-installer.dmg.sig"
             "${APP_NAME}-${TAG_NAME}-macos-x64-portable.zip"
             "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-installer.exe"
             "${APP_NAME}-${TAG_NAME}-windows-x64-cpu-installer.exe.sig"
@@ -687,6 +752,7 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+          RELEASE_NOTES: ${{ steps.meta.outputs.release_notes }}
         run: |
           set -euo pipefail
           git fetch --force --tags
@@ -699,30 +765,31 @@ jobs:
               awk -v current="$TAG_NAME" '$0 != current { print; exit }'
           )"
           {
-            echo "新版本内容"
-            echo "- 第一行资源：\`clip-vit-base-patch32.zip\` 已随本次 Release 上传，可用于离线部署 CLIP 模型。"
+            printf '%s\n' "$RELEASE_NOTES"
             echo
             if [ -n "$previous_tag" ] && git rev-parse -q --verify "${previous_tag}^{commit}" >/dev/null; then
-              echo "相较于 ${previous_tag} 的更新："
+              echo "## Commits since ${previous_tag}"
               log_output="$(git log --pretty=format:'- %s (%h)' --no-merges "${previous_tag}..${range_end}" || true)"
               if [ -n "$log_output" ]; then
                 echo "$log_output"
               else
-                echo "- 本次发布包含构建产物刷新与发布资源更新。"
+                echo "- This release refreshes build artifacts and release assets."
               fi
             else
-              echo "相较于上个 Release 的更新："
-              echo "- 本次发布包含构建产物刷新与发布资源更新。"
+              echo "## Changes since the previous release"
+              echo "- This release refreshes build artifacts and release assets."
             fi
+            echo
+            printf '%s\n' "$DOWNLOAD_GUIDE"
           } > release_body.md
+          printf '%s\n' "$RELEASE_NOTES" > release_notes.md
           cat release_body.md
-
       - name: Generate updater metadata
         shell: bash
         env:
           TAG_NAME: ${{ steps.meta.outputs.tag_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: node scripts/finalize-updater-metadata.mjs "$TAG_NAME" "$GITHUB_REPOSITORY" release-assets release_body.md
+        run: node scripts/finalize-updater-metadata.mjs "$TAG_NAME" "$GITHUB_REPOSITORY" release-assets release_notes.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -737,3 +804,4 @@ jobs:
             model-assets/clip-vit-base-patch32.zip
             release-assets/*
           fail_on_unmatched_files: true
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}

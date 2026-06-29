@@ -36,21 +36,50 @@ function platform(assetName) {
 
 const cpuAsset = `Video_Similarity-${version}-windows-x64-cpu-installer.exe`
 const gpuAsset = `Video_Similarity-${version}-windows-x64-gpu-installer.exe`
+const macosArmAsset = `Video_Similarity-${version}-macos-arm64-installer.dmg`
+const macosX64Asset = `Video_Similarity-${version}-macos-x64-installer.dmg`
+const linuxAsset = `Video_Similarity-${version}-linux-x64-installer.deb`
 
-const metadata = {
-  version: appVersion,
-  notes: notes || `Video Similarity v${appVersion}`,
-  pub_date: new Date().toISOString(),
-  platforms: {
-    'windows-x86_64-cpu': platform(cpuAsset),
-    'windows-x86_64-gpu': platform(gpuAsset),
-    'windows-x86_64-nsis': platform(cpuAsset),
-    'windows-x86_64': platform(cpuAsset),
-  },
+function metadata(platforms) {
+  return {
+    version: appVersion,
+    notes: notes || `Video Similarity v${appVersion}`,
+    pub_date: new Date().toISOString(),
+    platforms,
+  }
 }
 
-for (const output of ['latest.json', 'windows.json']) {
-  fs.writeFileSync(path.join(assetDir, output), `${JSON.stringify(metadata, null, 2)}\n`)
+const windowsPlatforms = {
+  'windows-x86_64-cpu': platform(cpuAsset),
+  'windows-x86_64-gpu': platform(gpuAsset),
+  'windows-x86_64-nsis': platform(cpuAsset),
+  'windows-x86_64': platform(cpuAsset),
 }
 
-console.log(`Generated updater metadata for ${version}`)
+const darwinPlatforms = {
+  'darwin-aarch64': platform(macosArmAsset),
+  'darwin-x86_64': platform(macosX64Asset),
+}
+
+const linuxPlatforms = {
+  'linux-x86_64': platform(linuxAsset),
+}
+
+const latestMetadata = metadata({
+  ...windowsPlatforms,
+  ...darwinPlatforms,
+  ...linuxPlatforms,
+})
+
+const outputs = {
+  'latest.json': latestMetadata,
+  'windows.json': metadata(windowsPlatforms),
+  'darwin.json': metadata(darwinPlatforms),
+  'linux.json': metadata(linuxPlatforms),
+}
+
+for (const [output, data] of Object.entries(outputs)) {
+  fs.writeFileSync(path.join(assetDir, output), `${JSON.stringify(data, null, 2)}\n`)
+}
+
+console.log(`Generated updater metadata for ${version}: ${Object.keys(outputs).join(', ')}`)

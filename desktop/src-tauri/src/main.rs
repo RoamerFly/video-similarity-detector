@@ -105,6 +105,12 @@ struct UpdateDownloadProgress {
 fn updater_target_for_build(build_flavor: &str) -> Option<String> {
     if cfg!(target_os = "windows") {
         Some(format!("windows-x86_64-{build_flavor}"))
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        Some("darwin-aarch64".to_string())
+    } else if cfg!(target_os = "macos") {
+        Some("darwin-x86_64".to_string())
+    } else if cfg!(target_os = "linux") {
+        Some("linux-x86_64".to_string())
     } else {
         None
     }
