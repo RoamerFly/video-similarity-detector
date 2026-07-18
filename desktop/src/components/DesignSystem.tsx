@@ -6,7 +6,7 @@ import type {
   ReactNode,
   SelectHTMLAttributes,
 } from 'react'
-import { useCallback, useState } from 'react'
+import { forwardRef, useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Info } from 'lucide-react'
 import { useI18n } from '@/i18n/useI18n'
@@ -28,13 +28,16 @@ interface GlassPanelProps extends HTMLAttributes<HTMLElement> {
   active?: boolean
 }
 
-export function GlassPanel({ children, className, active = false, ...props }: GlassPanelProps) {
+export const GlassPanel = forwardRef<HTMLElement, GlassPanelProps>(function GlassPanel(
+  { children, className, active = false, ...props },
+  ref,
+) {
   return (
-    <section className={cn('glass-panel', active && 'is-active', className)} {...props}>
+    <section ref={ref} className={cn('glass-panel', active && 'is-active', className)} {...props}>
       {children}
     </section>
   )
-}
+})
 
 interface NeonButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'outline' | 'ghost'
@@ -82,11 +85,15 @@ export function StatCard({ title, value, unit, icon, tone = 'blue', className }:
   )
 }
 
-export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function TextInput(
+  { className, ...props },
+  ref,
+) {
   const { t } = useI18n()
   const title = props.title ?? (typeof props.value === 'string' ? props.value : undefined)
   return (
     <input
+      ref={ref}
       className={cn('design-input', className)}
       {...props}
       placeholder={typeof props.placeholder === 'string' ? t(props.placeholder) : props.placeholder}
@@ -94,7 +101,7 @@ export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInput
       aria-label={typeof props['aria-label'] === 'string' ? t(props['aria-label']) : props['aria-label']}
     />
   )
-}
+})
 
 export function SelectInput({ className, children, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
   const { t, tn } = useI18n()

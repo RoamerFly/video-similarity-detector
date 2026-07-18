@@ -23,6 +23,7 @@ interface SettingsActions {
   setVideoDir: (dir: string) => void
   setCacheDir: (dir: string) => void
   setReportDir: (dir: string) => void
+  setNetworkProxy: (proxy: string) => void
   setDefaultSkipThreshold: (value: number) => void
   setDefaultMatchThreshold: (value: number) => void
   setDefaultWindowSize: (value: number) => void
@@ -89,6 +90,7 @@ export const useSettingsStore = create<SettingsState>()(
       setVideoDir: (videoDir) => set({ videoDir: normalizePathForDisplay(videoDir) }),
       setCacheDir: (cacheDir) => set({ cacheDir: normalizePathForDisplay(cacheDir) }),
       setReportDir: (reportDir) => set({ reportDir: normalizePathForDisplay(reportDir) }),
+      setNetworkProxy: (networkProxy) => set({ networkProxy: networkProxy.trim() }),
       setDefaultSkipThreshold: (defaultSkipThreshold) => updateAnalysis({ defaultSkipThreshold }),
       setDefaultMatchThreshold: (defaultMatchThreshold) => updateAnalysis({
         defaultMatchThreshold: clampFloat(defaultMatchThreshold, 0.3, 0.99),
@@ -270,6 +272,7 @@ export const useSettingsStore = create<SettingsState>()(
           videoDir: normalizePathForDisplay(defaults?.videoDir || defaultSettings.videoDir),
           cacheDir: normalizePathForDisplay(defaults?.cacheDir || defaultSettings.cacheDir),
           reportDir: normalizePathForDisplay(defaults?.reportDir || defaultSettings.reportDir),
+          networkProxy: defaultSettings.networkProxy,
           checkEnvOnStartup: defaultSettings.checkEnvOnStartup,
           openMaximized: defaultSettings.openMaximized,
           closeBehavior: defaultSettings.closeBehavior,
@@ -326,6 +329,7 @@ export function settingsSnapshotFromState(settings: SettingsSnapshot): SettingsS
     videoDir: settings.videoDir,
     cacheDir: settings.cacheDir,
     reportDir: settings.reportDir,
+    networkProxy: settings.networkProxy,
     defaultSkipThreshold: settings.defaultSkipThreshold,
     defaultMatchThreshold: settings.defaultMatchThreshold,
     defaultWindowSize: settings.defaultWindowSize,
@@ -476,6 +480,7 @@ function sanitizePersistedSettings(value: unknown): Partial<SettingsSnapshot> {
     videoDir: normalizePathForDisplay(snapshot.videoDir ?? defaultSettings.videoDir),
     cacheDir: normalizePathForDisplay(snapshot.cacheDir ?? defaultSettings.cacheDir),
     reportDir: normalizePathForDisplay(snapshot.reportDir ?? defaultSettings.reportDir),
+    networkProxy: typeof snapshot.networkProxy === 'string' ? snapshot.networkProxy.trim() : defaultSettings.networkProxy,
     defaultResizeMode: resizeMode,
     defaultMatchThreshold: Number.isFinite(matchThreshold)
       ? clampFloat(matchThreshold, 0.3, 0.99)

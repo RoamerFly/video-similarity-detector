@@ -39,7 +39,7 @@ export interface MergeAudioItem {
   path: string
   name: string
   trackId: string
-  startTime: number
+  startTime: number | null
   trimStart: number
   trimEnd: number
   sourceType: 'external' | 'video'
@@ -140,7 +140,7 @@ interface MergeState {
   splitVideo: (id: string, sourceTime: number, timelineTime: number) => string | null
   clearVideos: () => void
   addAudio: (audio: Omit<MergeAudioItem, 'id' | 'trackId'> & { trackId?: string }) => string
-  addAudioFiles: (paths: string[], startTime?: number, trackId?: string) => number
+  addAudioFiles: (paths: string[], startTime?: number | null, trackId?: string) => number
   updateAudio: (
     id: string,
     patch: Partial<Pick<MergeAudioItem, 'trackId' | 'startTime' | 'trimStart' | 'trimEnd'>>,
@@ -373,7 +373,7 @@ export const useMergeStore = create<MergeState>()(
         }))
         return id
       },
-      addAudioFiles: (paths, startTime = 0, trackId) => {
+      addAudioFiles: (paths, startTime = null, trackId) => {
         const state = get()
         const targetTrackId = validTrackId(state.audioTracks, trackId, defaultAudioTrack.id)
         const existing = new Set(
@@ -653,12 +653,15 @@ function normalizeAudioItem<T extends Partial<MergeAudioItem> & Pick<MergeAudioI
   item: T,
   tracks: MergeTrack[],
 ): MergeAudioItem {
+  const startTime = item.startTime === null || item.startTime === undefined
+    ? null
+    : Math.max(0, Number(item.startTime) || 0)
   return {
     id: item.id && item.id.includes('-') ? item.id : createId('audio'),
     path: item.path,
     name: item.name,
     trackId: validTrackId(tracks, item.trackId, tracks[0]?.id ?? defaultAudioTrack.id),
-    startTime: Math.max(0, Number(item.startTime) || 0),
+    startTime,
     trimStart: Math.max(0, Number(item.trimStart) || 0),
     trimEnd: Math.max(0, Number(item.trimEnd) || 0),
     sourceType: item.sourceType === 'video' ? 'video' : 'external',

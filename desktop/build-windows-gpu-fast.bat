@@ -11,16 +11,20 @@ if not exist "%PS_SCRIPT%" (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
+set "PS_EXE=powershell"
+where pwsh >nul 2>nul
+if "%ERRORLEVEL%"=="0" set "PS_EXE=pwsh"
+
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
     echo.
     echo [ERROR] GPU fast build failed with exit code %EXIT_CODE%.
-    pause
+    if not defined CI pause
     exit /b %EXIT_CODE%
 )
 
 echo.
 echo GPU fast build completed successfully.
-pause
+if not defined CI pause

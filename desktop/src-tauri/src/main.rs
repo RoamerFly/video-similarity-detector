@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -153,6 +153,38 @@ fn updater_install_error_message(error: impl std::fmt::Display) -> String {
     } else {
         format!("下载并安装更新失败: {detail}")
     }
+}
+
+fn normalized_proxy_url(proxy_url: Option<&str>) -> Result<Option<reqwest::Url>, String> {
+    let Some(value) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|e| format!("代理地址格式无效，请使用 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890：{e}"))?;
+    match parsed.scheme() {
+        "http" | "https" | "socks5" | "socks5h" => Ok(Some(parsed)),
+        scheme => Err(format!("不支持的代理协议 {scheme}，请使用 http、https、socks5 或 socks5h")),
+    }
+}
+
+fn apply_updater_proxy(
+    builder: tauri_plugin_updater::UpdaterBuilder,
+    proxy_url: Option<&str>,
+) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
+    Ok(match normalized_proxy_url(proxy_url)? {
+        Some(proxy) => builder.proxy(proxy),
+        None => builder,
+    })
+}
+
+fn apply_reqwest_proxy(
+    builder: reqwest::ClientBuilder,
+    proxy_url: Option<&str>,
+) -> Result<reqwest::ClientBuilder, String> {
+    Ok(match normalized_proxy_url(proxy_url)? {
+        Some(proxy) => builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("创建代理配置失败: {e}"))?),
+        None => builder,
+    })
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -982,7 +1014,7 @@ fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
 }
 
 #[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+async fn check_for_updates(app: tauri::AppHandle, proxy_url: Option<String>) -> Result<UpdateInfo, String> {
     let root = resolve_project_root(&app)?;
     let current_version = app.package_info().version.to_string();
     let build_flavor = detect_build_flavor(&root);
@@ -993,6 +1025,7 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> 
     if let Some(target) = updater_target_for_build(&build_flavor) {
         updater_builder = updater_builder.target(target);
     }
+    updater_builder = apply_updater_proxy(updater_builder, proxy_url.as_deref())?;
     let updater = updater_builder
         .build()
         .map_err(|e| format!("初始化更新检查失败: {e}"))?;
@@ -1073,6 +1106,7 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateInfo, String> 
 async fn download_and_install_update(
     app: tauri::AppHandle,
     cancel_state: State<'_, UpdateCancelState>,
+    proxy_url: Option<String>,
 ) -> Result<(), String> {
     cancel_state.cancel_requested.store(false, Ordering::SeqCst);
 
@@ -1083,6 +1117,7 @@ async fn download_and_install_update(
     if let Some(target) = updater_target_for_build(&build_flavor) {
         updater_builder = updater_builder.target(target);
     }
+    updater_builder = apply_updater_proxy(updater_builder, proxy_url.as_deref())?;
     #[cfg(target_os = "windows")]
     {
         updater_builder = updater_builder
@@ -1160,58 +1195,28 @@ fn get_clip_model_status(app: tauri::AppHandle) -> Result<ClipModelStatus, Strin
 }
 
 #[tauri::command]
-async fn install_clip_model(app: tauri::AppHandle) -> Result<ClipModelStatus, String> {
+async fn install_clip_model(app: tauri::AppHandle, proxy_url: Option<String>) -> Result<ClipModelStatus, String> {
     let root = resolve_project_root(&app)?;
     let model_root = root.join("models");
     fs::create_dir_all(&model_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
 
+    let download_root = model_root.join(".downloads");
+    fs::create_dir_all(&download_root).map_err(|e| format!("创建模型下载缓存目录失败: {e}"))?;
+    let zip_path = download_root.join("clip-vit-base-patch32.zip");
     let temp_root = std::env::temp_dir().join(format!(
         "video-similarity-clip-model-{}",
         timestamp_millis()
     ));
     fs::create_dir_all(&temp_root).map_err(|e| format!("创建临时目录失败: {e}"))?;
-    let zip_path = temp_root.join("clip-vit-base-patch32.zip");
 
-    emit_model_progress(&app, 0, 0, 2.0, "正在连接 GitHub Releases");
-    let client = reqwest::Client::new();
-    let mut response = client
-        .get(CLIP_MODEL_DOWNLOAD_URL)
-        .header(reqwest::header::USER_AGENT, "video-similarity-desktop")
-        .send()
-        .await
-        .map_err(|e| format!("连接模型下载地址失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("模型下载请求失败: {e}"))?;
-
-    let total_bytes = response.content_length().unwrap_or(0);
-    let mut downloaded_bytes = 0u64;
-    let mut output = File::create(&zip_path).map_err(|e| format!("创建模型下载文件失败: {e}"))?;
-    emit_model_progress(&app, 0, total_bytes, 5.0, "正在下载离线 CLIP 模型");
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("读取模型下载数据失败: {e}"))?
-    {
-        output
-            .write_all(&chunk)
-            .map_err(|e| format!("写入模型下载文件失败: {e}"))?;
-        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-        let progress = if total_bytes > 0 {
-            5.0 + downloaded_bytes as f64 / total_bytes as f64 * 65.0
-        } else {
-            5.0
-        };
-        emit_model_progress(
-            &app,
-            downloaded_bytes,
-            total_bytes,
-            progress.min(70.0),
-            "正在下载离线 CLIP 模型",
-        );
-    }
-    output
-        .flush()
-        .map_err(|e| format!("保存模型下载文件失败: {e}"))?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .pool_max_idle_per_host(4)
+        .tcp_nodelay(true);
+    let client = apply_reqwest_proxy(client, proxy_url.as_deref())?
+        .build()
+        .map_err(|e| format!("初始化模型下载客户端失败: {e}"))?;
+    let (downloaded_bytes, total_bytes) = download_clip_model_zip(&app, &client, &zip_path).await?;
 
     let root_for_extract = root.clone();
     let temp_for_extract = temp_root.clone();
@@ -1223,13 +1228,21 @@ async fn install_clip_model(app: tauri::AppHandle) -> Result<ClipModelStatus, St
         72.0,
         "正在解压并校验模型",
     );
-    tauri::async_runtime::spawn_blocking(move || {
+    let install_result = tauri::async_runtime::spawn_blocking(move || {
         install_clip_model_zip(&root_for_extract, &temp_for_extract, &zip_for_extract)
     })
     .await
-    .map_err(|e| format!("模型安装任务异常: {e}"))??;
+    .map_err(|e| format!("模型安装任务异常: {e}"))
+    .and_then(|result| result);
+    if let Err(error) = install_result {
+        let _ = fs::remove_dir_all(&temp_root);
+        let _ = fs::remove_file(&zip_path);
+        return Err(error);
+    }
 
     let _ = fs::remove_dir_all(&temp_root);
+    let _ = fs::remove_file(&zip_path);
+    let _ = fs::remove_file(zip_path.with_extension("zip.part"));
     emit_model_progress(
         &app,
         downloaded_bytes,
@@ -1238,6 +1251,122 @@ async fn install_clip_model(app: tauri::AppHandle) -> Result<ClipModelStatus, St
         "离线 CLIP 模型已安装",
     );
     Ok(clip_model_status_for_root(&root))
+}
+
+async fn download_clip_model_zip(
+    app: &tauri::AppHandle,
+    client: &reqwest::Client,
+    zip_path: &Path,
+) -> Result<(u64, u64), String> {
+    if zip_path.is_file() {
+        let size = fs::metadata(zip_path).map(|meta| meta.len()).unwrap_or(0);
+        if size > 0 {
+            emit_model_progress(app, size, size, 70.0, "已找到模型下载缓存，正在校验");
+            return Ok((size, size));
+        }
+    }
+
+    emit_model_progress(app, 0, 0, 2.0, "正在连接 GitHub Releases 最新模型");
+    download_file_with_resume(app, client, CLIP_MODEL_DOWNLOAD_URL, zip_path)
+        .await
+        .map_err(|error| format!("模型下载失败，已保留未完成的 .part 文件供下次续传。{error}"))
+}
+
+async fn download_file_with_resume(
+    app: &tauri::AppHandle,
+    client: &reqwest::Client,
+    url: &str,
+    destination: &Path,
+) -> Result<(u64, u64), String> {
+    let part_path = destination.with_extension("zip.part");
+    let existing_bytes = fs::metadata(&part_path).map(|meta| meta.len()).unwrap_or(0);
+    let mut request = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "video-similarity-desktop")
+        .header(reqwest::header::ACCEPT, "application/octet-stream");
+    if existing_bytes > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={existing_bytes}-"));
+    }
+
+    let mut response = request
+        .send()
+        .await
+        .map_err(|e| format!("连接失败: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+
+    let can_resume = existing_bytes > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+    let downloaded_start = if can_resume {
+        existing_bytes
+    } else {
+        if existing_bytes > 0 {
+            let _ = fs::remove_file(&part_path);
+        }
+        0
+    };
+    let total_bytes = response
+        .content_length()
+        .map(|length| length.saturating_add(downloaded_start))
+        .unwrap_or(0);
+    let mut downloaded_bytes = downloaded_start;
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(can_resume)
+        .truncate(!can_resume)
+        .open(&part_path)
+        .map_err(|e| format!("创建模型下载缓存失败: {e}"))?;
+
+    emit_model_progress(
+        app,
+        downloaded_bytes,
+        total_bytes,
+        if total_bytes > 0 {
+            5.0 + downloaded_bytes as f64 / total_bytes as f64 * 65.0
+        } else {
+            5.0
+        },
+        if can_resume { "正在续传离线 CLIP 模型" } else { "正在下载离线 CLIP 模型" },
+    );
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("读取下载数据失败: {e}"))?
+    {
+        output
+            .write_all(&chunk)
+            .map_err(|e| format!("写入模型下载缓存失败: {e}"))?;
+        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+        let progress = if total_bytes > 0 {
+            5.0 + downloaded_bytes as f64 / total_bytes as f64 * 65.0
+        } else {
+            5.0
+        };
+        emit_model_progress(
+            app,
+            downloaded_bytes,
+            total_bytes,
+            progress.min(70.0),
+            if can_resume { "正在续传离线 CLIP 模型" } else { "正在下载离线 CLIP 模型" },
+        );
+    }
+    output
+        .flush()
+        .map_err(|e| format!("保存模型下载缓存失败: {e}"))?;
+    if total_bytes > 0 && downloaded_bytes < total_bytes {
+        return Err(format!(
+            "下载不完整，已下载 {} / {} 字节",
+            downloaded_bytes, total_bytes
+        ));
+    }
+    if destination.exists() {
+        let _ = fs::remove_file(destination);
+    }
+    fs::rename(&part_path, destination).map_err(|e| format!("保存模型 zip 失败: {e}"))?;
+    Ok((downloaded_bytes, total_bytes.max(downloaded_bytes)))
 }
 
 async fn cancel_check(cancel_state: State<'_, UpdateCancelState>) {
@@ -4567,10 +4696,12 @@ fn main() {
                     }
                     CLOSE_BEHAVIOR_ASK => {
                         api.prevent_close();
+                        show_main_window(window.app_handle());
                         let _ = window.emit("app-close-requested", ());
                     }
                     _ => {
                         api.prevent_close();
+                        show_main_window(window.app_handle());
                         let _ = window.emit("app-exit-requested", ());
                     }
                 }

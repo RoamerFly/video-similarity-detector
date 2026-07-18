@@ -1,5 +1,8 @@
 @echo off
 chcp 65001 >nul
+setlocal EnableExtensions
+
+cd /d "%~dp0"
 
 echo ========================================
 echo   Video Similarity - Dev Mode
@@ -25,6 +28,12 @@ if exist "icon.ico" (
 if not exist "node_modules" (
     echo Installing dependencies...
     call npm install
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] npm install failed.
+        if not defined CI pause
+        exit /b 1
+    )
     echo.
 )
 
@@ -34,3 +43,10 @@ echo Press Ctrl+C to stop
 echo.
 
 call npm run tauri:dev
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" (
+    echo.
+    echo [ERROR] Dev mode exited with code %EXIT_CODE%.
+    if not defined CI pause
+    exit /b %EXIT_CODE%
+)

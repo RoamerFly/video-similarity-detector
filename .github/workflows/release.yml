@@ -669,7 +669,11 @@ jobs:
             release_name="${DISPLAY_NAME} ${tag_name}"
           fi
           if [ -z "$release_notes" ]; then
-            release_notes=$'## Release Notes\n\n- This release includes refreshed app builds, updater metadata, and the offline CLIP model asset.'
+            if [ -s release_note.txt ]; then
+              release_notes="$(cat release_note.txt)"
+            else
+              release_notes=$'## Release Notes\n\n- This release includes refreshed app builds, updater metadata, and the offline CLIP model asset.'
+            fi
           fi
           echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
           echo "release_name=$release_name" >> "$GITHUB_OUTPUT"

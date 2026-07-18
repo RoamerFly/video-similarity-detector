@@ -6746,6 +6746,20 @@ select {
   gap: 7px;
 }
 
+.editor-toolbar-group .neon-button {
+  min-height: 34px;
+  padding: 0 10px;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.editor-toolbar-group .neon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 .editor-toolbar-group.right {
   justify-content: flex-end;
 }
@@ -6793,7 +6807,7 @@ select {
   margin: 0 auto;
   grid-template-columns: minmax(520px, 720px) minmax(320px, 380px);
   justify-content: center;
-  align-items: start;
+  align-items: stretch;
   gap: 10px;
 }
 
@@ -6810,7 +6824,7 @@ select {
   width: 100%;
   max-width: 720px;
   padding: 10px;
-  align-self: start;
+  align-self: stretch;
   grid-template-rows: auto 44px auto;
   gap: 8px;
 }
@@ -7516,6 +7530,33 @@ select {
   font: 11px/1 Consolas, monospace;
 }
 
+.timeline-tool-card .timeline-zoom-value,
+.timeline-zoom-input {
+  min-width: 44px;
+  width: auto;
+  height: 24px;
+  padding: 0 5px;
+  color: rgba(221, 234, 255, 0.86);
+  text-align: center;
+  font: 11px/1 Consolas, monospace;
+  border: 1px solid rgba(101, 152, 223, 0.24);
+  border-radius: 5px;
+  background: rgba(4, 14, 35, 0.58);
+}
+
+.timeline-tool-card .timeline-zoom-value {
+  cursor: text;
+}
+
+.timeline-zoom-input {
+  outline: none;
+}
+
+.timeline-zoom-input:focus {
+  border-color: rgba(117, 207, 255, 0.72);
+  box-shadow: 0 0 0 2px rgba(56, 205, 255, 0.16);
+}
+
 .timeline-ruler {
   display: block;
   position: relative;
@@ -7589,6 +7630,7 @@ select {
   min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
+  overscroll-behavior: contain;
   overscroll-behavior-x: contain;
   scrollbar-gutter: stable;
 }
@@ -7621,7 +7663,6 @@ select {
 }
 
 .timeline-video-track {
-  cursor: ew-resize;
   touch-action: none;
 }
 
@@ -7632,7 +7673,7 @@ select {
   position: absolute;
   top: 5px;
   bottom: 5px;
-  min-width: 26px;
+  min-width: 0;
   padding: 5px 7px;
   overflow: hidden;
   align-items: center;
@@ -7646,7 +7687,45 @@ select {
 }
 
 .timeline-video-clip {
+  cursor: default;
+}
+
+.timeline-video-clip::before,
+.timeline-video-clip::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+
+.timeline-video-clip::before {
+  left: 5px;
+}
+
+.timeline-video-clip::after {
+  right: 5px;
+}
+
+.timeline-clip-trim-handle {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  width: 12px;
   cursor: ew-resize;
+  touch-action: none;
+}
+
+.timeline-clip-trim-handle.start {
+  left: 0;
+}
+
+.timeline-clip-trim-handle.end {
+  right: 0;
 }
 
 .timeline-audio-clip {
@@ -9984,7 +10063,7 @@ select {
 .close-dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: 30000;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -10940,6 +11019,61 @@ select {
 
 .settings-panel-grid.analysis {
   grid-template-rows: auto auto auto;
+}
+
+/* Settings page must own its vertical scroll so side cards, including the
+   offline CLIP model installer, cannot be hidden by compact viewport overrides. */
+.settings-shell.route-fill {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.settings-shell > .settings-tab-panel {
+  position: relative;
+  inset: auto;
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-shell > .environment-status-panel.compact {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: auto;
+  height: auto;
+  min-height: 44px;
+}
+
+.settings-tab-content {
+  min-height: 0;
+  padding-bottom: 16px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.settings-panel-grid.base {
+  align-items: start;
+}
+
+.settings-side-stack {
+  overflow: visible;
+}
+
+.settings-about-card {
+  display: grid;
+}
+
+@media (max-width: 1450px), (max-height: 900px) {
+  .settings-panel-grid.base {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-about-card {
+    display: grid;
+  }
 }
 
 /* English labels are longer than the Chinese originals. Keep settings navigation readable. */

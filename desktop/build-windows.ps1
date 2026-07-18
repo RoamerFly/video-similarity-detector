@@ -2,11 +2,13 @@ param(
     [switch]$SkipPythonEnv,
     [switch]$CleanPythonEnv,
     [switch]$SkipNpmInstall,
+    [switch]$ForceNpmInstall,
     [switch]$SkipNpmAudit,
     [switch]$SkipFrontendBuild,
     [switch]$SkipTauriBuild,
     [switch]$BuildInstaller,
     [switch]$GpuBuild,
+    [switch]$RunNpmAudit,
     [switch]$NoPrunePythonEnv,
     [switch]$NoStopRunningApp,
     [int]$StopTimeoutSeconds = 15,
@@ -26,8 +28,9 @@ function Write-Step([string]$Message) {
 }
 
 function Invoke-Checked([scriptblock]$Command, [string]$ErrorMessage) {
+    $global:LASTEXITCODE = 0
     & $Command
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $? -or $LASTEXITCODE -ne 0) {
         throw $ErrorMessage
     }
 }
@@ -232,6 +235,38 @@ function Stop-ExecutableIfRunning([string]$ExecutablePath, [string]$Label) {
     Wait-FileUnlocked $ExecutablePath $Label
 }
 
+function Stop-WorkspaceNodeDevProcesses([string]$WorkspaceDir) {
+    $workspaceFull = Convert-ToComparablePath $WorkspaceDir
+    $escapedWorkspace = [Regex]::Escape($workspaceFull)
+    $processes = @(
+        Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                if (-not $_.CommandLine) {
+                    return $false
+                }
+                $commandLine = $_.CommandLine
+                if ($commandLine -notmatch $escapedWorkspace) {
+                    return $false
+                }
+                return $commandLine -match '(?i)(vite|tauri[\\/]cli|tauri:dev|npm[^\r\n]+run[^\r\n]+dev)'
+            }
+    )
+    if ($processes.Count -eq 0) {
+        return
+    }
+
+    $ids = @($processes | ForEach-Object { [int]$_.ProcessId } | Sort-Object -Unique)
+    if ($NoStopRunningApp) {
+        throw "Node dev server process(es) in this workspace are running and may lock node_modules. Close PID(s) $($ids -join ', ') first, or rerun without -NoStopRunningApp."
+    }
+
+    Write-Host "  - Stopping workspace Node dev process(es): PID(s) $($ids -join ', ')" -ForegroundColor Yellow
+    foreach ($id in $ids) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+    Wait-ProcessIdsExit $ids "workspace Node dev process"
+}
+
 function Remove-DirectoryWithRetry([string]$Path, [string]$Label) {
     if (-not (Test-Path $Path)) {
         return
@@ -375,9 +410,7 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
         "Lib\tkinter",
         "Lib\turtledemo",
         "Lib\idlelib",
-        "Lib\ensurepip",
         "Lib\site-packages\torch\include",
-        "Lib\site-packages\pip",
         "Lib\site-packages\imageio_ffmpeg",
         "share\doc"
     )
@@ -422,9 +455,6 @@ function Remove-PythonEnvWaste([string]$PythonDir) {
     if (Test-Path $sitePackages) {
         Get-ChildItem -LiteralPath $sitePackages -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.Name -like "pip-*.dist-info" -or
-                $_.Name -eq "wheel" -or
-                $_.Name -like "wheel-*.dist-info" -or
                 $_.Name -like "imageio_ffmpeg-*.dist-info"
             } |
             ForEach-Object {
@@ -568,6 +598,128 @@ function Read-RequirementLines([string]$Path) {
     Get-Content -LiteralPath $Path -Encoding UTF8 |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ -and -not $_.StartsWith("#") }
+}
+
+function Test-PythonModule([string]$PythonExe, [string]$ModuleName) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $PythonExe -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$ModuleName') else 1)" *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function Ensure-Pip([string]$PythonExe, [string]$PythonDir) {
+    if (Test-PythonModule $PythonExe "pip") {
+        return
+    }
+
+    Write-Host "  - pip is missing; bootstrapping it into bundled Python." -ForegroundColor Yellow
+    if (Test-PythonModule $PythonExe "ensurepip") {
+        Invoke-Checked {
+            & $PythonExe -m ensurepip --upgrade --default-pip
+        } "Failed to bootstrap pip with ensurepip in bundled Python."
+    } else {
+        $getPip = Join-Path $env:TEMP ("video-similarity-get-pip-{0}-{1}.py" -f $PID, [Guid]::NewGuid().ToString("N"))
+        try {
+            Invoke-Checked {
+                Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip -UseBasicParsing
+            } "Failed to download get-pip.py for bundled Python."
+            Invoke-Checked {
+                & $PythonExe $getPip --no-cache-dir "pip<26" "wheel" "setuptools<82"
+            } "Failed to bootstrap pip with get-pip.py in bundled Python."
+        } finally {
+            Remove-Item -LiteralPath $getPip -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not (Test-PythonModule $PythonExe "pip")) {
+        throw "pip bootstrap completed but pip is still not importable in bundled Python: $PythonExe"
+    }
+
+    $scriptsDir = Join-Path $PythonDir "Scripts"
+    $rootPython = Join-Path $PythonDir "python.exe"
+    $scriptPython = Join-Path $scriptsDir "python.exe"
+    if ((Test-Path $rootPython) -and -not (Test-Path $scriptPython)) {
+        New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+        Copy-Item -LiteralPath $rootPython -Destination $scriptPython -Force
+    }
+}
+
+function Install-RequirementLines(
+    [string]$PythonExe,
+    [string[]]$Requirements,
+    [string]$ErrorMessage,
+    [string[]]$ExtraPipArgs = @()
+) {
+    if (-not $Requirements -or $Requirements.Count -eq 0) {
+        return
+    }
+
+    $requirementsPath = Join-Path $env:TEMP ("video-similarity-requirements-{0}-{1}.txt" -f $PID, [Guid]::NewGuid().ToString("N"))
+    try {
+        Set-Content -LiteralPath $requirementsPath -Value ($Requirements -join [Environment]::NewLine) -Encoding UTF8
+        Invoke-Checked {
+            & $PythonExe -m pip install --no-cache-dir @ExtraPipArgs -r $requirementsPath
+        } $ErrorMessage
+    } finally {
+        Remove-Item -LiteralPath $requirementsPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function New-TauriBuildOverride([string]$EnvName) {
+    $overridePath = Join-Path $env:TEMP ("video-similarity-tauri-build-{0}-{1}.json" -f $PID, [Guid]::NewGuid().ToString("N"))
+    $override = @{
+        build = @{ beforeBuildCommand = "" }
+        bundle = @{
+            resources = @(
+                "../../scripts",
+                "../../video_sim",
+                "../../requirements.txt",
+                "../$EnvName"
+            )
+        }
+    } | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $overridePath -Value $override -Encoding ASCII
+    return $overridePath
+}
+
+function Invoke-TauriBuildWithOverride([string]$EnvName, [bool]$NoBundle, [string]$ErrorMessage) {
+    $overridePath = New-TauriBuildOverride $EnvName
+    try {
+        if ($NoBundle) {
+            Invoke-Checked { npx tauri build --ci --no-bundle --features custom-protocol --config $overridePath } $ErrorMessage
+        } else {
+            Invoke-Checked { npx tauri build --ci --features custom-protocol --config $overridePath } $ErrorMessage
+        }
+    } finally {
+        Remove-Item -LiteralPath $overridePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-FrontendDependencies([string]$DesktopDir) {
+    if ($SkipNpmInstall) {
+        Write-Host "  - Skipped npm install by flag." -ForegroundColor Yellow
+        return
+    }
+
+    Stop-WorkspaceNodeDevProcesses $DesktopDir
+
+    $nodeModules = Join-Path $DesktopDir "node_modules"
+    if ((Test-Path $nodeModules) -and -not $ForceNpmInstall) {
+        Write-Host "  - Reusing existing node_modules. Pass -ForceNpmInstall to refresh dependencies." -ForegroundColor Green
+        return
+    }
+
+    if (Test-Path (Join-Path $DesktopDir "package-lock.json")) {
+        Invoke-Checked { npm ci } "npm ci failed."
+    } else {
+        Invoke-Checked { npm install } "npm install failed."
+    }
 }
 
 $desktopDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -717,7 +869,8 @@ if ($SkipPythonEnv) {
     $env:PYTHONDONTWRITEBYTECODE = "1"
 
     Write-Host "  - Python: $(& $activePythonExe --version)" -ForegroundColor Green
-    Invoke-Checked { & $activePythonExe -m pip install --no-cache-dir --upgrade pip wheel "setuptools<82" } "Failed to upgrade pip in bundled Python."
+    Ensure-Pip $activePythonExe $pythonEnvDir
+    Invoke-Checked { & $activePythonExe -m pip install --no-cache-dir --upgrade "pip<26" wheel "setuptools<82" } "Failed to upgrade pip in bundled Python."
 
     $runtimePackages = @(Read-RequirementLines $runtimeRequirements)
     $torchPackages = @($runtimePackages | Where-Object { $_ -match '^torch([<>=!~].*)?$' })
@@ -728,14 +881,14 @@ if ($SkipPythonEnv) {
             Write-Host "  - CUDA torch already available; skipping torch reinstall." -ForegroundColor Green
         } elseif ($GpuBuild) {
             Write-Host "  - Installing CUDA torch from: $TorchIndexUrl" -ForegroundColor Gray
-            Invoke-Checked { & $activePythonExe -m pip install --no-cache-dir --upgrade --force-reinstall --index-url $TorchIndexUrl @torchPackages } "Failed to install CUDA torch into bundled env."
+            Install-RequirementLines $activePythonExe $torchPackages "Failed to install CUDA torch into bundled env." @("--upgrade", "--force-reinstall", "--index-url", $TorchIndexUrl)
         } else {
             Write-Host "  - Installing CPU torch from: $TorchIndexUrl" -ForegroundColor Gray
-            Invoke-Checked { & $activePythonExe -m pip install --no-cache-dir --index-url $TorchIndexUrl @torchPackages } "Failed to install CPU torch into bundled env."
+            Install-RequirementLines $activePythonExe $torchPackages "Failed to install CPU torch into bundled env." @("--index-url", $TorchIndexUrl)
         }
     }
     if ($otherPackages.Count -gt 0) {
-        Invoke-Checked { & $activePythonExe -m pip install --no-cache-dir @otherPackages } "Failed to install Python dependencies into bundled env."
+        Install-RequirementLines $activePythonExe $otherPackages "Failed to install Python dependencies into bundled env."
     }
 
     Complete-PythonRuntime $pythonEnvDir $activePythonExe
@@ -766,20 +919,12 @@ $activePythonExe = Get-BundledPythonExe $portablePythonExe $venvPythonExe
 Test-BundledPythonEnv $activePythonExe $GpuBuild
 
 Write-Step "[4/9] Installing frontend dependencies..."
-if ($SkipNpmInstall) {
-    Write-Host "  - Skipped npm install by flag." -ForegroundColor Yellow
-} else {
-    if (Test-Path (Join-Path $desktopDir "package-lock.json")) {
-        Invoke-Checked { npm ci } "npm ci failed."
-    } else {
-        Invoke-Checked { npm install } "npm install failed."
-    }
-}
+Install-FrontendDependencies $desktopDir
 
-if ($SkipNpmAudit) {
-    Write-Host "  - Skipped npm audit by flag." -ForegroundColor Yellow
-} else {
+if ($RunNpmAudit -and -not $SkipNpmAudit) {
     Invoke-Checked { npm audit --audit-level=high } "npm audit found high severity vulnerabilities. Run npm audit fix or update package.json/package-lock.json."
+} else {
+    Write-Host "  - Skipped npm audit for local build. Pass -RunNpmAudit to enable it." -ForegroundColor Yellow
 }
 
 Write-Step "[5/9] Building frontend..."
@@ -811,35 +956,9 @@ if ($SkipTauriBuild) {
         Assert-ChildPath $desktopDir $bundleDir
         Remove-DirectoryWithRetry $bundleDir "Tauri bundle directory"
     }
-    $tauriConfigOverride = Join-Path $env:TEMP "video-similarity-tauri-build-override.json"
-    $tauriOverride = @{
-        build = @{ beforeBuildCommand = "" }
-        bundle = @{
-            resources = @(
-                "../../scripts",
-                "../../video_sim",
-                "../../requirements.txt",
-                "../$EnvName"
-            )
-        }
-    } | ConvertTo-Json -Depth 5
-    Set-Content -LiteralPath $tauriConfigOverride -Value $tauriOverride -Encoding ASCII
-    Invoke-Checked { npx tauri build --ci --features custom-protocol --config $tauriConfigOverride } "Tauri installer build failed."
+    Invoke-TauriBuildWithOverride $EnvName $false "Tauri installer build failed."
 } else {
-    $tauriConfigOverride = Join-Path $env:TEMP "video-similarity-tauri-build-override.json"
-    $tauriOverride = @{
-        build = @{ beforeBuildCommand = "" }
-        bundle = @{
-            resources = @(
-                "../../scripts",
-                "../../video_sim",
-                "../../requirements.txt",
-                "../$EnvName"
-            )
-        }
-    } | ConvertTo-Json -Depth 5
-    Set-Content -LiteralPath $tauriConfigOverride -Value $tauriOverride -Encoding ASCII
-    Invoke-Checked { npx tauri build --ci --no-bundle --features custom-protocol --config $tauriConfigOverride } "Portable release exe build failed."
+    Invoke-TauriBuildWithOverride $EnvName $true "Portable release exe build failed."
 }
 
 Write-Step "[8/9] Creating portable $DistName package..."
@@ -932,8 +1051,11 @@ Reuse existing GPU env quickly:
 Keep a running packaged app open and fail instead of auto-stopping it:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1 -NoStopRunningApp
 
-Skip npm audit only when offline or after reviewing npm audit manually:
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1 -SkipNpmAudit
+Run npm audit when preparing a release-quality local package:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1 -RunNpmAudit
+
+Refresh frontend dependencies when package-lock.json changed:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1 -ForceNpmInstall
 
 Build optional NSIS installer:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1 -SkipPythonEnv -BuildInstaller

@@ -48,6 +48,7 @@ export interface SettingsSnapshot {
   videoDir: string
   cacheDir: string
   reportDir: string
+  networkProxy: string
   defaultSkipThreshold: number
   defaultMatchThreshold: number
   defaultWindowSize: number
@@ -238,6 +239,7 @@ export const defaultSettings: SettingsSnapshot = {
   videoDir: '',
   cacheDir: 'data',
   reportDir: 'data/reports',
+  networkProxy: '',
   ...normalAnalysisPreset,
   defaultCompareWorkers: 2,
   errorTolerancePreset: 'balanced',

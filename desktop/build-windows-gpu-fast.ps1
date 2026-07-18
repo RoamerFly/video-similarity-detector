@@ -1,6 +1,8 @@
 param(
     [switch]$Launch,
     [switch]$SkipFrontendBuild,
+    [switch]$SkipNpmInstall,
+    [switch]$ForceNpmInstall,
     [switch]$SkipRuntimeCheck,
     [switch]$NoStopRunningApp,
     [string]$OutputDir = "",
@@ -15,8 +17,9 @@ function Write-Step([string]$Message) {
 }
 
 function Invoke-Checked([scriptblock]$Command, [string]$ErrorMessage) {
+    $global:LASTEXITCODE = 0
     & $Command
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $? -or $LASTEXITCODE -ne 0) {
         throw $ErrorMessage
     }
 }
@@ -110,6 +113,36 @@ function Stop-TestApp([string]$ExecutablePath) {
     Start-Sleep -Milliseconds 500
 }
 
+function Stop-WorkspaceNodeDevProcesses([string]$WorkspaceDir) {
+    $workspaceFull = [System.IO.Path]::GetFullPath($WorkspaceDir).TrimEnd('\')
+    $escapedWorkspace = [Regex]::Escape($workspaceFull)
+    $running = @(
+        Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                if (-not $_.CommandLine) {
+                    return $false
+                }
+                $commandLine = $_.CommandLine
+                if ($commandLine -notmatch $escapedWorkspace) {
+                    return $false
+                }
+                return $commandLine -match '(?i)(vite|tauri[\\/]cli|tauri:dev|npm[^\r\n]+run[^\r\n]+dev)'
+            }
+    )
+    if ($running.Count -eq 0) {
+        return
+    }
+    if ($NoStopRunningApp) {
+        $ids = @($running | ForEach-Object { [int]$_.ProcessId } | Sort-Object -Unique)
+        throw "Node dev server process(es) in this workspace are running and may lock node_modules. Close PID(s) $($ids -join ', ') first."
+    }
+
+    $ids = @($running | ForEach-Object { [int]$_.ProcessId } | Sort-Object -Unique)
+    Write-Host "  - Stopping workspace Node dev process(es): PID(s) $($ids -join ', ')" -ForegroundColor Yellow
+    $ids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+}
+
 function Ensure-Junction([string]$Path, [string]$Target) {
     $targetFull = [System.IO.Path]::GetFullPath($Target)
     if (-not (Test-Path -LiteralPath $targetFull)) {
@@ -135,6 +168,35 @@ function Ensure-Junction([string]$Path, [string]$Target) {
     New-Item -ItemType Junction -Path $Path -Target $targetFull | Out-Null
 }
 
+function Invoke-TauriFastBuild([string]$OverridePath) {
+    Invoke-Checked {
+        npx tauri build --ci --no-bundle --features custom-protocol --config $OverridePath
+    } "Tauri GPU test EXE build failed."
+}
+
+function Install-FrontendDependencies([string]$DesktopDir) {
+    if ($SkipNpmInstall) {
+        Write-Host "  - Skipped npm install by flag." -ForegroundColor Yellow
+        return
+    }
+
+    Stop-WorkspaceNodeDevProcesses $DesktopDir
+
+    $nodeModules = Join-Path $DesktopDir "node_modules"
+    if ((Test-Path -LiteralPath $nodeModules) -and -not $ForceNpmInstall) {
+        Write-Host "  - Reusing existing node_modules. Pass -ForceNpmInstall to refresh dependencies." -ForegroundColor Green
+        return
+    }
+
+    Write-Host "  - Installing frontend dependencies..." -ForegroundColor Yellow
+    Set-Location $DesktopDir
+    if (Test-Path -LiteralPath (Join-Path $DesktopDir "package-lock.json")) {
+        Invoke-Checked { npm ci } "npm ci failed."
+    } else {
+        Invoke-Checked { npm install } "npm install failed."
+    }
+}
+
 $desktopDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $desktopDir ".."))
 $outputDir = Resolve-AbsolutePath $desktopDir $OutputDir "dist_windows_gpu_quick"
@@ -156,9 +218,7 @@ Write-Step "[1/5] Checking reusable local environment"
 foreach ($command in @("node", "npm", "npx", "cargo")) {
     Ensure-BuildCommand $command
 }
-if (-not (Test-Path -LiteralPath (Join-Path $desktopDir "node_modules"))) {
-    throw "desktop\node_modules is missing. Run npm install in desktop once."
-}
+Install-FrontendDependencies $desktopDir
 if (-not (Test-Path -LiteralPath $gpuPython)) {
     throw "Existing GPU Python env is missing: $gpuPython`nRun once: .\build-windows-gpu.bat -CleanPythonEnv"
 }
@@ -192,8 +252,9 @@ if ($SkipFrontendBuild) {
 }
 
 Write-Step "[3/5] Incrementally building Tauri EXE"
+Stop-TestApp $releaseExe
 Stop-TestApp $outputExe
-$overridePath = Join-Path $env:TEMP "video-similarity-gpu-fast-tauri.json"
+$overridePath = Join-Path $env:TEMP ("video-similarity-gpu-fast-tauri-{0}-{1}.json" -f $PID, [Guid]::NewGuid().ToString("N"))
 $override = @{
     build = @{ beforeBuildCommand = "" }
     bundle = @{
@@ -207,9 +268,7 @@ $override = @{
 } | ConvertTo-Json -Depth 5
 Set-Content -LiteralPath $overridePath -Value $override -Encoding ASCII
 try {
-    Invoke-Checked {
-        npx tauri build --ci --no-bundle --features custom-protocol --config $overridePath
-    } "Tauri GPU test EXE build failed."
+    Invoke-TauriFastBuild $overridePath
 } finally {
     Remove-Item -LiteralPath $overridePath -Force -ErrorAction SilentlyContinue
 }

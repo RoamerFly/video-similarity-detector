@@ -20,9 +20,18 @@ $checksumPath = Join-Path $tempDir "checksums.sha256"
 
 function Download-File([string]$Url, [string]$Destination) {
     Write-Host "Downloading $Url"
-    & curl.exe --fail --location --retry 3 --retry-all-errors --output $Destination $Url
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to download $Url"
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & $curl.Source --fail --location --retry 3 --retry-all-errors --output $Destination $Url
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        Write-Host "curl.exe failed; retrying with Invoke-WebRequest..." -ForegroundColor Yellow
+    }
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Destination -MaximumRedirection 5
+    } catch {
+        throw "Failed to download $Url. $($_.Exception.Message)"
     }
 }
 

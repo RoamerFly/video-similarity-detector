@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { FolderOpen, GitBranch } from 'lucide-react'
 import { NeonButton } from '@/components/DesignSystem'
@@ -51,6 +52,12 @@ export function AppLayout() {
   }, [])
 
   const handleExitRequest = useCallback(() => {
+    const behavior = useSettingsStore.getState().closeBehavior
+    if (behavior === 'ask') {
+      setRememberCloseChoice(false)
+      setCloseDialogOpen(true)
+      return
+    }
     void performCloseAction('exit').catch((error) => {
       useAnalysisStore.getState().setErrorMessage(normalizeBackendError(error))
     })
@@ -242,7 +249,7 @@ export function AppLayout() {
         <Outlet />
       </main>
 
-      {closeDialogOpen && (
+      {closeDialogOpen && createPortal(
         <CloseChoiceDialog
           remember={rememberCloseChoice}
           onRememberChange={setRememberCloseChoice}
@@ -251,7 +258,8 @@ export function AppLayout() {
             setCloseDialogOpen(false)
             void performCloseAction(action, rememberCloseChoice).catch(() => undefined)
           }}
-        />
+        />,
+        document.body,
       )}
     </div>
   )

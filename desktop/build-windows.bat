@@ -19,16 +19,20 @@ echo This wrapper calls build-windows.ps1 and forwards all arguments.
 echo Running packaged apps in the output directory are stopped automatically unless -NoStopRunningApp is passed.
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
+set "PS_EXE=powershell"
+where pwsh >nul 2>nul
+if "%ERRORLEVEL%"=="0" set "PS_EXE=pwsh"
+
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
     echo.
     echo [ERROR] Build failed with exit code %EXIT_CODE%.
-    pause
+    if not defined CI pause
     exit /b %EXIT_CODE%
 )
 
 echo.
 echo Build completed successfully.
-pause
+if not defined CI pause

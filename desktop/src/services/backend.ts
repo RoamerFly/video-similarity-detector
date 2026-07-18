@@ -428,7 +428,7 @@ export async function getAppInfo() {
   return invoke<AppInfo>('get_app_info')
 }
 
-export async function checkForUpdates() {
+export async function checkForUpdates(proxyUrl?: string) {
   if (!hasTauriRuntime()) {
     return {
       currentVersion: '0.1.0',
@@ -447,12 +447,12 @@ export async function checkForUpdates() {
       message: '浏览器预览模式不检查更新。',
     } satisfies UpdateInfo
   }
-  return invoke<UpdateInfo>('check_for_updates')
+  return invoke<UpdateInfo>('check_for_updates', { proxyUrl: proxyUrl?.trim() || null })
 }
 
-export async function downloadAndInstallUpdate() {
+export async function downloadAndInstallUpdate(proxyUrl?: string) {
   if (!hasTauriRuntime()) throw new Error('覆盖更新需要在桌面应用中运行。')
-  return invoke<void>('download_and_install_update')
+  return invoke<void>('download_and_install_update', { proxyUrl: proxyUrl?.trim() || null })
 }
 
 export async function cancelUpdateDownload() {
@@ -482,9 +482,9 @@ export async function getClipModelStatus() {
   return invoke<ClipModelStatus>('get_clip_model_status')
 }
 
-export async function installClipModel() {
+export async function installClipModel(proxyUrl?: string) {
   if (!hasTauriRuntime()) throw new Error('离线模型安装需要在桌面应用中运行。')
-  return invoke<ClipModelStatus>('install_clip_model')
+  return invoke<ClipModelStatus>('install_clip_model', { proxyUrl: proxyUrl?.trim() || null })
 }
 
 export async function selectVideoDirectory() {

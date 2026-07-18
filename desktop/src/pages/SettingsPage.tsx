@@ -638,6 +638,7 @@ export function SettingsPage() {
       <UpdateDialog
         open={updateDialogOpen}
         appInfo={appInfo}
+        proxyUrl={settings.networkProxy}
         onClose={() => setUpdateDialogOpen(false)}
       />
       <CacheCleanupDialog
@@ -738,7 +739,7 @@ function BaseSettings({
       stage: '正在准备模型安装',
     })
     try {
-      const status = await installClipModel()
+      const status = await installClipModel(settings.networkProxy)
       setModelStatus(status)
       setModelProgress((current) => ({
         downloadedBytes: current?.downloadedBytes ?? status.sizeBytes,
@@ -788,6 +789,14 @@ function BaseSettings({
         <PathSetting label="视频目录" tip={parameterHints.videoDir} value={settings.videoDir} onChange={settings.setVideoDir} onChoose={onChooseVideoDir} />
         <PathSetting label="缓存目录" tip={parameterHints.cacheDir} value={settings.cacheDir} onChange={settings.setCacheDir} onChoose={onChooseCacheDir} />
         <PathSetting label="报告目录" tip={parameterHints.reportDir} value={settings.reportDir} onChange={settings.setReportDir} onChoose={onChooseReportDir} />
+        <label className="settings-row settings-row-wide">
+          <ParameterHint label="网络代理" tip={parameterHints.networkProxy} />
+          <TextInput
+            value={settings.networkProxy}
+            placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+            onChange={(event) => settings.setNetworkProxy(event.target.value)}
+          />
+        </label>
 
         <label className="settings-toggle-row">
           <ParameterHint label="打开时最大化窗口" tip={parameterHints.openMaximized} />
@@ -919,10 +928,12 @@ function BaseSettings({
 function UpdateDialog({
   open,
   appInfo,
+  proxyUrl,
   onClose,
 }: {
   open: boolean
   appInfo: AppInfo | null
+  proxyUrl: string
   onClose: () => void
 }) {
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
@@ -937,13 +948,13 @@ function UpdateDialog({
     setUpdate(null)
     setProgress(null)
     try {
-      setUpdate(await checkForUpdates())
+      setUpdate(await checkForUpdates(proxyUrl))
     } catch (err) {
       setError(normalizeBackendError(err))
     } finally {
       setChecking(false)
     }
-  }, [])
+  }, [proxyUrl])
 
   useEffect(() => {
     let active = true
@@ -986,7 +997,7 @@ function UpdateDialog({
       stage: '正在连接 GitHub Releases',
     })
     try {
-      await downloadAndInstallUpdate()
+      await downloadAndInstallUpdate(proxyUrl)
     } catch (err) {
       setInstalling(false)
       setError(normalizeBackendError(err))
@@ -1979,6 +1990,7 @@ function buildSettingsSignature(settings: SettingsSnapshot) {
     videoDir: settings.videoDir,
     cacheDir: settings.cacheDir,
     reportDir: settings.reportDir,
+    networkProxy: settings.networkProxy,
     defaultSkipThreshold: settings.defaultSkipThreshold,
     defaultMatchThreshold: settings.defaultMatchThreshold,
     defaultWindowSize: settings.defaultWindowSize,

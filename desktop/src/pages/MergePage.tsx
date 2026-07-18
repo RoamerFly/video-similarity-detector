@@ -72,9 +72,14 @@ const audioExtensions = new Set(['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opu
 const videoExtensions = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'])
 const timelinePixelsPerSecond = 12
 const timelineMinimumWidth = 720
-const timelineZoomMinimum = 0.35
-const timelineZoomMaximum = 6
+const timelineZoomDefault = 100
+const timelineZoomMinimum = 0
+const timelineZoomMaximum = 200
+const timelineZoomStep = 1
+const timelineMinimumPixelsPerSecond = 2000 / 3600
+const timelineMaximumPixelsPerSecond = timelinePixelsPerSecond * 20
 const scrubMediaIntervalMs = 32
+const defaultPreviewSize = { width: 720, height: 260 }
 const minimumOutputDimension = 16
 const maximumOutputDimension = 16384
 const emptyTimelineResolutionLimit = { width: 3840, height: 2160 }
@@ -95,6 +100,14 @@ interface ClipLayout {
   end: number
 }
 
+interface AudioClipLayout {
+  item: MergeAudioItem
+  trackId: string
+  start: number
+  duration: number
+  end: number
+}
+
 interface ClipContextMenuState {
   x: number
   y: number
@@ -105,7 +118,7 @@ interface ClipContextMenuState {
 interface AudioContextMenuState {
   x: number
   y: number
-  audio: MergeAudioItem
+  layout: AudioClipLayout
 }
 
 interface TextContextMenuState {
@@ -160,10 +173,12 @@ export function MergePage() {
   const pythonPath = useSettingsStore((state) => state.pythonPath)
   const previewRef = useRef<HTMLVideoElement | null>(null)
   const previewVideoRefs = useRef(new Map<string, HTMLVideoElement>())
+  const previewPanelRef = useRef<HTMLElement | null>(null)
   const previewScreenRef = useRef<HTMLDivElement | null>(null)
   const outputCanvasRef = useRef<HTMLDivElement | null>(null)
   const timelineRef = useRef<HTMLDivElement | null>(null)
   const timelineScrollRef = useRef<HTMLDivElement | null>(null)
+  const selectedTextInputRef = useRef<HTMLInputElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const timelineSeekFrameRef = useRef<number | null>(null)
   const playheadDragFrameRef = useRef<number | null>(null)
@@ -185,7 +200,10 @@ export function MergePage() {
   const [selectedTextId, setSelectedTextId] = useState('')
   const [playhead, setPlayhead] = useState(0)
   const [playing, setPlaying] = useState(false)
-  const [timelineZoom, setTimelineZoom] = useState(1)
+  const [timelineZoom, setTimelineZoom] = useState(timelineZoomDefault)
+  const [timelineZoomEditing, setTimelineZoomEditing] = useState(false)
+  const [timelineZoomDraft, setTimelineZoomDraft] = useState('100')
+  const [customResolutionSelected, setCustomResolutionSelected] = useState(false)
   const [logsExpanded, setLogsExpanded] = useState(false)
   const [draggedClipId, setDraggedClipId] = useState('')
   const [draggedAudioId, setDraggedAudioId] = useState('')
@@ -197,7 +215,8 @@ export function MergePage() {
   const [trackContextMenu, setTrackContextMenu] = useState<TrackContextMenuState | null>(null)
   const [cropEditing, setCropEditing] = useState(false)
   const [groupEditingKey, setGroupEditingKey] = useState('')
-  const [previewSize, setPreviewSize] = useState({ width: 720, height: 420 })
+  const [previewSize, setPreviewSize] = useState(defaultPreviewSize)
+  const [previewPanelHeight, setPreviewPanelHeight] = useState(0)
   const [cropGeometry, setCropGeometry] = useState<CropGeometry | null>(null)
   const [outputCanvasGeometry, setOutputCanvasGeometry] = useState<PreviewCanvasGeometry | null>(null)
   const setMergeError = merge.setError
@@ -275,7 +294,7 @@ export function MergePage() {
       const videoPaths = event.payload.paths.filter((path) => videoExtensions.has(extension(path)))
       const store = useMergeStore.getState()
       if (videoPaths.length > 0) store.addVideos(videoPaths.map((path) => ({ path, name: fileName(path) })))
-      if (audioPaths.length > 0) store.addAudioFiles(audioPaths, playheadRef.current)
+      if (audioPaths.length > 0) store.addAudioFiles(audioPaths)
     }).then((unlisten) => {
       if (disposed) unlisten()
       else dispose = unlisten
@@ -290,15 +309,19 @@ export function MergePage() {
   const clipLayouts = useMemo(() => {
     return buildClipLayouts(merge.items, videoTrackIds, metadata)
   }, [merge.items, metadata, videoTrackIds])
+  const audioTrackIds = useMemo(() => merge.audioTracks.map((track) => track.id), [merge.audioTracks])
+  const audioLayouts = useMemo(() => {
+    return buildAudioLayouts(merge.audioItems, audioTrackIds, audioDurations, metadata)
+  }, [audioDurations, audioTrackIds, merge.audioItems, metadata])
   const probing = merge.items.some((item) => !metadata[normalizePath(item.path)])
   const videoDuration = Math.max(0, ...clipLayouts.map((layout) => layout.end))
-  const audioTimelineEnd = Math.max(0, ...merge.audioItems.map(
-    (audio) => audio.startTime + audioDuration(audio, audioDurations, metadata),
-  ))
+  const audioTimelineEnd = Math.max(0, ...audioLayouts.map((layout) => layout.end))
   const textTimelineEnd = Math.max(0, ...merge.textItems.map((item) => item.startTime + item.duration))
   const totalDuration = Math.max(videoDuration, audioTimelineEnd, textTimelineEnd)
-  const timelinePixelsPerSecondScaled = timelinePixelsPerSecond * timelineZoom
-  const timelineContentWidth = Math.max(timelineMinimumWidth, Math.ceil(totalDuration * timelinePixelsPerSecondScaled))
+  const timelinePixelsPerSecondScaled = timelinePixelsPerSecondForZoom(timelineZoom)
+  const timelineContentWidth = totalDuration > 0
+    ? Math.max(timelineMinimumWidth, Math.ceil(totalDuration * timelinePixelsPerSecondScaled))
+    : timelineMinimumWidth
   const effectiveSelectedClipId = clipLayouts.some((layout) => layout.item.id === selectedClipId)
     ? selectedClipId
     : selectedAudioId || selectedTextId ? '' : clipLayouts[0]?.item.id ?? ''
@@ -312,7 +335,8 @@ export function MergePage() {
     ?? activeLayouts[0]
     ?? selectedLayout
   const previewClip = currentLayout?.item ?? selectedClip
-  const selectedAudio = merge.audioItems.find((item) => item.id === selectedAudioId) ?? null
+  const selectedAudioLayout = audioLayouts.find((layout) => layout.item.id === selectedAudioId) ?? null
+  const selectedAudio = selectedAudioLayout?.item ?? null
   const selectedText = merge.textItems.find((item) => item.id === selectedTextId) ?? null
   const previewLayout = previewClip
     ? clipLayouts.find((layout) => layout.item.id === previewClip.id) ?? null
@@ -352,9 +376,10 @@ export function MergePage() {
       ),
     ]
   }, [resolutionBounds.height, resolutionBounds.width])
-  const resolutionValue = resolutionOptions.some(
+  const matchedResolutionValue = resolutionOptions.some(
     (item) => item.width === merge.settings.width && item.height === merge.settings.height,
   ) ? `${merge.settings.width}x${merge.settings.height}` : 'custom'
+  const resolutionValue = customResolutionSelected ? 'custom' : matchedResolutionValue
   const visibleLayouts = activeLayouts.length > 0 ? activeLayouts : previewLayout ? [previewLayout] : []
   const previewLayouts = cropEditing && previewLayout ? [previewLayout] : visibleLayouts
   const previewNormalizedCells = cropEditing
@@ -447,6 +472,21 @@ export function MergePage() {
     window.requestAnimationFrame(updatePreviewGeometry)
     return () => observer.disconnect()
   }, [updatePreviewGeometry])
+
+  useEffect(() => {
+    const panel = previewPanelRef.current
+    if (!panel) return undefined
+    const observer = new ResizeObserver((entries) => {
+      const height = Math.ceil(entries[0]?.contentRect.height ?? panel.getBoundingClientRect().height)
+      setPreviewPanelHeight((current) => Math.abs(current - height) > 1 ? height : current)
+    })
+    observer.observe(panel)
+    window.requestAnimationFrame(() => {
+      const height = Math.ceil(panel.getBoundingClientRect().height)
+      setPreviewPanelHeight((current) => Math.abs(current - height) > 1 ? height : current)
+    })
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     window.requestAnimationFrame(updatePreviewGeometry)
@@ -596,7 +636,7 @@ export function MergePage() {
   async function chooseAudio() {
     try {
       const paths = await selectAudioFiles()
-      merge.addAudioFiles(paths, playhead)
+      merge.addAudioFiles(paths)
     } catch (error) {
       merge.setError(normalizeBackendError(error))
     }
@@ -668,12 +708,12 @@ export function MergePage() {
     const viewport = timelineScrollRef.current
     const content = timelineRef.current
     const currentZoom = timelineZoom
-    const next = clamp(nextZoom, timelineZoomMinimum, timelineZoomMaximum)
+    const next = normalizeTimelineZoom(nextZoom)
     if (Math.abs(next - currentZoom) < 0.001) return
     const viewportRect = viewport?.getBoundingClientRect()
     const contentRect = content?.getBoundingClientRect()
     const anchorX = anchorClientX ?? (viewportRect ? viewportRect.left + viewportRect.width / 2 : 0)
-    const anchorTime = contentRect ? timelineTimeFromClientX(anchorX, contentRect, totalDuration) : playheadRef.current
+    const anchorTime = contentRect ? timelineTimeFromClientX(anchorX, contentRect, totalDuration, timelinePixelsPerSecondScaled) : playheadRef.current
     setTimelineZoom(next)
     window.requestAnimationFrame(() => {
       const nextViewport = timelineScrollRef.current
@@ -681,8 +721,14 @@ export function MergePage() {
       const nextViewportRect = nextViewport?.getBoundingClientRect()
       if (!nextViewport || !nextContent || !nextViewportRect || totalDuration <= 0) return
       const anchorOffset = anchorClientX === undefined ? nextViewportRect.width / 2 : anchorX - nextViewportRect.left
-      nextViewport.scrollLeft = Math.max(0, anchorTime / totalDuration * nextContent.offsetWidth - anchorOffset)
+      nextViewport.scrollLeft = Math.max(0, anchorTime * timelinePixelsPerSecondForZoom(next) - anchorOffset)
     })
+  }
+
+  function commitTimelineZoomDraft() {
+    const nextPercent = Number(timelineZoomDraft)
+    if (Number.isFinite(nextPercent)) zoomTimeline(nextPercent)
+    setTimelineZoomEditing(false)
   }
 
   function nudgePlayhead(direction: -1 | 1) {
@@ -735,9 +781,9 @@ export function MergePage() {
 
   function handleTimelineWheel(event: React.WheelEvent<HTMLDivElement>) {
     event.preventDefault()
-    const intensity = event.ctrlKey || event.metaKey ? 0.0035 : 0.0018
-    const factor = Math.exp(-event.deltaY * intensity)
-    zoomTimeline(timelineZoom * factor, event.clientX)
+    event.stopPropagation()
+    if (event.deltaY === 0) return
+    zoomTimeline(timelineZoom + (event.deltaY < 0 ? timelineZoomStep : -timelineZoomStep), event.clientX)
   }
 
   function handlePlayheadHandlePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
@@ -752,7 +798,7 @@ export function MergePage() {
       if (!active) return
       autoScrollTimelineAtPointer(latestClientX)
       const contentRect = timelineRef.current?.getBoundingClientRect()
-      if (contentRect) scrubGlobal(timelineTimeFromClientX(latestClientX, contentRect, totalDuration))
+      if (contentRect) scrubGlobal(timelineTimeFromClientX(latestClientX, contentRect, totalDuration, timelinePixelsPerSecondScaled))
       playheadDragFrameRef.current = window.requestAnimationFrame(update)
     }
     const longPressTimer = window.setTimeout(() => {
@@ -773,7 +819,7 @@ export function MergePage() {
       playheadDragFrameRef.current = null
       if (active) {
         const contentRect = timelineRef.current?.getBoundingClientRect()
-        if (contentRect) scrubGlobal(timelineTimeFromClientX(latestClientX, contentRect, totalDuration), true)
+        if (contentRect) scrubGlobal(timelineTimeFromClientX(latestClientX, contentRect, totalDuration, timelinePixelsPerSecondScaled), true)
         if (resumeAfterDrag) seekGlobal(playheadRef.current, true)
       }
       setPlayheadDragging(false)
@@ -795,10 +841,10 @@ export function MergePage() {
     const rect = timelineRef.current.getBoundingClientRect()
     const resumeAfterSeek = playing
     if (resumeAfterSeek) setPlaying(false)
-    let latestTime = timelineTimeFromClientX(event.clientX, rect, totalDuration)
+    let latestTime = timelineTimeFromClientX(event.clientX, rect, totalDuration, timelinePixelsPerSecondScaled)
 
     const scheduleSeek = (clientX: number) => {
-      latestTime = timelineTimeFromClientX(clientX, rect, totalDuration)
+      latestTime = timelineTimeFromClientX(clientX, rect, totalDuration, timelinePixelsPerSecondScaled)
       if (timelineSeekFrameRef.current !== null) return
       timelineSeekFrameRef.current = window.requestAnimationFrame(() => {
         timelineSeekFrameRef.current = null
@@ -807,7 +853,7 @@ export function MergePage() {
     }
     const move = (pointerEvent: PointerEvent) => scheduleSeek(pointerEvent.clientX)
     const end = (pointerEvent: PointerEvent) => {
-      latestTime = timelineTimeFromClientX(pointerEvent.clientX, rect, totalDuration)
+      latestTime = timelineTimeFromClientX(pointerEvent.clientX, rect, totalDuration, timelinePixelsPerSecondScaled)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', end)
@@ -944,7 +990,7 @@ export function MergePage() {
     let scrubbed = false
     const resumeAfterSeek = playing
     const initialRect = timelineRef.current.getBoundingClientRect()
-    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration) - layout.start
+    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration, timelinePixelsPerSecondScaled) - layout.start
     const longPressTimer = window.setTimeout(() => {
       longPressActive = true
       if (resumeAfterSeek) setPlaying(false)
@@ -963,8 +1009,15 @@ export function MergePage() {
           const contentRect = timelineRef.current?.getBoundingClientRect()
           if (!contentRect) return
           const trackId = trackIdAtPoint(latestX, latestY, 'video') ?? layout.trackId
-          const nextStart = timelineTimeFromClientX(latestX, contentRect, totalDuration) - pointerOffset
-          merge.moveVideoTo(layout.item.id, clamp(nextStart, 0, totalDuration), trackId, false)
+          const nextStart = resolveTimelineDragStart(
+            timelineTimeFromClientX(latestX, contentRect, totalDuration, timelinePixelsPerSecondScaled) - pointerOffset,
+            layout.duration,
+            layout.item.id,
+            trackId,
+            clipLayouts,
+            merge.videoTracks.length > 1,
+          )
+          merge.moveVideoTo(layout.item.id, nextStart, trackId, false)
         })
         return
       }
@@ -988,8 +1041,15 @@ export function MergePage() {
         const contentRect = timelineRef.current?.getBoundingClientRect()
         if (contentRect) {
           const trackId = trackIdAtPoint(latestX, latestY, 'video') ?? layout.trackId
-          const nextStart = timelineTimeFromClientX(latestX, contentRect, totalDuration) - pointerOffset
-          merge.moveVideoTo(layout.item.id, clamp(nextStart, 0, totalDuration), trackId, false)
+          const nextStart = resolveTimelineDragStart(
+            timelineTimeFromClientX(latestX, contentRect, totalDuration, timelinePixelsPerSecondScaled) - pointerOffset,
+            layout.duration,
+            layout.item.id,
+            trackId,
+            clipLayouts,
+            merge.videoTracks.length > 1,
+          )
+          merge.moveVideoTo(layout.item.id, nextStart, trackId, false)
         }
         merge.endHistoryTransaction()
         setDraggedClipId('')
@@ -1001,7 +1061,7 @@ export function MergePage() {
         timelineSeekFrameRef.current = null
       }
       const contentRect = timelineRef.current?.getBoundingClientRect()
-      const nextTime = contentRect ? timelineTimeFromClientX(latestX, contentRect, totalDuration) : playheadRef.current
+      const nextTime = contentRect ? timelineTimeFromClientX(latestX, contentRect, totalDuration, timelinePixelsPerSecondScaled) : playheadRef.current
       scrubGlobal(nextTime, true)
       if (scrubbed && resumeAfterSeek) seekGlobal(nextTime, true)
     }
@@ -1011,8 +1071,68 @@ export function MergePage() {
     window.addEventListener('pointercancel', end, { once: true })
   }
 
-  function handleAudioPointerDown(event: React.PointerEvent, audio: MergeAudioItem) {
+  function handleVideoTrimPointerDown(event: React.PointerEvent, layout: ClipLayout, edge: 'start' | 'end') {
+    if (event.button !== 0 || !timelineRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedAudioId('')
+    setSelectedTextId('')
+    setSelectedClipId(layout.item.id)
+    const contentRect = timelineRef.current.getBoundingClientRect()
+    const secondsPerPixel = totalDuration > 0 ? totalDuration / Math.max(1, contentRect.width) : frameStep
+    const originX = event.clientX
+    const clipId = layout.item.id
+    const info = metadata[normalizePath(layout.item.path)]
+    const sourceDuration = sourceDurationForClip(layout.item, info)
+    const startTrim = layout.item.trimStart
+    const sourceEnd = clipSourceEnd(layout.item, info)
+    const minDuration = frameStep
+    const previous = previousTrackLayout(clipLayouts, layout, -1)
+    const next = previousTrackLayout(clipLayouts, layout, 1)
+    let latestEvent: PointerEvent | null = null
+    let frame: number | null = null
+    merge.beginHistoryTransaction()
+
+    const apply = (pointerEvent: PointerEvent) => {
+      const delta = (pointerEvent.clientX - originX) * secondsPerPixel
+      if (edge === 'start') {
+        const earliestTrimByTimeline = Math.max(0, startTrim - Math.max(0, layout.start - (previous?.end ?? 0)))
+        const trimStart = clamp(startTrim + delta, earliestTrimByTimeline, sourceEnd - minDuration)
+        merge.updateVideo(clipId, {
+          trimStart,
+          startTime: Math.max(0, layout.start + trimStart - startTrim),
+        }, false)
+        return
+      }
+      const latestEndByTrack = next ? next.start - layout.start : Number.POSITIVE_INFINITY
+      const trimEnd = clamp(sourceEnd + delta, startTrim + minDuration, Math.min(sourceDuration, startTrim + latestEndByTrack))
+      merge.updateVideo(clipId, { trimEnd }, false)
+    }
+    const move = (pointerEvent: PointerEvent) => {
+      latestEvent = pointerEvent
+      autoScrollTimelineAtPointer(pointerEvent.clientX)
+      if (frame !== null) return
+      frame = window.requestAnimationFrame(() => {
+        frame = null
+        if (latestEvent) apply(latestEvent)
+      })
+    }
+    const end = (pointerEvent: PointerEvent) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      if (frame !== null) window.cancelAnimationFrame(frame)
+      apply(pointerEvent)
+      merge.endHistoryTransaction()
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end, { once: true })
+    window.addEventListener('pointercancel', end, { once: true })
+  }
+
+  function handleAudioPointerDown(event: React.PointerEvent, layout: AudioClipLayout) {
     if (event.button !== 0 || !timelineRef.current || totalDuration <= 0) return
+    const audio = layout.item
     event.preventDefault()
     event.stopPropagation()
     setSelectedClipId('')
@@ -1021,7 +1141,7 @@ export function MergePage() {
     setClipContextMenu(null)
     setAudioContextMenu(null)
     const initialRect = timelineRef.current.getBoundingClientRect()
-    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration) - audio.startTime
+    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration, timelinePixelsPerSecondScaled) - layout.start
     let longPressActive = false
     let latestX = event.clientX
     let latestY = event.clientY
@@ -1037,11 +1157,22 @@ export function MergePage() {
       autoScrollTimelineAtPointer(latestX)
       if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current)
       animationFrameRef.current = window.requestAnimationFrame(() => {
+        animationFrameRef.current = null
         const contentRect = timelineRef.current?.getBoundingClientRect()
         if (!contentRect) return
-        const next = timelineTimeFromClientX(latestX, contentRect, totalDuration) - pointerOffset
+        const next = timelineTimeFromClientX(latestX, contentRect, totalDuration, timelinePixelsPerSecondScaled) - pointerOffset
         const trackId = trackIdAtPoint(latestX, latestY, 'audio') ?? audio.trackId
-        merge.updateAudio(audio.id, { startTime: clamp(next, 0, totalDuration), trackId }, false)
+        merge.updateAudio(audio.id, {
+          startTime: resolveTimelineDragStart(
+            next,
+            layout.duration,
+            audio.id,
+            trackId,
+            audioLayouts,
+            merge.audioTracks.length > 1,
+          ),
+          trackId,
+        }, false)
       })
     }
     const end = () => {
@@ -1070,7 +1201,7 @@ export function MergePage() {
     setAudioContextMenu(null)
     setTextContextMenu(null)
     const initialRect = timelineRef.current.getBoundingClientRect()
-    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration) - item.startTime
+    const pointerOffset = timelineTimeFromClientX(event.clientX, initialRect, totalDuration, timelinePixelsPerSecondScaled) - item.startTime
     let longPressActive = false
     let latestX = event.clientX
     let latestY = event.clientY
@@ -1088,7 +1219,7 @@ export function MergePage() {
       animationFrameRef.current = window.requestAnimationFrame(() => {
         const contentRect = timelineRef.current?.getBoundingClientRect()
         if (!contentRect) return
-        const next = timelineTimeFromClientX(latestX, contentRect, totalDuration) - pointerOffset
+        const next = timelineTimeFromClientX(latestX, contentRect, totalDuration, timelinePixelsPerSecondScaled) - pointerOffset
         const trackId = trackIdAtPoint(latestX, latestY, 'text') ?? item.trackId
         merge.updateText(item.id, { startTime: clamp(next, 0, totalDuration), trackId }, false)
       })
@@ -1117,12 +1248,14 @@ export function MergePage() {
   }
 
   function editTextItem(item: MergeTextItem) {
-    const nextText = window.prompt('修改文本内容', item.text)
-    if (nextText === null) return
-    merge.updateText(item.id, { text: nextText.trim() || '自定义文本' })
     setSelectedClipId('')
     setSelectedAudioId('')
     setSelectedTextId(item.id)
+    window.requestAnimationFrame(() => {
+      selectedTextInputRef.current?.scrollIntoView({ block: 'nearest' })
+      selectedTextInputRef.current?.focus()
+      selectedTextInputRef.current?.select()
+    })
   }
 
   function handlePreviewTextPointerDown(event: React.PointerEvent<HTMLDivElement>, item: MergeTextItem) {
@@ -1157,7 +1290,7 @@ export function MergePage() {
   }
 
   function scheduleTimelineSeek(clientX: number, rect: DOMRect) {
-    const nextTime = timelineTimeFromClientX(clientX, rect, totalDuration)
+    const nextTime = timelineTimeFromClientX(clientX, rect, totalDuration, timelinePixelsPerSecondScaled)
     if (timelineSeekFrameRef.current !== null) window.cancelAnimationFrame(timelineSeekFrameRef.current)
     timelineSeekFrameRef.current = window.requestAnimationFrame(() => {
       timelineSeekFrameRef.current = null
@@ -1472,11 +1605,11 @@ export function MergePage() {
           layoutWidth: item.layoutWidth,
           layoutHeight: item.layoutHeight,
         })),
-        audioTracks: merge.audioItems.map((item) => ({
-          path: item.path,
-          startTime: item.startTime,
-          trimStart: item.trimStart,
-          trimEnd: item.trimEnd > item.trimStart ? item.trimEnd : undefined,
+        audioTracks: audioLayouts.map((layout) => ({
+          path: layout.item.path,
+          startTime: layout.start,
+          trimStart: layout.item.trimStart,
+          trimEnd: layout.item.trimEnd > layout.item.trimStart ? layout.item.trimEnd : undefined,
         })),
         textTracks: merge.textItems.map((item) => ({
           text: item.text,
@@ -1561,7 +1694,7 @@ export function MergePage() {
           gridTemplateColumns: `minmax(480px, ${previewSize.width}px) minmax(320px, 380px)`,
         }}
       >
-        <GlassPanel className="editor-preview-panel frame-preview-card video-preview-card" style={{ maxWidth: 'none' }}>
+        <GlassPanel ref={previewPanelRef} className="editor-preview-panel frame-preview-card video-preview-card" style={{ maxWidth: 'none' }}>
           <div
             ref={previewScreenRef}
             className={`frame-image-box video-box editor-preview-screen ${cropEditing ? 'crop-editing' : ''}`}
@@ -1720,7 +1853,7 @@ export function MergePage() {
               </div>
             )}
             <div className="editor-preview-size-tools">
-              <button type="button" title="还原播放窗口默认尺寸" onClick={() => setPreviewSize({ width: 720, height: 420 })}>
+              <button type="button" title="还原播放窗口默认尺寸" onClick={() => setPreviewSize(defaultPreviewSize)}>
                 <RotateCcw />还原窗口
               </button>
             </div>
@@ -1836,7 +1969,10 @@ export function MergePage() {
           </section>
         </GlassPanel>
 
-        <GlassPanel className="editor-inspector-panel">
+        <GlassPanel
+          className="editor-inspector-panel"
+          style={previewPanelHeight > 0 ? { height: previewPanelHeight, maxHeight: previewPanelHeight } : undefined}
+        >
           <div className="editor-inspector-title"><Settings2 /><strong>属性与输出</strong></div>
           {selectedClip ? (
             <div className="editor-selected-media">
@@ -1856,14 +1992,14 @@ export function MergePage() {
               <span>音频片段</span>
               <strong title={selectedAudio.path}>{selectedAudio.name}</strong>
               <div className="editor-time-fields">
-                <NumberField label="时间线位置" value={selectedAudio.startTime} min={0} step={0.001} onChange={(startTime) => merge.updateAudio(selectedAudio.id, { startTime })} />
+                <NumberField label="时间线位置" value={selectedAudioLayout?.start ?? 0} min={0} step={0.001} onChange={(startTime) => merge.updateAudio(selectedAudio.id, { startTime })} />
                 <NumberField label="音频入点" value={selectedAudio.trimStart} min={0} step={0.001} onChange={(trimStart) => merge.updateAudio(selectedAudio.id, { trimStart })} />
               </div>
             </div>
           ) : selectedText ? (
             <div className="editor-selected-media text">
               <span>文本片段</span>
-              <TextInput value={selectedText.text} onChange={(event) => merge.updateText(selectedText.id, { text: event.target.value })} />
+              <TextInput ref={selectedTextInputRef} value={selectedText.text} onChange={(event) => merge.updateText(selectedText.id, { text: event.target.value })} />
               <div className="editor-time-fields">
                 <NumberField label="开始时间" value={selectedText.startTime} min={0} step={0.001} onChange={(startTime) => merge.updateText(selectedText.id, { startTime })} />
                 <NumberField label="持续秒数" value={selectedText.duration} min={0.05} step={0.001} onChange={(duration) => merge.updateText(selectedText.id, { duration })} />
@@ -1900,8 +2036,15 @@ export function MergePage() {
                 <SelectInput
                   value={resolutionValue}
                   onChange={(event) => {
+                    if (event.target.value === 'custom') {
+                      setCustomResolutionSelected(true)
+                      return
+                    }
                     const preset = resolutionOptions.find((item) => `${item.width}x${item.height}` === event.target.value)
-                    if (preset) merge.setSettings({ width: preset.width, height: preset.height })
+                    if (preset) {
+                      setCustomResolutionSelected(false)
+                      merge.setSettings({ width: preset.width, height: preset.height })
+                    }
                   }}
                 >
                   {resolutionOptions.map((item) => <option key={item.label} value={`${item.width}x${item.height}`}>{item.label}</option>)}
@@ -1921,7 +2064,10 @@ export function MergePage() {
                 min={minimumOutputDimension}
                 max={maximumOutputDimension}
                 step={2}
-                onChange={(width) => merge.setSettings({ width: evenDimension(width) })}
+                onChange={(width) => {
+                  setCustomResolutionSelected(true)
+                  merge.setSettings({ width: evenDimension(width) })
+                }}
               />
               <NumberField
                 label="自定义高度"
@@ -1930,7 +2076,10 @@ export function MergePage() {
                 min={minimumOutputDimension}
                 max={maximumOutputDimension}
                 step={2}
-                onChange={(height) => merge.setSettings({ height: evenDimension(height) })}
+                onChange={(height) => {
+                  setCustomResolutionSelected(true)
+                  merge.setSettings({ height: evenDimension(height) })
+                }}
               />
             </div>
             <div className={`editor-resize-card ${previewClip?.cropEnabled ? 'active' : ''}`}>
@@ -1955,14 +2104,41 @@ export function MergePage() {
       <GlassPanel className="editor-timeline-panel">
         <div className="timeline-tool-card">
           <div>
-            <button type="button" title="缩小时间线" onClick={() => zoomTimeline(timelineZoom / 1.25)}>
+            <button type="button" title="缩小时间线" onClick={() => zoomTimeline(timelineZoom - timelineZoomStep)}>
               <Minus />
             </button>
-            <button type="button" title="放大时间线" onClick={() => zoomTimeline(timelineZoom * 1.25)}>
+            <button type="button" title="放大时间线" onClick={() => zoomTimeline(timelineZoom + timelineZoomStep)}>
               <Plus />
             </button>
+            <button type="button" title="重置时间线缩放" onClick={() => zoomTimeline(timelineZoomDefault)}>
+              <RotateCcw />
+            </button>
           </div>
-          <span>{Math.round(timelineZoom * 100)}%</span>
+          {timelineZoomEditing ? (
+            <input
+              className="timeline-zoom-input"
+              value={timelineZoomDraft}
+              autoFocus
+              onChange={(event) => setTimelineZoomDraft(event.target.value)}
+              onBlur={commitTimelineZoomDraft}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') commitTimelineZoomDraft()
+                if (event.key === 'Escape') setTimelineZoomEditing(false)
+              }}
+            />
+          ) : (
+            <button
+              type="button"
+              className="timeline-zoom-value"
+              title="双击输入自定义缩放百分比"
+              onDoubleClick={() => {
+                setTimelineZoomDraft(String(Math.round(timelineZoom)))
+                setTimelineZoomEditing(true)
+              }}
+            >
+              {Math.round(timelineZoom)}%
+            </button>
+          )}
         </div>
         <div className="timeline-workspace">
           <div className="timeline-track-labels">
@@ -2007,7 +2183,7 @@ export function MergePage() {
                       y: event.clientY,
                       kind: 'text',
                       trackId: track.id,
-                      time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration) : playheadRef.current,
+                      time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration, timelinePixelsPerSecondScaled) : playheadRef.current,
                     })
                   }}
                 >
@@ -2023,8 +2199,8 @@ export function MergePage() {
               style={{ width: timelineContentWidth, minWidth: '100%', minHeight: timelineContentHeight }}
             >
               <div className="timeline-ruler">
-                {timeTicks(totalDuration, timelineContentWidth).map((tick) => (
-                  <time key={tick} style={{ left: `${percent(tick, totalDuration)}%` }}>{formatTick(tick)}</time>
+                {timeTicks(totalDuration, totalDuration * timelinePixelsPerSecondScaled).map((tick) => (
+                  <time key={tick} style={{ left: timelinePixel(tick, timelinePixelsPerSecondScaled) }}>{formatTick(tick)}</time>
                 ))}
               </div>
               <div className="timeline-tracks" style={{ gridTemplateRows: timelineTracksTemplate }} onPointerDown={handleTimelinePointerDown}>
@@ -2049,8 +2225,8 @@ export function MergePage() {
                         draggedClipId === layout.item.id ? 'long-press-dragging' : '',
                       ].filter(Boolean).join(' ')}
                       style={{
-                        left: `${percent(layout.start, totalDuration)}%`,
-                        width: `${Math.max(0.3, percent(layout.duration, totalDuration))}%`,
+                        left: timelinePixel(layout.start, timelinePixelsPerSecondScaled),
+                        width: timelineLength(layout.duration, timelinePixelsPerSecondScaled),
                       }}
                       key={layout.item.id}
                       title={`${layout.item.name}\n${formatPreciseTime(layout.duration)}\n短按或拖动定位播放头，长按后可移动到任意视频线和时间位置，右键打开操作菜单`}
@@ -2060,7 +2236,7 @@ export function MergePage() {
                         event.stopPropagation()
                         const rect = timelineRef.current?.getBoundingClientRect()
                         const contextTime = rect
-                          ? clamp(timelineTimeFromClientX(event.clientX, rect, totalDuration), layout.start, layout.end)
+                          ? clamp(timelineTimeFromClientX(event.clientX, rect, totalDuration, timelinePixelsPerSecondScaled), layout.start, layout.end)
                           : layout.start
                         setSelectedAudioId('')
                         setSelectedTextId('')
@@ -2075,6 +2251,11 @@ export function MergePage() {
                         })
                       }}
                     >
+                      <span
+                        className="timeline-clip-trim-handle start"
+                        aria-hidden="true"
+                        onPointerDown={(event) => handleVideoTrimPointerDown(event, layout, 'start')}
+                      />
                       <span className="timeline-clip-grip" aria-hidden="true">
                         <GripVertical />
                       </span>
@@ -2083,12 +2264,17 @@ export function MergePage() {
                       {layout.item.cropEnabled && <SquareDashedMousePointer className="timeline-transform-icon" aria-label="该片段已裁剪" />}
                       {layout.item.muted && <VolumeX className="timeline-muted-icon" aria-label="该片段已静音" />}
                       <small>{formatPreciseTime(layout.duration)}</small>
+                      <span
+                        className="timeline-clip-trim-handle end"
+                        aria-hidden="true"
+                        onPointerDown={(event) => handleVideoTrimPointerDown(event, layout, 'end')}
+                      />
                     </button>
                   ))}
                 </div>
                 ))}
                 {merge.audioTracks.map((track) => {
-                  const trackAudio = merge.audioItems.filter((audio) => audio.trackId === track.id)
+                  const trackAudio = audioLayouts.filter((layout) => layout.trackId === track.id)
                   return (
                 <div
                   className={`timeline-audio-track ${trackAudio.length === 0 ? 'empty' : ''}`}
@@ -2102,8 +2288,8 @@ export function MergePage() {
                   }}
                 >
                   {trackAudio.length === 0 && <span className="timeline-empty-hint">拖入音频，或右键视频片段提取音频</span>}
-                  {trackAudio.map((audio) => {
-                    const duration = audioDuration(audio, audioDurations, metadata)
+                  {trackAudio.map((audioLayout) => {
+                    const audio = audioLayout.item
                     return (
                       <button
                         type="button"
@@ -2113,12 +2299,12 @@ export function MergePage() {
                           draggedAudioId === audio.id ? 'long-press-dragging' : '',
                         ].filter(Boolean).join(' ')}
                         style={{
-                          left: `${percent(audio.startTime, totalDuration)}%`,
-                          width: `${Math.max(0.3, percent(duration, totalDuration))}%`,
+                          left: timelinePixel(audioLayout.start, timelinePixelsPerSecondScaled),
+                          width: timelineLength(audioLayout.duration, timelinePixelsPerSecondScaled),
                         }}
                         key={audio.id}
                         title={`${audio.name}\n长按后拖动可调整时间线位置，右键打开操作菜单`}
-                        onPointerDown={(event) => handleAudioPointerDown(event, audio)}
+                        onPointerDown={(event) => handleAudioPointerDown(event, audioLayout)}
                         onContextMenu={(event) => {
                           event.preventDefault()
                           event.stopPropagation()
@@ -2130,7 +2316,7 @@ export function MergePage() {
                           setAudioContextMenu({
                             x: Math.max(8, Math.min(event.clientX, window.innerWidth - 240)),
                             y: Math.max(8, Math.min(event.clientY, window.innerHeight - 230)),
-                            audio,
+                            layout: audioLayout,
                           })
                         }}
                       >
@@ -2159,7 +2345,7 @@ export function MergePage() {
                       y: event.clientY,
                       kind: 'text',
                       trackId: track.id,
-                      time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration) : playheadRef.current,
+                      time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration, timelinePixelsPerSecondScaled) : playheadRef.current,
                     })
                   }}
                 >
@@ -2173,8 +2359,8 @@ export function MergePage() {
                         draggedAudioId === item.id ? 'long-press-dragging' : '',
                       ].filter(Boolean).join(' ')}
                       style={{
-                        left: `${percent(item.startTime, totalDuration)}%`,
-                        width: `${Math.max(0.3, percent(item.duration, totalDuration))}%`,
+                        left: timelinePixel(item.startTime, timelinePixelsPerSecondScaled),
+                        width: timelineLength(item.duration, timelinePixelsPerSecondScaled),
                       }}
                       key={item.id}
                       title={`${item.text}\n长按后拖动可调整时间线位置，右键打开操作菜单`}
@@ -2205,7 +2391,7 @@ export function MergePage() {
               {totalDuration > 0 && (
                 <div
                   className={`timeline-playhead ${playheadDragging ? 'dragging' : ''}`}
-                  style={{ left: `${percent(playhead, totalDuration)}%` }}
+                  style={{ left: timelinePixel(playhead, timelinePixelsPerSecondScaled) }}
                 >
                   <button
                     type="button"
@@ -2443,36 +2629,36 @@ export function MergePage() {
           onPointerDown={(event) => event.stopPropagation()}
           onWheel={(event) => event.stopPropagation()}
         >
-          <strong title={audioContextMenu.audio.path}>{audioContextMenu.audio.name}</strong>
+          <strong title={audioContextMenu.layout.item.path}>{audioContextMenu.layout.item.name}</strong>
           <span className="clip-context-menu-range">
-            时间线位置 {formatPreciseTime(audioContextMenu.audio.startTime)}
+            时间线位置 {formatPreciseTime(audioContextMenu.layout.start)}
           </span>
           <button type="button" role="menuitem" onClick={() => {
-            seekGlobal(audioContextMenu.audio.startTime)
+            seekGlobal(audioContextMenu.layout.start)
             setAudioContextMenu(null)
           }}>
             <SkipBack />定位到音频开头
           </button>
           <button type="button" role="menuitem" onClick={() => {
-            merge.updateAudio(audioContextMenu.audio.id, { startTime: playheadRef.current })
+            merge.updateAudio(audioContextMenu.layout.item.id, { startTime: playheadRef.current })
             setAudioContextMenu(null)
           }}>
             <ArrowRight />移动到播放头
           </button>
-          <button type="button" role="menuitem" disabled={audioContextMenu.audio.startTime === 0} onClick={() => {
-            merge.updateAudio(audioContextMenu.audio.id, { startTime: 0 })
+          <button type="button" role="menuitem" disabled={audioContextMenu.layout.start === 0} onClick={() => {
+            merge.updateAudio(audioContextMenu.layout.item.id, { startTime: 0 })
             setAudioContextMenu(null)
           }}>
             <RotateCcw />移到时间线起点
           </button>
           <button type="button" role="menuitem" onClick={() => {
             setAudioContextMenu(null)
-            void revealInFolder(audioContextMenu.audio.path).catch((error) => merge.setError(normalizeBackendError(error)))
+            void revealInFolder(audioContextMenu.layout.item.path).catch((error) => merge.setError(normalizeBackendError(error)))
           }}>
             <FolderOpen />在文件夹中显示
           </button>
           <button className="danger" type="button" role="menuitem" onClick={() => {
-            merge.removeAudio(audioContextMenu.audio.id)
+            merge.removeAudio(audioContextMenu.layout.item.id)
             setSelectedAudioId('')
             setAudioContextMenu(null)
           }}>
@@ -2739,6 +2925,23 @@ function buildClipLayouts(
   })
 }
 
+function buildAudioLayouts(
+  items: MergeAudioItem[],
+  trackIds: string[],
+  durations: Record<string, number>,
+  metadata: Record<string, VideoMetadata>,
+) {
+  const cursors = new Map(trackIds.map((trackId) => [trackId, 0]))
+  return items.map<AudioClipLayout>((item) => {
+    const trackId = trackIds.includes(item.trackId) ? item.trackId : trackIds[0] ?? item.trackId
+    const duration = audioDuration(item, durations, metadata)
+    const start = item.startTime === null ? cursors.get(trackId) ?? 0 : Math.max(0, item.startTime)
+    const end = start + duration
+    cursors.set(trackId, Math.max(cursors.get(trackId) ?? 0, end))
+    return { item, trackId, start, duration, end }
+  })
+}
+
 function activeLayoutsAt(layouts: ClipLayout[], time: number, trackIds: string[]) {
   const trackOrder = new Map(trackIds.map((trackId, index) => [trackId, index]))
   return layouts
@@ -2747,6 +2950,45 @@ function activeLayoutsAt(layouts: ClipLayout[], time: number, trackIds: string[]
       (trackOrder.get(left.trackId) ?? 0) - (trackOrder.get(right.trackId) ?? 0)
       || left.start - right.start
     ))
+}
+
+function resolveTimelineDragStart<T extends { item: { id: string }; trackId: string; start: number; duration: number; end: number }>(
+  requestedStart: number,
+  duration: number,
+  movingId: string,
+  targetTrackId: string,
+  layouts: T[],
+  allowCrossTrackOverlap: boolean,
+) {
+  const start = Math.max(0, requestedStart)
+  const shouldAvoidOverlap = !allowCrossTrackOverlap || layouts.some((layout) => (
+    layout.item.id === movingId && layout.trackId === targetTrackId
+  ))
+  if (!shouldAvoidOverlap) return start
+  return nearestNonOverlappingStart(start, duration, layouts.filter((layout) => (
+    layout.item.id !== movingId && layout.trackId === targetTrackId
+  )))
+}
+
+function nearestNonOverlappingStart(
+  requestedStart: number,
+  duration: number,
+  others: Array<{ start: number; end: number }>,
+) {
+  const start = Math.max(0, requestedStart)
+  if (!timeRangeOverlaps(start, start + duration, others)) return start
+  const candidates = [0]
+  others.forEach((layout) => {
+    candidates.push(layout.end, layout.start - duration)
+  })
+  return candidates
+    .filter((candidate) => candidate >= 0 && !timeRangeOverlaps(candidate, candidate + duration, others))
+    .sort((left, right) => Math.abs(left - start) - Math.abs(right - start) || left - right)[0] ?? start
+}
+
+function timeRangeOverlaps(start: number, end: number, others: Array<{ start: number; end: number }>) {
+  const epsilon = 0.0005
+  return others.some((layout) => start < layout.end - epsilon && end > layout.start + epsilon)
 }
 
 function previewLayoutRects(items: MergeQueueItem[]): NormalizedLayoutRect[] {
@@ -2929,6 +3171,10 @@ function clipSourceEnd(item: MergeQueueItem, info?: VideoMetadata) {
   return item.trimEnd > item.trimStart ? Math.min(item.trimEnd, duration) : duration
 }
 
+function sourceDurationForClip(item: MergeQueueItem, info?: VideoMetadata) {
+  return info?.readable ? info.duration : Math.max(item.trimEnd, item.trimStart + 1)
+}
+
 function audioDuration(audio: MergeAudioItem, durations: Record<string, number>, metadata: Record<string, VideoMetadata>) {
   const duration = durations[audio.id] ?? metadata[normalizePath(audio.path)]?.duration ?? 30
   const end = audio.trimEnd > audio.trimStart ? Math.min(audio.trimEnd, duration) : duration
@@ -2937,7 +3183,7 @@ function audioDuration(audio: MergeAudioItem, durations: Record<string, number>,
 
 function timeTicks(duration: number, width = timelineMinimumWidth) {
   if (duration <= 0) return [0]
-  const targetTicks = clamp(Math.floor(width / 100), 6, 60)
+  const targetTicks = clamp(Math.floor(width / 100), 1, 60)
   const raw = duration / targetTicks
   const units = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
   const step = units.find((unit) => unit >= raw) ?? Math.ceil(raw / 3600) * 3600
@@ -2946,13 +3192,32 @@ function timeTicks(duration: number, width = timelineMinimumWidth) {
   return ticks
 }
 
-function percent(value: number, total: number) {
-  return total > 0 ? Math.max(0, Math.min(100, value / total * 100)) : 0
+function timelinePixel(time: number, pixelsPerSecond: number) {
+  return `${Math.max(0, time * pixelsPerSecond)}px`
 }
 
-function timelineTimeFromClientX(clientX: number, rect: DOMRect, totalDuration: number) {
-  if (rect.width <= 0 || totalDuration <= 0) return 0
-  return clamp((clientX - rect.left) / rect.width * totalDuration, 0, totalDuration)
+function timelineLength(duration: number, pixelsPerSecond: number) {
+  return `${Math.max(2, duration * pixelsPerSecond)}px`
+}
+
+function timelineTimeFromClientX(clientX: number, rect: DOMRect, totalDuration: number, pixelsPerSecond: number) {
+  if (rect.width <= 0 || totalDuration <= 0 || pixelsPerSecond <= 0) return 0
+  return clamp((clientX - rect.left) / pixelsPerSecond, 0, totalDuration)
+}
+
+function normalizeTimelineZoom(value: number) {
+  if (!Number.isFinite(value)) return timelineZoomDefault
+  return clamp(value, timelineZoomMinimum, timelineZoomMaximum)
+}
+
+function timelinePixelsPerSecondForZoom(zoomPercent: number) {
+  const zoom = normalizeTimelineZoom(zoomPercent)
+  if (zoom <= timelineZoomDefault) {
+    return timelineMinimumPixelsPerSecond
+      * Math.pow(timelinePixelsPerSecond / timelineMinimumPixelsPerSecond, zoom / timelineZoomDefault)
+  }
+  return timelinePixelsPerSecond
+    * Math.pow(timelineMaximumPixelsPerSecond / timelinePixelsPerSecond, (zoom - timelineZoomDefault) / timelineZoomDefault)
 }
 
 function canSplitClipAt(layout: ClipLayout, timelineTime: number, metadata: Record<string, VideoMetadata>) {

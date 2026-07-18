@@ -6,6 +6,7 @@ export const parameterHints = {
   cacheDir: '保存抽帧结果和特征缓存，重复分析同一视频会更快。',
   clearCache: '删除旧的抽帧、特征和断点缓存；报告文件会保留。',
   reportDir: '保存分析报告的位置，结果页会优先从这里读取。',
+  networkProxy: '可选。填写本机代理地址后，检查更新、立即更新和模型下载会显式走该代理；留空则使用系统或环境代理。',
   skipThreshold: '画面越相似越容易跳过；调低会更快，调高会保留更多细节。',
   matchThreshold: '两帧被认为相似的最低分数，越高越严格。',
   windowSize: '按多少秒切一段，用来统计局部时间窗口相似度。',
