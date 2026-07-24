@@ -49,6 +49,26 @@ def test_task_state_path_sanitizes_external_id(tmp_path: Path):
     assert state_path.parent.name == "unsafetask"
 
 
+def test_task_config_file_supports_large_video_lists(tmp_path: Path):
+    config_path = tmp_path / "task-config.json"
+    expected = {
+        "videoDir": str(tmp_path),
+        "videoPaths": [
+            str(tmp_path / ("nested-" + "x" * 180) / f"video-{index:04d}.mp4")
+            for index in range(500)
+        ],
+    }
+    config_path.write_text(json.dumps(expected, ensure_ascii=False), encoding="utf-8")
+
+    loaded = batch_compare.load_task_config(
+        raw_value='{"source": "legacy-inline"}',
+        config_path=str(config_path),
+    )
+
+    assert loaded == expected
+    assert len(json.dumps(loaded, ensure_ascii=False)) > 32_767
+
+
 def test_pair_key_keeps_incremental_pairs_but_invalidates_changed_video(tmp_path: Path):
     video_a = tmp_path / "a.mp4"
     video_b = tmp_path / "b.mp4"

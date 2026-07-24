@@ -67,8 +67,19 @@ import {
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { analysisConfigFromSettings } from '@/types/config'
-import type { VideoScanFilters } from '@/types/config'
+import {
+  analysisConfigFromSettings,
+  analysisPresetOptions,
+  analysisPresets,
+  errorToleranceOptions,
+} from '@/types/config'
+import type {
+  AnalysisPresetConfig,
+  AnalysisPresetId,
+  ErrorToleranceConfig,
+  ErrorTolerancePreset,
+  VideoScanFilters,
+} from '@/types/config'
 import {
   analysisTaskStages,
   analysisTaskStatusClass,
@@ -79,6 +90,7 @@ import {
 
 interface PendingTaskDraft {
   taskName: string
+  analysisPresetId: AnalysisPresetId
   config: RunBatchCompareConfig
   videos: VideoFile[]
   loadedVideoDir: string
@@ -192,6 +204,15 @@ export function AnalyzePage() {
       ? '新建中'
       : '新建任务'
   const stageTask = historyTasks.find((task) => task.id === stageTaskId) ?? null
+
+  useEffect(() => {
+    if (!errorMessage) return undefined
+    const timer = window.setTimeout(() => {
+      setIsLogDrawerOpen(true)
+      setLogView('stderr')
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [errorMessage])
 
   useEffect(() => {
     if (!videoContextMenu) return undefined
@@ -476,6 +497,7 @@ export function AnalyzePage() {
       }
       setPendingTaskDraft({
         taskName: '',
+        analysisPresetId: currentSettings.selectedAnalysisPreset,
         config: batchConfig,
         videos: selectedVideos,
         loadedVideoDir: batchConfig.videoDir,
@@ -652,7 +674,7 @@ export function AnalyzePage() {
       useSettingsStore.getState(),
       analysisConfigFromSettings(useSettingsStore.getState()),
     )
-    const taskConfig: RunBatchCompareConfig = { ...defaults, ...task.config, taskId: task.id, compareWorkers: defaults.compareWorkers }
+    const taskConfig: RunBatchCompareConfig = { ...defaults, ...task.config, taskId: task.id }
     if (!taskConfig?.videoDir || !taskConfig?.cacheDir) {
       setErrorMessage('该任务缺少运行配置，无法继续。')
       return
@@ -683,10 +705,6 @@ export function AnalyzePage() {
         progress: task.progress,
       })
 
-      const store = useSettingsStore.getState()
-      store.setVideoDir(taskConfig.videoDir)
-      store.setCacheDir(taskConfig.cacheDir)
-      if (taskConfig.outputDir) store.setReportDir(taskConfig.outputDir)
       clearLogs()
       setReport(null)
       setResultSummary(null)
@@ -1618,6 +1636,67 @@ function TaskLoadDialog({
   )
 }
 
+function applyPresetToTaskConfig(
+  config: RunBatchCompareConfig,
+  preset: AnalysisPresetConfig,
+): RunBatchCompareConfig {
+  return {
+    ...config,
+    analysisMode: preset.analysisMode,
+    skipThreshold: preset.defaultSkipThreshold,
+    matchThreshold: preset.defaultMatchThreshold,
+    windowSize: preset.defaultWindowSize,
+    topK: preset.defaultTopK,
+    candidateLimit: preset.defaultCandidateLimit,
+    maxGapSec: preset.defaultMaxGapSec,
+    frameStep: preset.defaultFrameStep,
+    minSegmentDuration: preset.defaultMinSegmentDuration,
+    minSegmentMatches: preset.defaultMinSegmentMatches,
+    offsetTolerance: preset.defaultOffsetTolerance,
+    cropBlackBorders: preset.defaultCropBlackBorders,
+    resizeMode: preset.defaultResizeMode,
+    inputSize: preset.defaultInputSize,
+    portraitRotation: preset.defaultPortraitRotation,
+    force: preset.defaultForce,
+    earlyStop: preset.defaultEarlyStop,
+    device: preset.defaultDevice,
+  }
+}
+
+function errorToleranceConfigForPreset(
+  preset: ErrorTolerancePreset,
+  custom: ErrorToleranceConfig,
+  currentPreflightValidation: boolean,
+): ErrorToleranceConfig {
+  if (preset === 'strict') {
+    return {
+      errorToleranceSevereLimit: 5,
+      errorToleranceMissingPictureLimit: 20,
+      errorTolerancePreflightValidation: currentPreflightValidation,
+    }
+  }
+  if (preset === 'lenient') {
+    return {
+      errorToleranceSevereLimit: 200,
+      errorToleranceMissingPictureLimit: 1000,
+      errorTolerancePreflightValidation: currentPreflightValidation,
+    }
+  }
+  if (preset === 'failure_only') {
+    return {
+      errorToleranceSevereLimit: 0,
+      errorToleranceMissingPictureLimit: 0,
+      errorTolerancePreflightValidation: currentPreflightValidation,
+    }
+  }
+  if (preset === 'custom') return { ...custom }
+  return {
+    errorToleranceSevereLimit: 20,
+    errorToleranceMissingPictureLimit: 100,
+    errorTolerancePreflightValidation: currentPreflightValidation,
+  }
+}
+
 function TaskCreateDialog({
   draft,
   busy,
@@ -1653,11 +1732,25 @@ function TaskCreateDialogContent({
 }) {
   const [taskName, setTaskName] = useState(draft.taskName)
   const [config, setConfig] = useState<RunBatchCompareConfig>(draft.config)
+  const [selectedPreset, setSelectedPreset] = useState<AnalysisPresetId | 'task_custom'>(draft.analysisPresetId)
+  const customAnalysisPresets = useSettingsStore((state) => state.customAnalysisPresets)
+  const customErrorTolerance = useSettingsStore((state) => state.customErrorTolerance)
+  const [selectedErrorTolerancePreset, setSelectedErrorTolerancePreset] = useState<ErrorTolerancePreset | 'task_custom'>(
+    errorToleranceOptions.some((option) => option.id === draft.config.errorTolerancePreset)
+      ? draft.config.errorTolerancePreset as ErrorTolerancePreset
+      : 'balanced',
+  )
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setTaskName(draft.taskName)
       setConfig(draft.config)
+      setSelectedPreset(draft.analysisPresetId)
+      setSelectedErrorTolerancePreset(
+        errorToleranceOptions.some((option) => option.id === draft.config.errorTolerancePreset)
+          ? draft.config.errorTolerancePreset as ErrorTolerancePreset
+          : 'balanced',
+      )
     }, 0)
     return () => window.clearTimeout(timer)
   }, [draft])
@@ -1666,6 +1759,50 @@ function TaskCreateDialogContent({
     setConfig((current) => ({ ...current, [key]: value }))
   }
 
+  function updateAnalysisConfig<K extends keyof RunBatchCompareConfig>(key: K, value: RunBatchCompareConfig[K]) {
+    updateConfig(key, value)
+    setSelectedPreset('task_custom')
+  }
+
+  function applyAnalysisPreset(presetId: AnalysisPresetId) {
+    const preset = presetId === 'duplicate_file'
+      ? analysisPresets.duplicate_file
+      : customAnalysisPresets[presetId]
+    setConfig((current) => applyPresetToTaskConfig(current, preset))
+    setSelectedPreset(presetId)
+  }
+
+  function updateErrorToleranceConfig<K extends keyof RunBatchCompareConfig>(
+    key: K,
+    value: RunBatchCompareConfig[K],
+  ) {
+    setConfig((current) => ({
+      ...current,
+      [key]: value,
+      errorTolerancePreset: 'custom',
+    }))
+    setSelectedErrorTolerancePreset('task_custom')
+  }
+
+  function applyErrorTolerancePreset(presetId: ErrorTolerancePreset) {
+    setConfig((current) => ({
+      ...current,
+      errorTolerancePreset: presetId,
+      ...errorToleranceConfigForPreset(
+        presetId,
+        customErrorTolerance,
+        current.errorTolerancePreflightValidation,
+      ),
+    }))
+    setSelectedErrorTolerancePreset(presetId)
+  }
+
+  const selectedPresetOption = selectedPreset === 'task_custom'
+    ? null
+    : analysisPresetOptions.find((preset) => preset.id === selectedPreset)
+  const selectedErrorToleranceOption = selectedErrorTolerancePreset === 'task_custom'
+    ? null
+    : errorToleranceOptions.find((preset) => preset.id === selectedErrorTolerancePreset)
   const videoDirChanged = normalizeVideoPath(config.videoDir) !== normalizeVideoPath(draft.loadedVideoDir)
   const estimatedPairs = config.analysisMode === 'duplicate_file' ? draft.videos.length : pairCountFor(draft.videos.length)
   const canConfirm = config.videoDir.trim() && config.outputDir.trim() && config.cacheDir.trim()
@@ -1726,84 +1863,109 @@ function TaskCreateDialogContent({
               <span>项目目录</span>
               <TextInput value={config.projectRoot} onChange={(event) => updateConfig('projectRoot', event.target.value)} />
             </label>
+            <TaskNumberField label="并行设置" value={config.compareWorkers} min={1} step={1} integer onChange={(value) => updateConfig('compareWorkers', value)} />
+          </section>
+
+          <section className="task-create-section">
+            <h4>分析配置</h4>
+            <label className="task-create-field">
+              <span>分析配置预设</span>
+              <SelectInput
+                value={selectedPreset}
+                onChange={(event) => applyAnalysisPreset(event.target.value as AnalysisPresetId)}
+              >
+                {selectedPreset === 'task_custom' ? (
+                  <option value="task_custom" disabled>本次任务自定义</option>
+                ) : null}
+                {analysisPresetOptions.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name} · {preset.summary}
+                  </option>
+                ))}
+              </SelectInput>
+            </label>
+            <label className="task-create-field">
+              <span>错误容忍预设</span>
+              <SelectInput
+                value={selectedErrorTolerancePreset}
+                onChange={(event) => applyErrorTolerancePreset(event.target.value as ErrorTolerancePreset)}
+              >
+                {selectedErrorTolerancePreset === 'task_custom' ? (
+                  <option value="task_custom" disabled>本次任务自定义</option>
+                ) : null}
+                {errorToleranceOptions.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name} · {preset.description}
+                  </option>
+                ))}
+              </SelectInput>
+            </label>
+            <p className="task-create-preset-description">
+              分析预设：{selectedPresetOption?.description ?? '参数已在本次任务中手动调整。'}
+              {' '}错误容忍：{selectedErrorToleranceOption?.description ?? '参数已在本次任务中手动调整。'}
+              {' '}选择预设会从“设置”载入参数；下方修改仅对本次任务生效，不会同步保存到设置。
+            </p>
+            <h5 className="task-create-detail-heading">分析参数详情</h5>
             <label className="task-create-field">
               <span>分析模式</span>
-              <SelectInput value={config.analysisMode || 'video_similarity'} onChange={(event) => updateConfig('analysisMode', event.target.value)}>
+              <SelectInput value={config.analysisMode || 'video_similarity'} onChange={(event) => updateAnalysisConfig('analysisMode', event.target.value)}>
                 <option value="video_similarity">视频相似度分析</option>
                 <option value="duplicate_file">对比相同文件</option>
               </SelectInput>
             </label>
             <label className="task-create-field">
               <span>运行设备</span>
-              <SelectInput value={config.device || 'auto'} onChange={(event) => updateConfig('device', event.target.value)}>
+              <SelectInput value={config.device || 'auto'} onChange={(event) => updateAnalysisConfig('device', event.target.value)}>
                 <option value="auto">自动(auto)</option>
                 <option value="cuda">显卡加速(CUDA)</option>
                 <option value="cpu">处理器(CPU)</option>
               </SelectInput>
             </label>
-            <TaskNumberField label="并行设置" value={config.compareWorkers} min={1} step={1} integer onChange={(value) => updateConfig('compareWorkers', value)} />
-          </section>
-
-          <section className="task-create-section">
-            <h4>分析配置</h4>
-            <TaskNumberField label="跳帧阈值" value={config.skipThreshold} min={0} step={0.01} onChange={(value) => updateConfig('skipThreshold', value)} />
-            <TaskNumberField label="匹配阈值" value={config.matchThreshold} min={0} step={0.01} onChange={(value) => updateConfig('matchThreshold', value)} />
-            <TaskNumberField label="时间窗口" value={config.windowSize} min={1} step={1} integer onChange={(value) => updateConfig('windowSize', value)} />
-            <TaskNumberField label="候选数(Top-K)" value={config.topK} min={1} step={1} integer onChange={(value) => updateConfig('topK', value)} />
-            <TaskNumberField label="精确比较候选数" value={config.candidateLimit} min={0} step={1} integer onChange={(value) => updateConfig('candidateLimit', value)} />
-            <TaskNumberField label="最大间隔" value={config.maxGapSec} min={0} step={0.1} onChange={(value) => updateConfig('maxGapSec', value)} />
-            <TaskNumberField label="扫描步长" value={config.frameStep} min={1} step={1} integer onChange={(value) => updateConfig('frameStep', value)} />
-            <TaskNumberField label="最短片段" value={config.minSegmentDuration} min={0} step={0.1} onChange={(value) => updateConfig('minSegmentDuration', value)} />
-            <TaskNumberField label="最少匹配点" value={config.minSegmentMatches} min={1} step={1} integer onChange={(value) => updateConfig('minSegmentMatches', value)} />
-            <TaskNumberField label="偏移容忍" value={config.offsetTolerance} min={0} step={0.1} onChange={(value) => updateConfig('offsetTolerance', value)} />
-            <TaskNumberField label="匹配分辨率" value={config.inputSize} min={64} step={16} integer onChange={(value) => updateConfig('inputSize', value)} />
+            <TaskNumberField label="跳帧阈值" value={config.skipThreshold} min={0} step={0.01} onChange={(value) => updateAnalysisConfig('skipThreshold', value)} />
+            <TaskNumberField label="匹配阈值" value={config.matchThreshold} min={0} step={0.01} onChange={(value) => updateAnalysisConfig('matchThreshold', value)} />
+            <TaskNumberField label="时间窗口" value={config.windowSize} min={1} step={1} integer onChange={(value) => updateAnalysisConfig('windowSize', value)} />
+            <TaskNumberField label="候选数(Top-K)" value={config.topK} min={1} step={1} integer onChange={(value) => updateAnalysisConfig('topK', value)} />
+            <TaskNumberField label="精确比较候选数" value={config.candidateLimit} min={0} step={1} integer onChange={(value) => updateAnalysisConfig('candidateLimit', value)} />
+            <TaskNumberField label="最大间隔" value={config.maxGapSec} min={0} step={0.1} onChange={(value) => updateAnalysisConfig('maxGapSec', value)} />
+            <TaskNumberField label="扫描步长" value={config.frameStep} min={1} step={1} integer onChange={(value) => updateAnalysisConfig('frameStep', value)} />
+            <TaskNumberField label="最短片段" value={config.minSegmentDuration} min={0} step={0.1} onChange={(value) => updateAnalysisConfig('minSegmentDuration', value)} />
+            <TaskNumberField label="最少匹配点" value={config.minSegmentMatches} min={1} step={1} integer onChange={(value) => updateAnalysisConfig('minSegmentMatches', value)} />
+            <TaskNumberField label="偏移容忍" value={config.offsetTolerance} min={0} step={0.1} onChange={(value) => updateAnalysisConfig('offsetTolerance', value)} />
+            <TaskNumberField label="匹配分辨率" value={config.inputSize} min={64} step={16} integer onChange={(value) => updateAnalysisConfig('inputSize', value)} />
             <label className="task-create-field">
               <span>缩放模式</span>
-              <SelectInput value={config.resizeMode || 'center_crop'} onChange={(event) => updateConfig('resizeMode', event.target.value)}>
+              <SelectInput value={config.resizeMode || 'center_crop'} onChange={(event) => updateAnalysisConfig('resizeMode', event.target.value)}>
                 <option value="center_crop">居中裁剪(center_crop)</option>
                 <option value="letterbox">等比留边(letterbox)</option>
               </SelectInput>
             </label>
             <label className="task-create-field">
               <span>竖屏旋转</span>
-              <SelectInput value={config.portraitRotation || 'left_90'} onChange={(event) => updateConfig('portraitRotation', event.target.value)}>
+              <SelectInput value={config.portraitRotation || 'left_90'} onChange={(event) => updateAnalysisConfig('portraitRotation', event.target.value)}>
                 <option value="left_90">左转 90 度</option>
                 <option value="right_90">右转 90 度</option>
               </SelectInput>
             </label>
             <label className="task-create-check">
-              <input type="checkbox" checked={Boolean(config.cropBlackBorders)} onChange={(event) => updateConfig('cropBlackBorders', event.target.checked)} />
+              <input type="checkbox" checked={Boolean(config.cropBlackBorders)} onChange={(event) => updateAnalysisConfig('cropBlackBorders', event.target.checked)} />
               <span>自动裁剪黑边</span>
             </label>
             <label className="task-create-check">
-              <input type="checkbox" checked={Boolean(config.force)} onChange={(event) => updateConfig('force', event.target.checked)} />
+              <input type="checkbox" checked={Boolean(config.force)} onChange={(event) => updateAnalysisConfig('force', event.target.checked)} />
               <span>强制重建缓存</span>
             </label>
             <label className="task-create-check">
-              <input type="checkbox" checked={config.earlyStop !== false} onChange={(event) => updateConfig('earlyStop', event.target.checked)} />
+              <input type="checkbox" checked={config.earlyStop !== false} onChange={(event) => updateAnalysisConfig('earlyStop', event.target.checked)} />
               <span>启用早停加速</span>
             </label>
-          </section>
-
-          <section className="task-create-section">
-            <h4>错误容忍设置</h4>
-            <label className="task-create-field">
-              <span>错误容忍</span>
-              <SelectInput value={config.errorTolerancePreset || 'balanced'} onChange={(event) => updateConfig('errorTolerancePreset', event.target.value)}>
-                <option value="strict">严格</option>
-                <option value="balanced">标准</option>
-                <option value="lenient">宽松</option>
-                <option value="failure_only">仅失败时</option>
-                <option value="custom">自定义</option>
-              </SelectInput>
-            </label>
-            <TaskNumberField label="严重码流错误上限" value={config.errorToleranceSevereLimit} min={0} step={1} integer onChange={(value) => updateConfig('errorToleranceSevereLimit', value)} />
-            <TaskNumberField label="缺失画面上限" value={config.errorToleranceMissingPictureLimit} min={0} step={1} integer onChange={(value) => updateConfig('errorToleranceMissingPictureLimit', value)} />
+            <h5 className="task-create-detail-heading">错误容忍配置详情</h5>
+            <TaskNumberField label="严重码流错误上限" value={config.errorToleranceSevereLimit} min={0} step={1} integer onChange={(value) => updateErrorToleranceConfig('errorToleranceSevereLimit', value)} />
+            <TaskNumberField label="缺失画面上限" value={config.errorToleranceMissingPictureLimit} min={0} step={1} integer onChange={(value) => updateErrorToleranceConfig('errorToleranceMissingPictureLimit', value)} />
             <label className="task-create-check">
               <input
                 type="checkbox"
                 checked={Boolean(config.errorTolerancePreflightValidation)}
-                onChange={(event) => updateConfig('errorTolerancePreflightValidation', event.target.checked)}
+                onChange={(event) => updateErrorToleranceConfig('errorTolerancePreflightValidation', event.target.checked)}
               />
               <span>分析前完整码流校验</span>
             </label>

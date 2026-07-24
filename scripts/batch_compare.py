@@ -948,6 +948,13 @@ def parse_task_config(raw_value: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def load_task_config(raw_value: str = "", config_path: str = "") -> dict:
+    if not config_path:
+        return parse_task_config(raw_value)
+    payload = Path(config_path).read_text(encoding="utf-8-sig")
+    return parse_task_config(payload)
+
+
 def load_video_list(video_list_path: str, input_dir: Path, error_video_dir: Path) -> list[Path]:
     if not video_list_path:
         return []
@@ -1434,7 +1441,13 @@ def main():
         "--task-config-json",
         type=str,
         default="",
-        help="Serialized desktop run configuration stored with task history",
+        help="Legacy inline desktop run configuration stored with task history",
+    )
+    parser.add_argument(
+        "--task-config-file",
+        type=str,
+        default="",
+        help="JSON file containing the desktop run configuration stored with task history",
     )
     parser.add_argument(
         "--video-list",
@@ -1471,6 +1484,11 @@ def main():
     input_dir = Path(args.input)
     cache_dir = Path(args.cache_dir)
     raise_if_cancelled(cancel_file)
+    try:
+        task_config = load_task_config(args.task_config_json, args.task_config_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"Error: Failed to read task configuration: {exc}")
+        sys.exit(1)
 
     if not input_dir.exists():
         log(f"Error: Input directory not found: {input_dir}")
@@ -1506,7 +1524,7 @@ def main():
         input_dir,
         scanned_videos,
         args.task_match_key,
-        parse_task_config(args.task_config_json),
+        task_config,
     )
     if args.target_stage:
         validate_stage_prerequisites(args.target_stage)
@@ -1998,7 +2016,7 @@ def main():
         total_pairs,
         len(resumed_candidate_pairs),
         args.task_match_key,
-        parse_task_config(args.task_config_json),
+        task_config,
         output_base,
     )
     emit_candidate_progress(

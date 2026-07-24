@@ -11309,6 +11309,23 @@ select {
   font-size: 15px;
 }
 
+.task-create-preset-description {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: rgba(169, 179, 214, 0.82);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.task-create-detail-heading {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+  padding-top: 12px;
+  color: rgba(213, 222, 255, 0.9);
+  border-top: 1px solid rgba(102, 211, 255, 0.14);
+  font-size: 13px;
+}
+
 .task-create-field {
   display: grid;
   gap: 6px;

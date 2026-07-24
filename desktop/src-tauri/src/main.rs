@@ -263,6 +263,30 @@ struct AnalysisFinishedPayload {
     report_html: String,
 }
 
+#[derive(Debug, Clone)]
+struct PythonLaunchDiagnostics {
+    python: String,
+    argument_count: usize,
+    estimated_command_line_chars: usize,
+    task_config_path: String,
+    video_list_path: Option<String>,
+    diagnostic_path: String,
+}
+
+impl PythonLaunchDiagnostics {
+    fn summary(&self) -> String {
+        format!(
+            "Python={}；参数数量={}；估算命令行长度={} 字符；任务配置={}；视频列表={}；诊断文件={}",
+            self.python,
+            self.argument_count,
+            self.estimated_command_line_chars,
+            self.task_config_path,
+            self.video_list_path.as_deref().unwrap_or("未单独指定"),
+            self.diagnostic_path,
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct AnalysisStageFinishedPayload {
@@ -2266,8 +2290,12 @@ fn run_batch_compare(
         })
         .map(str::to_string);
     let redo_stage = config.redo_stage.unwrap_or(false);
-    let task_config_json =
-        serde_json::to_string(&config).map_err(|e| format!("序列化任务配置失败: {e}"))?;
+    let task_config_path = runtime_dir.join(format!("task-config-{}.json", timestamp_millis()));
+    fs::write(
+        &task_config_path,
+        serde_json::to_vec_pretty(&config).map_err(|e| format!("序列化任务配置失败: {e}"))?,
+    )
+    .map_err(|e| format!("写入任务配置失败: {e}"))?;
 
     {
         let pid_guard = task_state
@@ -2344,8 +2372,8 @@ fn run_batch_compare(
         task_id.clone(),
         "--task-match-key".into(),
         config.task_match_key.unwrap_or_default(),
-        "--task-config-json".into(),
-        task_config_json,
+        "--task-config-file".into(),
+        path_to_string(&task_config_path),
     ];
     if let Some(stage_id) = execution_stage.as_deref() {
         args.extend(["--target-stage".into(), stage_id.to_string()]);
@@ -2378,6 +2406,29 @@ fn run_batch_compare(
     if !config.error_tolerance_preflight_validation.unwrap_or(true) {
         args.push("--skip-stream-validation".into());
     }
+
+    let diagnostic_path = runtime_dir.join(format!("python-launch-{}.txt", timestamp_millis()));
+    let launch_diagnostics = PythonLaunchDiagnostics {
+        python: python.clone(),
+        argument_count: args.len(),
+        estimated_command_line_chars: estimated_windows_command_line_len(&python, &args),
+        task_config_path: path_to_string(&task_config_path),
+        video_list_path: video_list_path.as_deref().map(path_to_string),
+        diagnostic_path: path_to_string(&diagnostic_path),
+    };
+    let diagnostic_summary = launch_diagnostics.summary();
+    if let Err(error) = fs::write(&diagnostic_path, format!("{diagnostic_summary}\n")) {
+        emit_log(
+            &app,
+            "stderr",
+            &format!("写入 Python 启动诊断失败: {error}"),
+        );
+    }
+    emit_log(
+        &app,
+        "stdout",
+        &format!("Python 启动诊断：{diagnostic_summary}"),
+    );
 
     let mut command = Command::new(&python);
     command
@@ -2443,6 +2494,7 @@ fn run_batch_compare(
             payload_for_task,
             task_id_for_event,
             stage_for_event,
+            launch_diagnostics,
         );
     });
 
@@ -2928,11 +2980,12 @@ fn run_batch_compare_process(
     payload: AnalysisFinishedPayload,
     task_id: String,
     execution_stage: Option<String>,
+    launch_diagnostics: PythonLaunchDiagnostics,
 ) {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let message = format!("Python 环境不可用，请在设置中检查 Python 路径: {error}");
+            let message = python_spawn_error_message(&error, &launch_diagnostics);
             emit_log(&app, "stderr", &message);
             emit_error(&app, &message);
             reset_task_state(&app);
@@ -5019,6 +5072,46 @@ fn run_capture(root: &Path, python: &str, args: Vec<String>) -> Result<ProcessOu
     })
 }
 
+fn estimated_windows_command_line_len(python: &str, args: &[String]) -> usize {
+    std::iter::once(python)
+        .chain(args.iter().map(String::as_str))
+        .map(estimated_windows_quoted_arg_len)
+        .sum::<usize>()
+        .saturating_add(args.len())
+        .saturating_add(1)
+}
+
+fn estimated_windows_quoted_arg_len(value: &str) -> usize {
+    let utf16_len = value.encode_utf16().count();
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character == '"')
+    {
+        return utf16_len;
+    }
+    let escape_overhead = value
+        .chars()
+        .filter(|character| *character == '\\' || *character == '"')
+        .count();
+    utf16_len.saturating_add(escape_overhead).saturating_add(2)
+}
+
+fn python_spawn_error_message(
+    error: &std::io::Error,
+    diagnostics: &PythonLaunchDiagnostics,
+) -> String {
+    let reason = if error.raw_os_error() == Some(206) {
+        "Windows 拒绝创建进程，因为整条命令行或其中某个路径过长；这不表示 Python 可执行文件路径本身过长。"
+    } else {
+        "Windows 未能创建 Python 分析进程，请核对可执行文件、权限及安全软件拦截情况。"
+    };
+    format!(
+        "无法启动 Python 分析进程。{reason} 系统错误：{error}。启动诊断：{}",
+        diagnostics.summary()
+    )
+}
+
 fn configure_python_command(command: &mut Command, root: &Path, python: &str) {
     let worker_threads = recommended_worker_threads();
     command
@@ -6193,13 +6286,56 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
 #[cfg(test)]
 mod tests {
     use super::{
-        is_decord_seek_warning_line, is_h264_decoder_log_line, parse_analysis_video_context,
-        parse_analysis_video_quarantined, update_report_entries_for_resolved_path,
-        AnalysisVideoContext, AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator,
+        estimated_windows_command_line_len, is_decord_seek_warning_line, is_h264_decoder_log_line,
+        parse_analysis_video_context, parse_analysis_video_quarantined, python_spawn_error_message,
+        update_report_entries_for_resolved_path, AnalysisVideoContext,
+        AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator, PythonLaunchDiagnostics,
         ReportPairIdentity,
     };
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn task_config_file_keeps_windows_command_line_below_system_limit() {
+        let huge_inline_config = format!(
+            r#"{{"videoPaths":[{}]}}"#,
+            (0..500)
+                .map(|index| format!(r#""C:\\videos\\{}\\video-{index}.mp4""#, "x".repeat(180)))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let inline_args = vec![
+            "scripts/batch_compare.py".to_string(),
+            "--task-config-json".to_string(),
+            huge_inline_config,
+        ];
+        let file_args = vec![
+            "scripts/batch_compare.py".to_string(),
+            "--task-config-file".to_string(),
+            r"C:\cache\.runtime\task-config.json".to_string(),
+        ];
+
+        assert!(estimated_windows_command_line_len(r"C:\python\python.exe", &inline_args) > 32_767);
+        assert!(estimated_windows_command_line_len(r"C:\python\python.exe", &file_args) < 1_000);
+    }
+
+    #[test]
+    fn os_error_206_explains_that_the_whole_command_can_be_too_long() {
+        let diagnostics = PythonLaunchDiagnostics {
+            python: r"C:\python\python.exe".to_string(),
+            argument_count: 3,
+            estimated_command_line_chars: 40_000,
+            task_config_path: r"C:\cache\.runtime\task-config.json".to_string(),
+            video_list_path: None,
+            diagnostic_path: r"C:\cache\.runtime\python-launch.txt".to_string(),
+        };
+        let error = std::io::Error::from_raw_os_error(206);
+        let message = python_spawn_error_message(&error, &diagnostics);
+
+        assert!(message.contains("整条命令行"));
+        assert!(message.contains(r"Python=C:\python\python.exe"));
+        assert!(message.contains("40000"));
+    }
 
     #[test]
     fn parses_unicode_video_context_marker() {
