@@ -1628,7 +1628,6 @@ fn probe_video_metadata_impl(
 ) -> Result<Vec<VideoMetadata>, String> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
-    use tauri::Manager;
 
     let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
     let python = resolve_python(&app, &root, request.python_path.as_deref());
@@ -1733,8 +1732,9 @@ for idx, path in enumerate(paths):
 "#;
 
     let mut batch_errors: Vec<String> = Vec::new();
-    let unprobed_total = unprobed_paths.len();
+    let _unprobed_total = unprobed_paths.len();
     let mut unprobed_processed = 0;
+    let mut last_emit_time = std::time::Instant::now();
 
     for (batch_idx, chunk) in unprobed_paths.chunks(batch_size).enumerate() {
         let batch_num = batch_idx + 1;
@@ -1784,15 +1784,19 @@ for idx, path in enumerate(paths):
                                         let path = parts[3];
                                         let file_name = PathBuf::from(path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
                                         
-                                        let _ = app.emit(
-                                            "metadata-progress",
-                                            MetadataProgressPayload {
-                                                current: current_global,
-                                                total: total_videos,
-                                                stage: format!("正在读取参数 (已完成 {}/{}，剩余 {})", current_global, total_videos, total_videos.saturating_sub(current_global)),
-                                                video_name: Some(file_name),
-                                            },
-                                        );
+                                        let is_last = current_global == total_videos;
+                                        if is_last || last_emit_time.elapsed().as_millis() > 100 {
+                                            last_emit_time = std::time::Instant::now();
+                                            let _ = app.emit(
+                                                "metadata-progress",
+                                                MetadataProgressPayload {
+                                                    current: current_global,
+                                                    total: total_videos,
+                                                    stage: format!("正在读取参数 (已完成 {}/{}，剩余 {})", current_global, total_videos, total_videos.saturating_sub(current_global)),
+                                                    video_name: Some(file_name),
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             } else if line.starts_with("METADATA_RESULT|") {
@@ -2177,10 +2181,57 @@ fn list_analysis_tasks(
         if record.stages.is_empty() {
             record.stages = default_analysis_task_stages();
         }
+        
+        // Strip out large lists to reduce IPC payload
+        record.videos.clear();
+        if let Some(arr) = record.config.get_mut("videoPaths").and_then(|v| v.as_array_mut()) {
+            arr.clear();
+        }
+        if let Some(arr) = record.config.get_mut("video_paths").and_then(|v| v.as_array_mut()) {
+            arr.clear();
+        }
+        
         tasks.push(record);
     }
     tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     Ok(tasks)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetAnalysisTaskRequest {
+    project_root: Option<String>,
+    cache_dir: String,
+    task_id: String,
+}
+
+#[tauri::command]
+fn get_analysis_task(
+    app: tauri::AppHandle,
+    request: GetAnalysisTaskRequest,
+) -> Result<AnalysisTaskRecord, String> {
+    let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
+    let cache_dir = resolve_user_path(&root, &request.cache_dir);
+    let directory = analysis_tasks_dir(&cache_dir).join(&request.task_id);
+    let manifest_path = directory.join("task.json");
+    if !manifest_path.exists() {
+        return Err("任务不存在".to_string());
+    }
+    
+    let content = fs::read_to_string(&manifest_path).map_err(|e| format!("读取任务失败: {e}"))?;
+    let mut record = serde_json::from_str::<AnalysisTaskRecord>(&content).map_err(|e| format!("解析任务失败: {e}"))?;
+    
+    if record.id.is_empty() {
+        record.id = request.task_id;
+    }
+    if record.name.trim().is_empty() {
+        record.name = record.id.clone();
+    }
+    if record.stages.is_empty() {
+        record.stages = default_analysis_task_stages();
+    }
+    
+    Ok(record)
 }
 
 #[tauri::command]
@@ -5129,6 +5180,7 @@ fn main() {
             save_config_template,
             delete_config_template,
             list_analysis_tasks,
+            get_analysis_task,
             create_analysis_task,
             update_analysis_task,
             delete_analysis_task,
