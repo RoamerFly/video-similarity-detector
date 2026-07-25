@@ -40,6 +40,7 @@ export interface VideoScanFilters {
   extensions: string
   sortBy: VideoScanSortBy
   sortDirection: VideoScanSortDirection
+  metadataBatchSize: number
 }
 
 export interface SettingsSnapshot {
@@ -373,6 +374,7 @@ export const defaultSettings: SettingsSnapshot = {
     extensions: '',
     sortBy: 'name',
     sortDirection: 'asc',
+    metadataBatchSize: 50,
   },
 }
 

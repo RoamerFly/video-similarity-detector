@@ -577,6 +577,15 @@ export async function listAnalysisTasks(cacheDir: string, projectRoot?: string) 
   })
 }
 
+export async function getAnalysisTask(taskId: string, cacheDir: string, projectRoot?: string) {
+  if (!hasTauriRuntime()) {
+    throw new Error('未连接到后端服务')
+  }
+  return invoke<AnalysisTaskRecord>('get_analysis_task', {
+    request: { taskId, cacheDir, projectRoot },
+  })
+}
+
 export async function createAnalysisTask(
   config: RunBatchCompareConfig,
   taskMatchKey: string,

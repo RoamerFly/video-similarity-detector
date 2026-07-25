@@ -1658,6 +1658,20 @@ function VideoScanRangeSettings() {
             />
           </label>
         </section>
+
+        <section className="video-scan-parameter-card">
+          <h4>性能设置</h4>
+          <label className="param-input-row">
+            <ParameterHint label="分批探测大小" tip="分批读取视频元数据以节省内存。遇到含有数千视频的文件夹时可避免一次性加载过慢或崩溃。" />
+            <VideoScanNumberSetting
+              label="每批个数"
+              value={filters.metadataBatchSize ?? 50}
+              min={1}
+              integer
+              onChange={(value) => settings.setVideoScanFilterValue('metadataBatchSize', Number(value) || 50)}
+            />
+          </label>
+        </section>
       </div>
     </div>
     </Translated>

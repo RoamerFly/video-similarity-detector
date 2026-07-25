@@ -614,6 +614,7 @@ function sanitizeVideoScanFilters(value: unknown): VideoScanFilters {
     extensions: typeof raw.extensions === 'string' ? raw.extensions : '',
     sortBy: sanitizeVideoScanSortBy(raw.sortBy),
     sortDirection: raw.sortDirection === 'desc' ? 'desc' : defaultSettings.videoScanFilters.sortDirection,
+    metadataBatchSize: clampMin(Number(raw.metadataBatchSize) || 50, 1),
   }
 }
 
