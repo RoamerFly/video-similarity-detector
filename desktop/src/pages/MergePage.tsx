@@ -2076,7 +2076,7 @@ export function MergePage() {
                 <label>
                   <ParameterHint
                     label="编码预设"
-                    tip="借鉴 HandBrake 的预设工作流：一次选择分辨率、帧率、编码器、质量和音频参数；随后仍可单独修改。"
+                    tip="预设工作流：一次选择分辨率、帧率、编码器、质量和音频参数；随后仍可单独修改。"
                   />
                   <SelectInput
                     value={encodingPresetValue}
@@ -2095,7 +2095,7 @@ export function MergePage() {
                 </label>
                 <small>
                   {selectedEncodingPreset?.detail ?? '当前参数已自定义'}
-                  {' · '}实际使用 FFmpeg 渲染，不依赖 HandBrake 安装。
+                  {' · '}实际使用 FFmpeg 渲染。
                 </small>
               </div>
               <div className="editor-encoding-grid">

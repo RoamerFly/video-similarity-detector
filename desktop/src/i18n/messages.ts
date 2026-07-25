@@ -819,7 +819,7 @@ const extraEnglishText: Record<string, string> = {
   '快速 720p30': 'Fast 720p30',
   '自定义设置': 'Custom Settings',
   '当前参数已自定义': 'Current settings are customized',
-  '实际使用 FFmpeg 渲染，不依赖 HandBrake 安装。': 'Rendered with FFmpeg; HandBrake does not need to be installed.',
+  '实际使用 FFmpeg 渲染。': 'Rendered with FFmpeg.',
   '视频编码器': 'Video Encoder',
   '码率控制': 'Rate Control',
   '恒定质量（推荐）': 'Constant Quality (Recommended)',
