@@ -443,6 +443,14 @@ struct VideoMetadata {
     error: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataProgressPayload {
+    current: usize,
+    total: usize,
+    stage: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReportPathRequest {
@@ -1605,15 +1613,14 @@ fn probe_video_metadata_impl(
         return Ok(Vec::new());
     }
 
-    // Write video paths to a temp JSON file to avoid Windows command-line length
-    // limit (32767 chars). Passing hundreds of video paths as CLI arguments
-    // triggers OS error 206 ("文件名或扩展名太长") on Windows.
+    // Batch processing: split video paths into chunks of BATCH_SIZE to avoid
+    // overwhelming a single Python process memory. Each batch writes its own
+    // temp JSON file (also avoids Windows command-line 32767-char limit).
+    // Single-batch failure is non-fatal – we collect what we can and move on.
+    const BATCH_SIZE: usize = 50;
+    let total_batches = (resolved_paths.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+    let mut all_results: Vec<VideoMetadata> = Vec::with_capacity(resolved_paths.len());
     let temp_dir = std::env::temp_dir();
-    let list_file = temp_dir.join(format!("video-sim-metadata-{}.json", timestamp_millis_u64()));
-    let list_json = serde_json::to_string(&resolved_paths)
-        .map_err(|e| format!("序列化视频路径失败: {e}"))?;
-    fs::write(&list_file, list_json)
-        .map_err(|e| format!("写入视频路径临时文件失败: {e}"))?;
 
     let script = r#"
 import json
@@ -1655,20 +1662,100 @@ for path in paths:
     rows.append(row)
 print(json.dumps(rows, ensure_ascii=False))
 "#;
-    let args = vec!["-c".to_string(), script.to_string(), path_to_string(&list_file)];
-    let result = run_capture(&root, &python, args);
 
-    // Clean up temp file regardless of success or failure
-    let _ = fs::remove_file(&list_file);
+    let mut batch_errors: Vec<String> = Vec::new();
 
-    let output = result?;
-    if !output.status_success {
+    for (batch_idx, chunk) in resolved_paths.chunks(BATCH_SIZE).enumerate() {
+        let batch_num = batch_idx + 1;
+        let _ = app.emit(
+            "metadata-progress",
+            MetadataProgressPayload {
+                current: batch_num,
+                total: total_batches,
+                stage: format!("正在读取第 {}/{} 批视频信息", batch_num, total_batches),
+            },
+        );
+
+        // Each batch gets its own temp file to keep the payload small and
+        // avoid Windows command-line length issues.
+        let list_file = temp_dir.join(format!(
+            "video-sim-metadata-{}-{}.json",
+            timestamp_millis_u64(),
+            batch_idx
+        ));
+        let list_json = match serde_json::to_string(chunk) {
+            Ok(json) => json,
+            Err(e) => {
+                batch_errors.push(format!("第 {batch_num} 批序列化失败: {e}"));
+                let _ = fs::remove_file(&list_file);
+                continue;
+            }
+        };
+        if let Err(e) = fs::write(&list_file, &list_json) {
+            batch_errors.push(format!("第 {batch_num} 批写入临时文件失败: {e}"));
+            let _ = fs::remove_file(&list_file);
+            continue;
+        }
+
+        let args = vec!["-c".to_string(), script.to_string(), path_to_string(&list_file)];
+        let result = run_capture(&root, &python, args);
+
+        // Clean up temp file regardless of success or failure
+        let _ = fs::remove_file(&list_file);
+
+        match result {
+            Ok(output) if output.status_success => {
+                match serde_json::from_str::<Vec<VideoMetadata>>(output.stdout.trim()) {
+                    Ok(batch_results) => all_results.extend(batch_results),
+                    Err(e) => {
+                        batch_errors.push(format!("第 {batch_num} 批解析失败: {e}"));
+                    }
+                }
+            }
+            Ok(output) => {
+                batch_errors.push(format!(
+                    "第 {batch_num} 批读取失败: {}",
+                    first_non_empty(&output.stderr, &output.stdout)
+                ));
+            }
+            Err(e) => {
+                batch_errors.push(format!("第 {batch_num} 批启动失败: {e}"));
+            }
+        }
+    }
+
+    let _ = app.emit(
+        "metadata-progress",
+        MetadataProgressPayload {
+            current: total_batches,
+            total: total_batches,
+            stage: if batch_errors.is_empty() {
+                "视频信息读取完成".to_string()
+            } else {
+                format!("视频信息读取完成（{} 批失败）", batch_errors.len())
+            },
+        },
+    );
+
+    // If ALL batches failed, return error; otherwise return what we have.
+    if all_results.is_empty() && !batch_errors.is_empty() {
         return Err(format!(
-            "读取视频信息失败: {}",
-            first_non_empty(&output.stderr, &output.stdout)
+            "所有批次均读取失败（共 {total_batches} 批）: {}",
+            batch_errors.join("; ")
         ));
     }
-    serde_json::from_str(output.stdout.trim()).map_err(|e| format!("解析视频信息失败: {e}"))
+
+    if !batch_errors.is_empty() {
+        eprintln!(
+            "视频元数据探测: {}/{} 批次失败，成功获取 {} 条结果。错误: {}",
+            batch_errors.len(),
+            total_batches,
+            all_results.len(),
+            batch_errors.join(" | ")
+        );
+    }
+
+    Ok(all_results)
 }
 
 fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
