@@ -894,7 +894,15 @@ def write_json_atomic(path: Path, payload: dict) -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(pending, path)
+    import time
+    for attempt in range(5):
+        try:
+            os.replace(pending, path)
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
 
 
 def task_cache_dir_from_manifest_path(manifest_path: Path | None) -> Path | None:
