@@ -1545,6 +1545,24 @@ function VideoScanRangeSettings() {
               onChange={(event) => settings.setVideoScanFilterValue('nameIncludes', event.target.value)}
             />
           </label>
+          <label className="param-input-row">
+            <ParameterHint label="正则表达式" tip="使用正则表达式精确匹配文件名，如：.*movie.*" />
+            <TextInput
+              value={filters.nameRegex}
+              disabled={!enabled.has('name')}
+              placeholder="^video_[0-9]+\.mp4$"
+              onChange={(event) => settings.setVideoScanFilterValue('nameRegex', event.target.value)}
+            />
+          </label>
+          <label className="param-input-row">
+            <ParameterHint label="排除名称" tip="多个排除词可用逗号、空格或换行分隔。名称中包含这些词的视频将被忽略。" />
+            <TextInput
+              value={filters.nameExclude}
+              disabled={!enabled.has('name')}
+              placeholder="temp, backup"
+              onChange={(event) => settings.setVideoScanFilterValue('nameExclude', event.target.value)}
+            />
+          </label>
         </section>
 
         <section className={enabled.has('duration') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>

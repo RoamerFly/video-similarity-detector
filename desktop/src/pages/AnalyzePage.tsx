@@ -43,6 +43,7 @@ import {
   createAnalysisTask,
   deleteAnalysisTask,
   deleteFiles,
+  fileName,
   formatBytes,
   formatDateTime,
   getAppInfo,
@@ -174,6 +175,7 @@ export function AnalyzePage() {
   const [videoFileAction, setVideoFileAction] = useState('')
   const [isMovingFiles, setIsMovingFiles] = useState(false)
   const [movingVideoTargets, setMovingVideoTargets] = useState<VideoFile[]>([])
+  const [videoSearchTerm, setVideoSearchTerm] = useState('')
 
   const [pendingTaskDraft, setPendingTaskDraft] = useState<PendingTaskDraft | null>(null)
   const [taskCreateDialogOpen, setTaskCreateDialogOpen] = useState(false)
@@ -227,6 +229,12 @@ export function AnalyzePage() {
       ? '新建中'
       : '新建任务'
   const stageTask = historyTasks.find((task) => task.id === stageTaskId) ?? null
+
+  const filteredVideos = useMemo(() => {
+    if (!videoSearchTerm.trim()) return videos
+    const lowerTerm = videoSearchTerm.trim().toLowerCase()
+    return videos.filter((video) => fileName(video.path).toLowerCase().includes(lowerTerm))
+  }, [videos, videoSearchTerm])
 
   useEffect(() => {
     if (!errorMessage) return undefined
@@ -950,7 +958,7 @@ export function AnalyzePage() {
   }
 
   function selectAllVideos() {
-    setSelectedVideoPaths(new Set(videos.map((video) => normalizeVideoPath(video.path))))
+    setSelectedVideoPaths(new Set(filteredVideos.map((video) => normalizeVideoPath(video.path))))
   }
 
   function clearVideoSelection() {
@@ -1358,10 +1366,22 @@ export function AnalyzePage() {
           {videos.length > 0 ? (
             <div className={isScanning ? 'video-list-panel is-scanning' : 'video-list-panel'}>
               <div className="video-list-toolbar">
-                <span>{videoFileAction || (isScanning ? scanMessage : selectedVideoPaths.size > 0 ? `已选 ${selectedVideoPaths.size}` : scanMessage)}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
+                  <TextInput
+                    value={videoSearchTerm}
+                    onChange={(e) => setVideoSearchTerm(e.target.value)}
+                    placeholder="再搜索..."
+                    style={{ width: '200px' }}
+                  />
+                  <span>{videoFileAction || (isScanning ? scanMessage : selectedVideoPaths.size > 0 ? `已选 ${selectedVideoPaths.size}` : scanMessage)}</span>
+                </div>
                 <div>
                   {videoMultiSelect ? (
                     <>
+                      <button type="button" onClick={() => addVideosToMergeList(selectedVideosForAction())} disabled={videoFileBusy || selectedVideoPaths.size === 0}>
+                        <ListPlus size={15} />
+                        加入合并
+                      </button>
                       <button type="button" onClick={selectAllVideos} disabled={videoFileBusy}>
                         全选
                       </button>
@@ -1401,7 +1421,7 @@ export function AnalyzePage() {
                 </div>
               </div>
               <div className="video-scroll-list" role="list" aria-label="已扫描视频">
-                {videos.map((video) => {
+                {filteredVideos.map((video) => {
                   const selected = selectedVideoPaths.has(normalizeVideoPath(video.path))
                   return (
                     <button
@@ -2545,7 +2565,17 @@ async function filterScannedVideos(
   const maxBytes = positiveNumber(filters.maxSizeGb) * sizeMultiplier
   const prefixes = splitFilterTokens(filters.namePrefixes).map((item) => item.toLocaleLowerCase())
   const includes = splitFilterTokens(filters.nameIncludes).map((item) => item.toLocaleLowerCase())
+  const excludes = splitFilterTokens(filters.nameExclude || '').map((item) => item.toLocaleLowerCase())
   const extensions = splitFilterTokens(filters.extensions).map((item) => item.replace(/^\./, '').toLocaleLowerCase())
+  
+  let nameRegexPattern: RegExp | null = null
+  if (filters.nameRegex) {
+    try {
+      nameRegexPattern = new RegExp(filters.nameRegex)
+    } catch {
+      // Ignore invalid regex
+    }
+  }
 
   let next = enabled.size === 0 ? videos : videos.filter((video) => {
     if (enabled.has('size')) {
@@ -2556,6 +2586,8 @@ async function filterScannedVideos(
       const name = video.name.toLocaleLowerCase()
       if (prefixes.length > 0 && !prefixes.some((prefix) => name.startsWith(prefix))) return false
       if (includes.length > 0 && !includes.some((part) => name.includes(part))) return false
+      if (excludes.length > 0 && excludes.some((part) => name.includes(part))) return false
+      if (nameRegexPattern && !nameRegexPattern.test(video.name)) return false
     }
     if (enabled.has('extension') && extensions.length > 0) {
       const extension = video.extension.replace(/^\./, '').toLocaleLowerCase()

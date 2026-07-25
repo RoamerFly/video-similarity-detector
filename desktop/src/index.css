@@ -1059,8 +1059,8 @@ select {
 
 .results-filter-row {
   display: grid;
-  grid-template-columns: minmax(240px, 312px) 204px minmax(270px, auto) minmax(250px, 1fr);
-  gap: 18px;
+  grid-template-columns: minmax(130px, 0.8fr) minmax(140px, 1fr) minmax(90px, auto) minmax(100px, auto) minmax(110px, auto) minmax(160px, auto);
+  gap: 12px;
   align-items: center;
   margin: 14px 6px;
 }
@@ -4599,7 +4599,7 @@ select {
 
 .frame-meta-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin: 0;
 }
@@ -7321,6 +7321,7 @@ select {
 .editor-encoding-grid label > span {
   color: rgba(195, 211, 238, 0.72);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .editor-encoding-preset .design-select,
@@ -7328,8 +7329,13 @@ select {
 .editor-encoding-grid .design-select {
   min-width: 0;
   height: 30px;
-  padding-inline: 8px;
+  padding-left: 8px;
   font-size: 11px;
+}
+
+.editor-encoding-preset .design-select,
+.editor-encoding-grid .design-select {
+  padding-right: 22px;
 }
 
 .editor-encoding-preset small,
@@ -9475,33 +9481,16 @@ select {
 }
 
 .pair-results-table .video-name-text {
-  max-width: 210px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.compare-preview-panel.resizable {
-  position: relative;
-  min-height: 320px;
-  max-height: calc(100vh - 220px);
-}
-
-.compare-preview-panel.resizable .frame-image-box {
+.compare-preview-panel .frame-image-box {
   height: auto;
-  min-height: 180px;
-  flex: 1;
-}
-
-.compare-preview-resize-handle {
-  position: absolute;
-  right: 5px;
-  bottom: 5px;
-  width: 22px;
-  height: 22px;
-  cursor: ns-resize;
-  border: 0;
-  border-right: 3px solid rgba(110, 205, 255, 0.82);
-  border-bottom: 3px solid rgba(110, 205, 255, 0.82);
-  border-radius: 0 0 5px;
-  background: transparent;
+  aspect-ratio: 16 / 9;
+  max-height: 65vh;
 }
 
 @media (max-width: 980px) {
@@ -10842,12 +10831,7 @@ select {
 }
 
 .results-filter-row {
-  grid-template-columns:
-    minmax(180px, 0.82fr)
-    minmax(238px, 0.92fr)
-    minmax(126px, 0.42fr)
-    minmax(150px, 0.48fr)
-    minmax(226px, auto);
+  grid-template-columns: minmax(130px, 0.8fr) minmax(140px, 1fr) minmax(90px, auto) minmax(100px, auto) minmax(110px, auto) minmax(160px, auto);
 }
 
 .results-filter-row .report-picker-select {
@@ -10934,17 +10918,10 @@ select {
   }
 
   .results-filter-row {
-    grid-template-columns:
-      minmax(180px, 1fr)
-      minmax(210px, 1fr)
-      minmax(126px, 0.5fr)
-      minmax(150px, 0.5fr);
+    grid-template-columns: minmax(130px, 0.8fr) minmax(140px, 1fr) minmax(90px, auto) minmax(100px, auto) minmax(110px, auto) minmax(160px, auto);
+    gap: 8px;
   }
 
-  .results-action-group {
-    grid-column: 1 / -1;
-    justify-content: flex-end;
-  }
 }
 
 /* Final frozen-bar overrides. Keep these at the end so responsive legacy rules cannot undo them. */

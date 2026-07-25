@@ -971,6 +971,7 @@ struct MergeVideoItem {
     trim_end: Option<f64>,
     #[serde(default)]
     muted: bool,
+    volume: Option<f64>,
     #[serde(default)]
     rotation: u16,
     #[serde(default)]
@@ -2822,6 +2823,7 @@ fn run_video_merge(
             trim_start: item.trim_start,
             trim_end: item.trim_end,
             muted: item.muted,
+            volume: item.volume,
             rotation: item.rotation,
             crop_enabled: item.crop_enabled,
             crop_x: item.crop_x,

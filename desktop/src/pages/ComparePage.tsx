@@ -29,7 +29,6 @@ export function ComparePage() {
   const [direction, setDirection] = useState<DirectionFilter>('all')
   const [frameViewMode, setFrameViewMode] = useState<FrameViewMode>('original')
   const [previewRefreshKey, setPreviewRefreshKey] = useState(0)
-  const [previewHeight, setPreviewHeight] = useState(460)
   const [playbackFocus, setPlaybackFocus] = useState<PlaybackFocus>('sync')
   const [syncPlaying, setSyncPlaying] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -103,20 +102,7 @@ export function ComparePage() {
     seekVideoTo(targetVideoRef.current, fixedMatch.bTimestamp)
   }, [fixedMatch])
 
-  function handlePreviewResizePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
-    event.preventDefault()
-    const startY = event.clientY
-    const startHeight = previewHeight
-    const onMove = (moveEvent: PointerEvent) => {
-      setPreviewHeight(Math.max(320, Math.min(window.innerHeight - 230, startHeight + moveEvent.clientY - startY)))
-    }
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-  }
+
 
   const toggleSyncPlayback = useCallback(async () => {
     const source = sourceVideoRef.current
@@ -524,10 +510,7 @@ export function ComparePage() {
         </div>
       )}
 
-      <GlassPanel
-        className="compare-preview-panel resizable"
-        style={{ height: `${previewHeight}px` }}
-      >
+      <GlassPanel className="compare-preview-panel">
         {selectedMatch ? (
           <>
             <VideoPreview
@@ -537,6 +520,7 @@ export function ComparePage() {
               path={sourceVideoPath}
               frameIndex={fixedMatch?.aFrameIndex ?? null}
               timestamp={fixedMatch?.aTimestamp ?? null}
+              fps={selectedPair.durationA > 0 ? selectedPair.totalFramesA / selectedPair.durationA : null}
               viewMode={frameViewMode}
               side="source"
               comparisonOptions={comparisonFrameOptions}
@@ -605,6 +589,7 @@ export function ComparePage() {
               path={targetVideoPath}
               frameIndex={fixedMatch?.bFrameIndex ?? null}
               timestamp={fixedMatch?.bTimestamp ?? null}
+              fps={selectedPair.durationB > 0 ? selectedPair.totalFramesB / selectedPair.durationB : null}
               viewMode={frameViewMode}
               side="target"
               comparisonOptions={comparisonFrameOptions}
@@ -626,13 +611,6 @@ export function ComparePage() {
             <p>请重新运行分析，生成包含 matches_a_to_b / matches_b_to_a 时间戳的新报告。</p>
           </div>
         )}
-        <button
-          type="button"
-          className="compare-preview-resize-handle"
-          title="拖动调整视频窗口高度"
-          aria-label="拖动调整视频窗口高度"
-          onPointerDown={handlePreviewResizePointerDown}
-        />
       </GlassPanel>
 
       <div className="compare-detail-grid">
@@ -822,6 +800,7 @@ function VideoPreview({
   path,
   frameIndex,
   timestamp,
+  fps,
   viewMode,
   side,
   comparisonOptions,
@@ -837,6 +816,7 @@ function VideoPreview({
   path: string
   frameIndex: number | null
   timestamp: number | null
+  fps?: number | null
   viewMode: FrameViewMode
   side: Exclude<PlaybackFocus, 'sync'>
   comparisonOptions: ComparisonFrameOptions
@@ -1052,9 +1032,17 @@ function VideoPreview({
           <dt>时间(Time)</dt>
           <dd title={formatHHMMSS(timestamp)}>{formatHHMMSS(timestamp)}</dd>
         </div>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <dt>路径(Path)</dt>
-          <dd title={normalizedPath}>{normalizedPath ? fileName(normalizedPath) : '-'}</dd>
+          <dd title={normalizedPath} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{normalizedPath ? fileName(normalizedPath) : '-'}</dd>
+        </div>
+        <div>
+          <dt>分辨率(Resolution)</dt>
+          <dd>{videoRef.current?.videoWidth ? `${videoRef.current.videoWidth}x${videoRef.current.videoHeight}` : '-'}</dd>
+        </div>
+        <div>
+          <dt>帧率(FPS)</dt>
+          <dd>{fps ? Math.round(fps) : (frameIndex && timestamp ? Math.round(frameIndex / timestamp) : '-')}</dd>
         </div>
         <div>
           <dt>视角(View)</dt>

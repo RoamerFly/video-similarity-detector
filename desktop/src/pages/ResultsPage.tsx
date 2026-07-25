@@ -12,6 +12,7 @@ import {
   Film,
   Flame,
   FolderOpen,
+  Edit2,
   GitBranch,
   Grid2X2,
   Images,
@@ -44,6 +45,7 @@ import {
   openFile,
   pathStatus,
   revealInFolder,
+  renameFile,
   updateReportEntries,
   type ReportSummary,
 } from '@/services/backend'
@@ -134,6 +136,7 @@ export function ResultsPage() {
   const [defaultReportDir, setDefaultReportDir] = useState('')
   const [videoContextMenu, setVideoContextMenu] = useState<VideoContextMenuState | null>(null)
   const [deleteAllDialogOpen, setDeleteAllDialogOpen] = useState(false)
+  const [reportListDialogOpen, setReportListDialogOpen] = useState(false)
   const [deletingResults, setDeletingResults] = useState(false)
   const initializedRef = useRef(false)
   const addMergeVideo = useMergeStore((state) => state.addVideo)
@@ -592,9 +595,13 @@ export function ResultsPage() {
     try {
       const result = await deleteFiles(uniquePaths)
       const deleted = new Set(result.deletedPaths.map(normalizeComparablePath))
-      const affectedPairIds = entries
-        .filter((entry) => deleted.has(normalizeComparablePath(entry.path)))
-        .map((entry) => entry.pairId)
+      const affectedPairIds = (report?.pairs ?? [])
+        .filter((pair) => {
+          const pathA = normalizeComparablePath(resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir))
+          const pathB = normalizeComparablePath(resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir))
+          return deleted.has(pathA) || deleted.has(pathB)
+        })
+        .map((pair) => pair.id)
       if (affectedPairIds.length > 0) {
         await removePairsFromReport(
           affectedPairIds,
@@ -723,6 +730,17 @@ export function ResultsPage() {
             ))}
           </SelectInput>
 
+          <NeonButton
+            variant="outline"
+            type="button"
+            className="report-list-button"
+            disabled={reportListLoading}
+            onClick={() => setReportListDialogOpen(true)}
+          >
+            <FolderOpen size={16} />
+            报告列表
+          </NeonButton>
+
           <SelectInput value={relationFilter} onChange={(event) => setRelationFilter(event.target.value as RelationFilter)}>
             <option value="all">全部关系</option>
             <option value="near">近似重复</option>
@@ -839,8 +857,8 @@ export function ResultsPage() {
                   <SortableHeader className="completed-column" label="完成时间" sortKey="completedAt" sortState={sortState} onSort={handleSort} />
                   <SortableHeader className="video-column" label="视频 A(Video A)" sortKey="videoA" sortState={sortState} onSort={handleSort} />
                   <SortableHeader className="video-column" label="视频 B(Video B)" sortKey="videoB" sortState={sortState} onSort={handleSort} />
-                  <SortableHeader className="containment-column" label="A 在 B 中(A in B)" sortKey="aInB" sortState={sortState} onSort={handleSort} />
-                  <SortableHeader className="containment-column" label="B 在 A 中(B in A)" sortKey="bInA" sortState={sortState} onSort={handleSort} />
+                  <SortableHeader className="containment-column" label="A在B中" sortKey="aInB" sortState={sortState} onSort={handleSort} />
+                  <SortableHeader className="containment-column" label="B在A中" sortKey="bInA" sortState={sortState} onSort={handleSort} />
                   <SortableHeader className="similarity-column" label="整体相似度(Symmetric)" sortKey="symmetricSimilarity" sortState={sortState} onSort={handleSort} />
                   <SortableHeader className="relation-column" label="关系判断(Relation)" sortKey="relation" sortState={sortState} onSort={handleSort} />
                   <SortableHeader className="segments-column" label="匹配片段数(Segments)" sortKey="matchedSegmentCount" sortState={sortState} onSort={handleSort} />
@@ -1085,7 +1103,43 @@ export function ResultsPage() {
             setVideoContextMenu(null)
             void revealInFolder(path).catch((error) => setError(normalizeBackendError(error)))
           }}>
-            <FolderOpen />在文件夹中显示
+            <FolderOpen />打开文件位置
+          </button>
+          <button type="button" role="menuitem" onClick={() => {
+            const isA = videoContextMenu.side === 'A'
+            const path = resolveResultVideoPath(
+              isA ? videoContextMenu.pair.videoAPath : videoContextMenu.pair.videoBPath,
+              isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB,
+              videoDir,
+            )
+            const currentName = isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB
+            setVideoContextMenu(null)
+            const newName = window.prompt('请输入新的文件名（包含扩展名）：', currentName)
+            if (newName && newName !== currentName) {
+              renameFile(path, newName).then((res) => {
+                setNotice(res.message)
+                void handleRefreshReports()
+              }).catch((error) => setError(normalizeBackendError(error)))
+            }
+          }}>
+            <Edit2 />重命名
+          </button>
+          <button className="danger" type="button" role="menuitem" onClick={() => {
+            const isA = videoContextMenu.side === 'A'
+            const currentName = isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB
+            const relatedIds = report?.pairs
+              .filter(p => p.videoA === currentName || p.videoB === currentName)
+              .map(p => p.id) ?? []
+            setVideoContextMenu(null)
+            if (relatedIds.length > 0) {
+              if (window.confirm(`确定要从报告中删除与该视频相关的 ${relatedIds.length} 条记录吗？`)) {
+                void removePairsFromReport(relatedIds, `已删除 ${relatedIds.length} 条与视频 ${currentName} 相关的记录。`)
+              }
+            } else {
+              setNotice('报告中没有与该视频相关的记录。')
+            }
+          }}>
+            <Trash2 />删除与该视频相关记录
           </button>
           <button className="danger" type="button" role="menuitem" onClick={() => void deleteContextVideoFile()}>
             <Trash2 />删除视频文件
@@ -1102,6 +1156,35 @@ export function ResultsPage() {
         onClose={() => setDeleteAllDialogOpen(false)}
         onKeepReport={() => void handleDeleteAllResults(false)}
         onDeleteReport={() => void handleDeleteAllResults(true)}
+      />
+      <ReportListDialog
+        open={reportListDialogOpen}
+        reports={reportOptions}
+        busy={deletingResults}
+        onClose={() => setReportListDialogOpen(false)}
+        onDeleteSelected={async (paths) => {
+          setDeletingResults(true)
+          try {
+            for (const p of paths) {
+              await deleteReport(p)
+            }
+            setNotice(`已成功删除 ${paths.length} 个报告。`)
+            setReportListDialogOpen(false)
+            if (activeReport && paths.includes(activeReport.jsonPath || activeReport.csvPath || activeReport.htmlPath || activeReport.path || '')) {
+              setReport(null)
+              setResultSummary(null)
+              setActiveReport(null)
+              setSelectedIds(new Set())
+              setSelectedVideoKeys(new Set())
+              setSelectedPair(null)
+            }
+            void handleRefreshReports()
+          } catch (err) {
+            setError(normalizeBackendError(err))
+          } finally {
+            setDeletingResults(false)
+          }
+        }}
       />
     </div>
     </Translated>
@@ -1408,4 +1491,128 @@ function resolveResultVideoPath(path: string, name: string, videoDir: string) {
   const base = videoDir.replace(/[\\/]+$/, '')
   const separator = base.includes('\\') ? '\\' : '/'
   return base ? `${base}${separator}${fileName(path || name)}` : path || name
+}
+
+function ReportListDialog({
+  open,
+  reports,
+  onClose,
+  onDeleteSelected,
+  busy
+}: {
+  open: boolean
+  reports: ReportSummary[]
+  onClose: () => void
+  onDeleteSelected: (paths: string[]) => Promise<void>
+  busy: boolean
+}) {
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
+
+  useEffect(() => {
+    if (open) setSelectedPaths(new Set())
+  }, [open])
+
+  if (!open) return null
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedPaths(new Set(reports.map(r => r.jsonPath || r.csvPath || r.htmlPath || r.path || '').filter(Boolean)))
+    } else {
+      setSelectedPaths(new Set())
+    }
+  }
+
+  const toggleSelect = (path: string, checked: boolean) => {
+    const next = new Set(selectedPaths)
+    if (checked) next.add(path)
+    else next.delete(path)
+    setSelectedPaths(next)
+  }
+
+  return createPortal(
+    <Translated>
+      <div className="task-detail-backdrop" role="presentation">
+        <section className="results-delete-dialog report-list-dialog" role="dialog" aria-modal="true" style={{ width: 'min(760px, 92vw)', maxHeight: '85vh', display: 'flex', flexDirection: 'column', padding: '20px' }}>
+          <div className="task-detail-head">
+            <div>
+              <h3>报告列表</h3>
+              <p>共 {reports.length} 个报告记录可以管理</p>
+            </div>
+            <button type="button" onClick={onClose} disabled={busy} aria-label="关闭">
+              <X size={18} />
+            </button>
+          </div>
+          
+          <div style={{ overflow: 'auto', flex: 1, minHeight: 0, marginTop: '16px', marginBottom: '16px', border: '1px solid rgba(116, 145, 255, 0.18)', borderRadius: '8px', background: 'rgba(8, 20, 46, 0.35)' }}>
+            <table className="results-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead style={{ position: 'sticky', top: 0, background: 'rgba(12, 28, 62, 0.95)', zIndex: 1, borderBottom: '1px solid rgba(116, 145, 255, 0.2)' }}>
+                <tr>
+                  <th style={{ width: '40px', padding: '12px 16px', textAlign: 'left' }}>
+                    <input 
+                      type="checkbox" 
+                      aria-label="全选报告"
+                      checked={reports.length > 0 && selectedPaths.size === reports.length}
+                      onChange={(e) => handleSelectAll(e.target.checked)}
+                    />
+                  </th>
+                  <th style={{ padding: '12px 16px', textAlign: 'left', color: 'rgba(215, 229, 250, 0.8)' }}>报告名称</th>
+                  <th style={{ padding: '12px 16px', textAlign: 'left', color: 'rgba(215, 229, 250, 0.8)' }}>扫描时间</th>
+                  <th style={{ padding: '12px 16px', textAlign: 'right', color: 'rgba(215, 229, 250, 0.8)' }}>结果数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reports.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ padding: '32px', textAlign: 'center', color: 'rgba(215, 229, 250, 0.5)' }}>暂无报告</td>
+                  </tr>
+                ) : reports.map((r, i) => {
+                  const path = r.jsonPath || r.csvPath || r.htmlPath || r.path || ''
+                  return (
+                    <tr 
+                      key={path + i} 
+                      onClick={() => toggleSelect(path, !selectedPaths.has(path))} 
+                      style={{ cursor: 'pointer', borderBottom: '1px solid rgba(116, 145, 255, 0.1)', background: selectedPaths.has(path) ? 'rgba(72, 179, 255, 0.08)' : 'transparent' }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(72, 179, 255, 0.12)'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = selectedPaths.has(path) ? 'rgba(72, 179, 255, 0.08)' : 'transparent'}
+                    >
+                      <td style={{ padding: '10px 16px' }} onClick={e => e.stopPropagation()}>
+                        <input 
+                          type="checkbox"
+                          aria-label={`选择报告 ${reportOptionLabel(r)}`}
+                          checked={selectedPaths.has(path)}
+                          onChange={(e) => toggleSelect(path, e.target.checked)}
+                        />
+                      </td>
+                      <td title={path} style={{ padding: '10px 16px', color: 'rgba(248, 250, 255, 0.94)', fontSize: '13px', fontWeight: 600 }}>{reportOptionLabel(r)}</td>
+                      <td style={{ padding: '10px 16px', color: 'rgba(226, 232, 255, 0.65)', fontSize: '12px' }}>{formatDateTime(r.modifiedAt || r.createdAt)}</td>
+                      <td style={{ padding: '10px 16px', color: 'rgba(226, 232, 255, 0.85)', fontSize: '12px', textAlign: 'right' }}>{r.pairCount ?? '-'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="task-delete-actions" style={{ paddingTop: '8px' }}>
+            <NeonButton variant="ghost" type="button" disabled={busy} onClick={onClose}>
+              取消
+            </NeonButton>
+            <NeonButton 
+              tone="red" 
+              type="button" 
+              disabled={busy || selectedPaths.size === 0} 
+              onClick={() => {
+                if (window.confirm(selectedPaths.size === reports.length ? '确定删除全部报告吗？此操作无法恢复！' : `确定删除选中的 ${selectedPaths.size} 个报告吗？此操作无法恢复！`)) {
+                  onDeleteSelected(Array.from(selectedPaths))
+                }
+              }}
+            >
+              <Trash2 size={16} />
+              删除选中的报告 ({selectedPaths.size})
+            </NeonButton>
+          </div>
+        </section>
+      </div>
+    </Translated>,
+    document.body,
+  )
 }

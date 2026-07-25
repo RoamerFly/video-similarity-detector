@@ -28,6 +28,8 @@ export interface VideoScanFilters {
   sizeUnit: VideoScanSizeUnit
   namePrefixes: string
   nameIncludes: string
+  nameRegex: string
+  nameExclude: string
   minDurationSec: VideoScanNumericValue
   maxDurationSec: VideoScanNumericValue
   durationUnit: VideoScanDurationUnit
@@ -362,6 +364,8 @@ export const defaultSettings: SettingsSnapshot = {
     sizeUnit: 'GB',
     namePrefixes: '',
     nameIncludes: '',
+    nameRegex: '',
+    nameExclude: '',
     minDurationSec: 0,
     maxDurationSec: 0,
     durationUnit: 'sec',

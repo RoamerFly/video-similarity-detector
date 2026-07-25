@@ -490,12 +490,14 @@ def build_timeline_filter_graph(
                 continue
             label = f"clipa{clip['input_index']}"
             delay_ms = max(0, int(clip["timeline_start"] * 1000))
+            vol = number(clip["item"].get("volume"), 1.0)
+            vol_filter = f"volume={vol:.2f}," if vol != 1.0 else ""
             filters.append(
                 f"[{clip['input_index']}:a:0]"
                 f"atrim=start={clip['source_start']:.6f}:end={clip['source_end']:.6f},"
                 "asetpts=PTS-STARTPTS,aresample=48000,"
                 "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"adelay={delay_ms}:all=1[{label}]"
+                f"{vol_filter}adelay={delay_ms}:all=1[{label}]"
             )
             audio_labels.append(f"[{label}]")
 

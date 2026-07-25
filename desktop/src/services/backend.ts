@@ -74,6 +74,7 @@ export interface VideoMergeItem {
   trimStart?: number
   trimEnd?: number
   muted?: boolean
+  volume?: number
   rotation?: number
   cropEnabled?: boolean
   cropX?: number

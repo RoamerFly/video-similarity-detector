@@ -23,6 +23,7 @@ export interface MergeQueueItem {
   trimStart: number
   trimEnd: number
   muted: boolean
+  volume?: number
   rotation: MergeRotation
   cropEnabled: boolean
   cropX: number
@@ -89,6 +90,7 @@ type MergeVideoPatch = Partial<Pick<
   | 'trimStart'
   | 'trimEnd'
   | 'muted'
+  | 'volume'
   | 'rotation'
   | 'cropEnabled'
   | 'cropX'
@@ -144,6 +146,7 @@ interface MergeState {
   moveVideo: (id: string, direction: -1 | 1) => void
   moveVideoTo: (id: string, startTime: number, trackId: string, recordHistory?: boolean) => void
   updateVideo: (id: string, patch: MergeVideoPatch, recordHistory?: boolean) => void
+  updateVideos: (updates: { id: string, patch: MergeVideoPatch }[], recordHistory?: boolean) => void
   splitVideo: (id: string, sourceTime: number, timelineTime: number) => string | null
   clearVideos: () => void
   addAudio: (audio: Omit<MergeAudioItem, 'id' | 'trackId'> & { trackId?: string }) => string
@@ -151,6 +154,10 @@ interface MergeState {
   updateAudio: (
     id: string,
     patch: Partial<Pick<MergeAudioItem, 'trackId' | 'startTime' | 'trimStart' | 'trimEnd'>>,
+    recordHistory?: boolean,
+  ) => void
+  updateAudios: (
+    updates: { id: string, patch: Partial<Pick<MergeAudioItem, 'trackId' | 'startTime' | 'trimStart' | 'trimEnd'>> }[],
     recordHistory?: boolean,
   ) => void
   removeAudio: (id: string) => void
@@ -352,6 +359,13 @@ export const useMergeStore = create<MergeState>()(
         const items = state.items.map((item) => item.id === id ? normalizeVideoItem({ ...item, ...patch }, state.videoTracks) : item)
         return recordHistory ? commitHistory(state, { items }) : { items }
       }),
+      updateVideos: (updates, recordHistory = true) => set((state) => {
+        let items = state.items
+        for (const { id, patch } of updates) {
+          items = items.map((item) => item.id === id ? normalizeVideoItem({ ...item, ...patch }, state.videoTracks) : item)
+        }
+        return recordHistory ? commitHistory(state, { items }) : { items }
+      }),
       splitVideo: (id, sourceTime, timelineTime) => {
         const item = get().items.find((candidate) => candidate.id === id)
         if (!item) return null
@@ -415,9 +429,14 @@ export const useMergeStore = create<MergeState>()(
         return additions.length
       },
       updateAudio: (id, patch, recordHistory = true) => set((state) => {
-        const audioItems = state.audioItems.map((item) => item.id === id
-          ? normalizeAudioItem({ ...item, ...patch }, state.audioTracks)
-          : item)
+        const audioItems = state.audioItems.map((item) => item.id === id ? normalizeAudioItem({ ...item, ...patch }, state.audioTracks) : item)
+        return recordHistory ? commitHistory(state, { audioItems }) : { audioItems }
+      }),
+      updateAudios: (updates, recordHistory = true) => set((state) => {
+        let audioItems = state.audioItems
+        for (const { id, patch } of updates) {
+          audioItems = audioItems.map((item) => item.id === id ? normalizeAudioItem({ ...item, ...patch }, state.audioTracks) : item)
+        }
         return recordHistory ? commitHistory(state, { audioItems }) : { audioItems }
       }),
       removeAudio: (id) => set((state) => commitHistory(state, {

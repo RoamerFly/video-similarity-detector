@@ -76,7 +76,7 @@ const videoExtensions = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv
 const timelinePixelsPerSecond = 12
 const timelineMinimumWidth = 720
 const timelineZoomDefault = 100
-const timelineZoomMinimum = 0
+const timelineZoomMinimum = -1000
 const timelineZoomMaximum = 200
 const timelineZoomStep = 1
 const timelineMinimumPixelsPerSecond = 2000 / 3600
@@ -281,6 +281,7 @@ export function MergePage() {
   const pythonPath = useSettingsStore((state) => state.pythonPath)
   const previewRef = useRef<HTMLVideoElement | null>(null)
   const previewVideoRefs = useRef(new Map<string, HTMLVideoElement>())
+  const previewAudioRefs = useRef(new Map<string, HTMLAudioElement>())
   const previewPanelRef = useRef<HTMLElement | null>(null)
   const previewScreenRef = useRef<HTMLDivElement | null>(null)
   const outputCanvasRef = useRef<HTMLDivElement | null>(null)
@@ -301,6 +302,27 @@ export function MergePage() {
   const lastPlaybackUiUpdateRef = useRef(0)
   const playheadRef = useRef(0)
   const playbackAnchorRef = useRef({ time: 0, timestamp: 0 })
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const audioNodesRef = useRef<WeakMap<HTMLMediaElement, { source: MediaElementAudioSourceNode; gain: GainNode }>>(new WeakMap())
+
+  const getOrCreateAudioNodes = useCallback((video: HTMLMediaElement) => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
+    }
+    const ctx = audioContextRef.current
+    if (audioNodesRef.current.has(video)) return audioNodesRef.current.get(video)!
+    try {
+      const source = ctx.createMediaElementSource(video)
+      const gain = ctx.createGain()
+      source.connect(gain)
+      gain.connect(ctx.destination)
+      const nodes = { source, gain }
+      audioNodesRef.current.set(video, nodes)
+      return nodes
+    } catch (e) {
+      return null
+    }
+  }, [])
   const [metadata, setMetadata] = useState<Record<string, VideoMetadata>>(() => Object.fromEntries(metadataCache))
   const [audioDurations, setAudioDurations] = useState<Record<string, number>>({})
   const [selectedClipId, setSelectedClipId] = useState('')
@@ -628,14 +650,43 @@ export function MergePage() {
 
     const now = Date.now()
     if (!forceMediaUpdate && now - lastScrubMediaUpdateRef.current < scrubMediaIntervalMs) return
-    for (const active of layouts) {
-      const video = previewVideoRefs.current.get(active.item.id)
-      if (!video || video.readyState < 1) continue
+    previewVideoRefs.current.forEach((video, id) => {
+      const active = layouts.find((l) => l.item.id === id)
+      if (!active) {
+        if (!video.paused) video.pause()
+        return
+      }
+      if (video.readyState < 1) return
       const target = active.item.trimStart + Math.max(0, next - active.start)
       if (Math.abs(video.currentTime - target) >= 0.008) video.currentTime = target
-    }
+      const targetVolume = active.item.muted ? 0 : (active.item.volume ?? 1)
+      const nodes = getOrCreateAudioNodes(video)
+      if (nodes) {
+        nodes.gain.gain.value = targetVolume
+      } else {
+        video.volume = clamp(targetVolume, 0, 1)
+      }
+    })
+    const activeAudios = audioLayouts.filter((l) => next >= l.start && next < l.end && audioTrackIds.includes(l.trackId))
+    previewAudioRefs.current.forEach((audio, id) => {
+      const active = activeAudios.find((l) => l.item.id === id)
+      if (!active) {
+        if (!audio.paused) audio.pause()
+        return
+      }
+      if (audio.readyState < 1) return
+      const target = active.item.trimStart + Math.max(0, next - active.start)
+      if (Math.abs(audio.currentTime - target) >= 0.008) audio.currentTime = target
+      const targetVolume = 1
+      const nodes = getOrCreateAudioNodes(audio)
+      if (nodes) {
+        nodes.gain.gain.value = targetVolume
+      } else {
+        audio.volume = clamp(targetVolume, 0, 1)
+      }
+    })
     lastScrubMediaUpdateRef.current = now
-  }, [clipLayouts, totalDuration, videoTrackIds])
+  }, [clipLayouts, audioLayouts, totalDuration, videoTrackIds, audioTrackIds])
 
   const seekGlobal = useCallback((time: number, autoPlay = false) => {
     scrubGlobal(time, true)
@@ -678,27 +729,111 @@ export function MergePage() {
   }, [])
 
   useEffect(() => {
-    const layouts = activeLayoutsAt(clipLayouts, playheadRef.current, videoTrackIds)
-    for (const layout of layouts) {
-      const video = previewVideoRefs.current.get(layout.item.id)
-      if (!video) continue
+    let changed = false
+    const videoUpdates: { id: string; patch: any }[] = []
+    
+    for (const track of merge.videoTracks) {
+      const trackLayouts = clipLayouts.filter((l) => l.trackId === track.id)
+      let currentEnd = 0
+      for (const layout of trackLayouts) {
+        if (layout.start < currentEnd - 0.005) {
+          videoUpdates.push({ id: layout.item.id, patch: { startTime: currentEnd } })
+          currentEnd = currentEnd + layout.duration
+          changed = true
+        } else {
+          currentEnd = layout.end
+        }
+      }
+    }
+    
+    const audioUpdates: { id: string; patch: any }[] = []
+    for (const track of merge.audioTracks) {
+      const trackLayouts = audioLayouts.filter((l) => l.trackId === track.id)
+      let currentEnd = 0
+      for (const layout of trackLayouts) {
+        if (layout.start < currentEnd - 0.005) {
+          audioUpdates.push({ id: layout.item.id, patch: { startTime: currentEnd } })
+          currentEnd = currentEnd + layout.duration
+          changed = true
+        } else {
+          currentEnd = layout.end
+        }
+      }
+    }
+    
+    if (changed) {
+      if (videoUpdates.length) merge.updateVideos(videoUpdates, false)
+      if (audioUpdates.length) merge.updateAudios(audioUpdates, false)
+    }
+  }, [clipLayouts, audioLayouts, merge])
+
+  useEffect(() => {
+    const activeVideos = activeLayoutsAt(clipLayouts, playheadRef.current, videoTrackIds)
+    previewVideoRefs.current.forEach((video, id) => {
+      const layout = activeVideos.find((l) => l.item.id === id)
+      if (!layout) {
+        if (!video.paused) video.pause()
+        return
+      }
       const target = layout.item.trimStart + Math.max(0, playheadRef.current - layout.start)
       const sync = () => {
         if (Math.abs(video.currentTime - target) > 0.2) video.currentTime = target
         video.playbackRate = 1
-        if (playing) void video.play().catch(() => undefined)
+        const targetVolume = layout.item.muted ? 0 : (layout.item.volume ?? 1)
+        const nodes = getOrCreateAudioNodes(video)
+        if (nodes) {
+          nodes.gain.gain.value = targetVolume
+        } else {
+          video.volume = clamp(targetVolume, 0, 1)
+        }
+        if (playing) {
+          if (audioContextRef.current?.state === 'suspended') void audioContextRef.current.resume()
+          void video.play().catch(() => undefined)
+        }
         else video.pause()
       }
       if (video.readyState >= 1) sync()
       else video.addEventListener('loadedmetadata', sync, { once: true })
-    }
-  }, [activeLayoutKey, clipLayouts, playing, videoTrackIds])
+    })
+
+    const activeAudios = audioLayouts.filter((l) => playheadRef.current >= l.start && playheadRef.current < l.end && audioTrackIds.includes(l.trackId))
+    previewAudioRefs.current.forEach((audio, id) => {
+      const layout = activeAudios.find((l) => l.item.id === id)
+      if (!layout) {
+        if (!audio.paused) audio.pause()
+        return
+      }
+      const target = layout.item.trimStart + Math.max(0, playheadRef.current - layout.start)
+      const sync = () => {
+        if (Math.abs(audio.currentTime - target) > 0.2) audio.currentTime = target
+        audio.playbackRate = 1
+        const targetVolume = 1
+        const nodes = getOrCreateAudioNodes(audio)
+        if (nodes) {
+          nodes.gain.gain.value = targetVolume
+        } else {
+          audio.volume = clamp(targetVolume, 0, 1)
+        }
+        if (playing) {
+          if (audioContextRef.current?.state === 'suspended') void audioContextRef.current.resume()
+          void audio.play().catch(() => undefined)
+        }
+        else audio.pause()
+      }
+      if (audio.readyState >= 1) sync()
+      else audio.addEventListener('loadedmetadata', sync, { once: true })
+    })
+  }, [activeLayoutKey, clipLayouts, audioLayouts, playing, videoTrackIds, audioTrackIds])
 
   useEffect(() => {
     if (!playing) {
       previewVideoRefs.current.forEach((video) => {
         video.pause()
         video.playbackRate = 1
+      })
+      previewAudioRefs.current.forEach((audio) => {
+        audio.pause()
+        audio.playbackRate = 1
       })
       return undefined
     }
@@ -715,13 +850,21 @@ export function MergePage() {
       if (timestamp - lastPlaybackUiUpdateRef.current > 66) {
         setPlayhead(next)
         keepTimelineTimeVisible(next)
+        const layouts = activeLayoutsAt(clipLayouts, next, videoTrackIds)
+        if (layouts.length > 0) {
+          setSelectedClipId((current) => layouts.some((active) => active.item.id === current) ? current : layouts[0].item.id)
+        }
         lastPlaybackUiUpdateRef.current = timestamp
       }
       if (timestamp - lastPlaybackSyncRef.current > 450) {
         const layouts = activeLayoutsAt(clipLayouts, next, videoTrackIds)
-        for (const layout of layouts) {
-          const video = previewVideoRefs.current.get(layout.item.id)
-          if (!video || video.readyState < 1) continue
+        previewVideoRefs.current.forEach((video, id) => {
+          const layout = layouts.find((l) => l.item.id === id)
+          if (!layout) {
+            if (!video.paused) video.pause()
+            return
+          }
+          if (video.readyState < 1) return
           const target = layout.item.trimStart + Math.max(0, next - layout.start)
           const drift = target - video.currentTime
           if (Math.abs(drift) > 0.4) {
@@ -730,8 +873,46 @@ export function MergePage() {
           } else {
             video.playbackRate = clamp(1 + drift * 0.12, 0.97, 1.03)
           }
-          if (video.paused) void video.play().catch(() => undefined)
-        }
+          const targetVolume = layout.item.muted ? 0 : (layout.item.volume ?? 1)
+          const nodes = getOrCreateAudioNodes(video)
+          if (nodes) {
+            nodes.gain.gain.value = targetVolume
+          } else {
+            video.volume = clamp(targetVolume, 0, 1)
+          }
+          if (video.paused) {
+            if (audioContextRef.current?.state === 'suspended') void audioContextRef.current.resume()
+            void video.play().catch(() => undefined)
+          }
+        })
+        const activeAudios = audioLayouts.filter((l) => next >= l.start && next < l.end && audioTrackIds.includes(l.trackId))
+        previewAudioRefs.current.forEach((audio, id) => {
+          const layout = activeAudios.find((l) => l.item.id === id)
+          if (!layout) {
+            if (!audio.paused) audio.pause()
+            return
+          }
+          if (audio.readyState < 1) return
+          const target = layout.item.trimStart + Math.max(0, next - layout.start)
+          const drift = target - audio.currentTime
+          if (Math.abs(drift) > 0.4) {
+            audio.currentTime = target
+            audio.playbackRate = 1
+          } else {
+            audio.playbackRate = clamp(1 + drift * 0.12, 0.97, 1.03)
+          }
+          const targetVolume = 1
+          const nodes = getOrCreateAudioNodes(audio)
+          if (nodes) {
+            nodes.gain.gain.value = targetVolume
+          } else {
+            audio.volume = clamp(targetVolume, 0, 1)
+          }
+          if (audio.paused) {
+            if (audioContextRef.current?.state === 'suspended') void audioContextRef.current.resume()
+            void audio.play().catch(() => undefined)
+          }
+        })
         lastPlaybackSyncRef.current = timestamp
       }
       playbackFrameRef.current = window.requestAnimationFrame(update)
@@ -741,7 +922,7 @@ export function MergePage() {
       if (playbackFrameRef.current !== null) window.cancelAnimationFrame(playbackFrameRef.current)
       playbackFrameRef.current = null
     }
-  }, [clipLayouts, keepTimelineTimeVisible, playing, totalDuration, videoTrackIds])
+  }, [clipLayouts, audioLayouts, keepTimelineTimeVisible, playing, totalDuration, videoTrackIds, audioTrackIds])
 
   async function chooseVideos() {
     try {
@@ -816,6 +997,11 @@ export function MergePage() {
     if (playing) {
       setPlaying(false)
       return
+    }
+    if (audioContextRef.current?.state === 'suspended') {
+      void audioContextRef.current.resume()
+    } else if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
     }
     const start = playhead >= totalDuration - 0.02 ? 0 : playhead
     scrubGlobal(start, true)
@@ -1237,8 +1423,6 @@ export function MergePage() {
     const startTrim = layout.item.trimStart
     const sourceEnd = clipSourceEnd(layout.item, info)
     const minDuration = frameStep
-    const previous = previousTrackLayout(clipLayouts, layout, -1)
-    const next = previousTrackLayout(clipLayouts, layout, 1)
     let latestEvent: PointerEvent | null = null
     let frame: number | null = null
     merge.beginHistoryTransaction()
@@ -1246,16 +1430,14 @@ export function MergePage() {
     const apply = (pointerEvent: PointerEvent) => {
       const delta = (pointerEvent.clientX - originX) * secondsPerPixel
       if (edge === 'start') {
-        const earliestTrimByTimeline = Math.max(0, startTrim - Math.max(0, layout.start - (previous?.end ?? 0)))
-        const trimStart = clamp(startTrim + delta, earliestTrimByTimeline, sourceEnd - minDuration)
+        const trimStart = clamp(startTrim + delta, 0, sourceEnd - minDuration)
         merge.updateVideo(clipId, {
           trimStart,
           startTime: Math.max(0, layout.start + trimStart - startTrim),
         }, false)
         return
       }
-      const latestEndByTrack = next ? next.start - layout.start : Number.POSITIVE_INFINITY
-      const trimEnd = clamp(sourceEnd + delta, startTrim + minDuration, Math.min(sourceDuration, startTrim + latestEndByTrack))
+      const trimEnd = clamp(sourceEnd + delta, startTrim + minDuration, sourceDuration)
       merge.updateVideo(clipId, { trimEnd }, false)
     }
     const move = (pointerEvent: PointerEvent) => {
@@ -1743,6 +1925,7 @@ export function MergePage() {
           trimStart: item.trimStart,
           trimEnd: item.trimEnd > item.trimStart ? item.trimEnd : undefined,
           muted: item.muted,
+          volume: item.volume,
           rotation: item.rotation,
           cropEnabled: item.cropEnabled,
           cropX: item.cropX,
@@ -1893,6 +2076,7 @@ export function MergePage() {
                     }}
                     data-clip-id={layout.item.id}
                     src={localFileSrc(layout.item.path)}
+                    crossOrigin="anonymous"
                     style={previewExportVideoStyle(
                       layout.item,
                       info?.width ?? 0,
@@ -2031,18 +2215,43 @@ export function MergePage() {
             <button type="button" title="前进一帧" disabled={totalDuration <= 0} onClick={() => nudgePlayhead(1)}>
               <Plus />
             </button>
-            <time title={`时间线 ${formatPreciseTime(playhead)} / ${formatPreciseTime(totalDuration)}`}>
-              片段 {formatPreciseTime(previewLocalTime)} / {formatPreciseTime(previewLayout?.duration ?? 0)}
-              <small>时间线 {formatPreciseTime(playhead)} / {formatPreciseTime(totalDuration)}</small>
-            </time>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(0.01, totalDuration)}
-              step={0.001}
-              value={Math.min(playhead, Math.max(0.01, totalDuration))}
-              onChange={(event) => seekGlobal(Number(event.target.value))}
-            />
+            <div style={{ gridColumn: '6 / span 2', display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, paddingLeft: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <time title={`片段 ${formatPreciseTime(previewLocalTime)} / ${formatPreciseTime(previewLayout?.duration ?? 0)}`} style={{ flexBasis: '180px', flexShrink: 0 }}>
+                  片段 {formatPreciseTime(previewLocalTime)} / {formatPreciseTime(previewLayout?.duration ?? 0)}
+                </time>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0.01, previewLayout?.duration ?? 0.01)}
+                  step={0.001}
+                  value={Math.min(previewLocalTime, Math.max(0.01, previewLayout?.duration ?? 0.01))}
+                  disabled={!previewLayout}
+                  onChange={(event) => {
+                    if (previewLayout) {
+                      seekGlobal(previewLayout.start + Number(event.target.value))
+                    }
+                  }}
+                  title="片段播放进度"
+                  style={{ flex: 1, minWidth: 0, cursor: previewLayout ? 'pointer' : 'default' }}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <time title={`时间线 ${formatPreciseTime(playhead)} / ${formatPreciseTime(totalDuration)}`} style={{ flexBasis: '180px', flexShrink: 0 }}>
+                  <small style={{ fontSize: '12px' }}>时间线 {formatPreciseTime(playhead)} / {formatPreciseTime(totalDuration)}</small>
+                </time>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0.01, totalDuration)}
+                  step={0.001}
+                  value={Math.min(playhead, Math.max(0.01, totalDuration))}
+                  onChange={(event) => seekGlobal(Number(event.target.value))}
+                  title="总时间线播放进度"
+                  style={{ flex: 1, minWidth: 0, cursor: 'pointer' }}
+                />
+              </div>
+            </div>
           </div>
           <section className="editor-advanced-settings editor-advanced-settings-below-video">
             <div className="editor-advanced-title">高级输出设置</div>
@@ -2233,13 +2442,70 @@ export function MergePage() {
             <div className="editor-selected-media">
               <span>视频片段</span>
               <strong title={selectedClip.path}>{selectedClip.name}</strong>
-              <small>
-                {formatPreciseTime(selectedClip.trimStart)} - {formatPreciseTime(clipSourceEnd(selectedClip, metadata[normalizePath(selectedClip.path)]))}
-                {selectedClip.rotation ? ` · 右旋 ${selectedClip.rotation}°` : ''}
+              <small style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span>{formatPreciseTime(selectedClip.trimStart)} - {formatPreciseTime(clipSourceEnd(selectedClip, metadata[normalizePath(selectedClip.path)]))} {selectedClip.rotation ? ` · 右旋 ${selectedClip.rotation}°` : ''}</span>
+                <span style={{ color: 'rgba(255,255,255,0.6)' }}>
+                  分辨率: {metadata[normalizePath(selectedClip.path)]?.width ?? '-'}x{metadata[normalizePath(selectedClip.path)]?.height ?? '-'} · 
+                  帧率: {Math.round(metadata[normalizePath(selectedClip.path)]?.fps ?? 0) || '-'} FPS
+                </span>
               </small>
               <div className="editor-time-fields">
-                <NumberField label="入点" value={selectedClip.trimStart} min={0} step={0.001} onChange={(trimStart) => merge.updateVideo(selectedClip.id, { trimStart })} />
-                <NumberField label="出点" value={selectedClip.trimEnd} min={0} step={0.001} placeholder="自动" onChange={(trimEnd) => merge.updateVideo(selectedClip.id, { trimEnd })} />
+                <NumberField label="入点" value={selectedClip.trimStart} min={0} step={0.01} onChange={(trimStart) => merge.updateVideo(selectedClip.id, { trimStart })} />
+                <NumberField label="出点" value={selectedClip.trimEnd} min={0} step={0.01} placeholder="自动" onChange={(trimEnd) => merge.updateVideo(selectedClip.id, { trimEnd })} />
+              </div>
+              <div className="editor-volume-control" style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="icon-button"
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(238, 243, 255, 0.84)', padding: '4px' }}
+                  onClick={() => merge.updateVideo(selectedClip.id, { muted: !selectedClip.muted })}
+                  title={selectedClip.muted ? '取消静音' : '静音'}
+                >
+                  {selectedClip.muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                </button>
+                <input
+                  type="range"
+                  min="0"
+                  max="3"
+                  step="0.05"
+                  value={selectedClip.muted ? 0 : (selectedClip.volume ?? 1)}
+                  disabled={selectedClip.muted}
+                  onChange={(e) => merge.updateVideo(selectedClip.id, { volume: parseFloat(e.target.value) })}
+                  style={{ flex: 1, accentColor: 'var(--accent-color, #3b82f6)' }}
+                />
+                <span style={{ fontSize: '12px', minWidth: '40px', textAlign: 'right' }}>
+                  {selectedClip.muted ? 0 : Math.round((selectedClip.volume ?? 1) * 100)}%
+                </span>
+                <button
+                  type="button"
+                  className="neon-button outline"
+                  style={{ padding: '2px 8px', fontSize: '12px', minWidth: '60px', transition: 'all 0.2s', position: 'relative' }}
+                  onClick={(e) => {
+                    merge.updateVideos(merge.items.map(item => ({
+                      id: item.id,
+                      patch: { volume: selectedClip.volume, muted: selectedClip.muted }
+                    })))
+                    const btn = e.currentTarget
+                    const originalText = btn.textContent
+                    btn.style.backgroundColor = 'rgba(34, 197, 94, 0.2)'
+                    btn.style.borderColor = '#22c55e'
+                    btn.style.color = '#4ade80'
+                    btn.style.transform = 'scale(0.95)'
+                    btn.textContent = '统一成功!'
+                    setTimeout(() => {
+                      btn.style.transform = 'scale(1)'
+                    }, 150)
+                    setTimeout(() => {
+                      btn.style.backgroundColor = ''
+                      btn.style.borderColor = ''
+                      btn.style.color = ''
+                      btn.textContent = originalText
+                    }, 1500)
+                  }}
+                  title="应用当前音量设置到所有视频片段"
+                >
+                  统一音量
+                </button>
               </div>
             </div>
           ) : selectedAudio ? (
@@ -2247,8 +2513,8 @@ export function MergePage() {
               <span>音频片段</span>
               <strong title={selectedAudio.path}>{selectedAudio.name}</strong>
               <div className="editor-time-fields">
-                <NumberField label="时间线位置" value={selectedAudioLayout?.start ?? 0} min={0} step={0.001} onChange={(startTime) => merge.updateAudio(selectedAudio.id, { startTime })} />
-                <NumberField label="音频入点" value={selectedAudio.trimStart} min={0} step={0.001} onChange={(trimStart) => merge.updateAudio(selectedAudio.id, { trimStart })} />
+                <NumberField label="时间线位置" value={selectedAudioLayout?.start ?? 0} min={0} step={0.01} onChange={(startTime) => merge.updateAudio(selectedAudio.id, { startTime })} />
+                <NumberField label="音频入点" value={selectedAudio.trimStart} min={0} step={0.01} onChange={(trimStart) => merge.updateAudio(selectedAudio.id, { trimStart })} />
               </div>
             </div>
           ) : selectedText ? (
@@ -2256,8 +2522,8 @@ export function MergePage() {
               <span>文本片段</span>
               <TextInput ref={selectedTextInputRef} value={selectedText.text} onChange={(event) => merge.updateText(selectedText.id, { text: event.target.value })} />
               <div className="editor-time-fields">
-                <NumberField label="开始时间" value={selectedText.startTime} min={0} step={0.001} onChange={(startTime) => merge.updateText(selectedText.id, { startTime })} />
-                <NumberField label="持续秒数" value={selectedText.duration} min={0.05} step={0.001} onChange={(duration) => merge.updateText(selectedText.id, { duration })} />
+                <NumberField label="开始时间" value={selectedText.startTime} min={0} step={0.01} onChange={(startTime) => merge.updateText(selectedText.id, { startTime })} />
+                <NumberField label="持续秒数" value={selectedText.duration} min={0.05} step={0.01} onChange={(duration) => merge.updateText(selectedText.id, { duration })} />
               </div>
               <div className="editor-text-fields">
                 <NumberField label="横向位置" value={selectedText.x} min={0} max={1} step={0.01} onChange={(x) => merge.updateText(selectedText.id, { x })} />
@@ -2670,8 +2936,16 @@ export function MergePage() {
         {merge.audioItems.map((audio) => (
           <audio
             key={`probe-${audio.id}`}
+            ref={(node) => {
+              if (node) {
+                previewAudioRefs.current.set(audio.id, node)
+              } else {
+                previewAudioRefs.current.delete(audio.id)
+              }
+            }}
             src={localFileSrc(audio.path)}
-            preload="metadata"
+            crossOrigin="anonymous"
+            preload="auto"
             onLoadedMetadata={(event) => {
               const duration = event.currentTarget.duration
               if (Number.isFinite(duration)) setAudioDurations((current) => ({ ...current, [audio.id]: duration }))

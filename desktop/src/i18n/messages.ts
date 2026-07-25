@@ -18,6 +18,8 @@ const baseEnglishText: Record<string, string> = {
   '视频相似度分析': 'Video Similarity Analysis',
   '扫描视频、启动分析，并跟踪实时运行状态': 'Scan videos, start analysis, and track real-time progress',
   '读取真实分析报告并展示比较结果': 'Read real analysis reports and show comparison results',
+  'A在B中': 'A in B',
+  'B在A中': 'B in A',
   '并排查看两个视频的匹配帧，人工确认相似关系': 'Review matched frames side by side and confirm similarity manually',
   '整理相似视频，统一画面规格并输出合并或分割文件': 'Organize similar videos, normalize layouts, and export merged or split files',
   '集中管理环境、路径和分析参数': 'Manage environment, paths, and analysis parameters',

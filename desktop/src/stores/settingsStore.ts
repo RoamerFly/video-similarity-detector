@@ -602,6 +602,8 @@ function sanitizeVideoScanFilters(value: unknown): VideoScanFilters {
     sizeUnit: sanitizeVideoScanSizeUnit(raw.sizeUnit),
     namePrefixes: typeof raw.namePrefixes === 'string' ? raw.namePrefixes : '',
     nameIncludes: typeof raw.nameIncludes === 'string' ? raw.nameIncludes : '',
+    nameRegex: typeof raw.nameRegex === 'string' ? raw.nameRegex : '',
+    nameExclude: typeof raw.nameExclude === 'string' ? raw.nameExclude : '',
     minDurationSec: clampDecimal(Number(raw.minDurationSec), 0),
     maxDurationSec: clampDecimal(Number(raw.maxDurationSec), 0),
     durationUnit: sanitizeVideoScanDurationUnit(raw.durationUnit),
