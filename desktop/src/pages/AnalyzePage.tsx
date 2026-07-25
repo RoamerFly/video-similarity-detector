@@ -47,6 +47,7 @@ import {
   formatDateTime,
   getAppInfo,
   listAnalysisTasks,
+  getAnalysisTask,
   moveFiles,
   renameFile,
   normalizeBackendError,
@@ -592,7 +593,14 @@ export function AnalyzePage() {
     setTaskLoadDialogOpen(true)
   }
 
-  function handleLoadExistingTask(task: AnalysisTaskRecord) {
+  async function handleLoadExistingTask(summaryTask: AnalysisTaskRecord) {
+    let task = summaryTask
+    try {
+      task = await getAnalysisTask(summaryTask.id, useSettingsStore.getState().cacheDir, useSettingsStore.getState().projectRoot)
+    } catch (e) {
+      console.error('Failed to load full task', e)
+    }
+    
     const defaults = buildRunBatchCompareConfig(
       useSettingsStore.getState(),
       analysisConfigFromSettings(useSettingsStore.getState()),
@@ -644,8 +652,14 @@ export function AnalyzePage() {
     setActiveSubpage('analysis')
   }
 
-  async function handleRunLoadedTask(task: AnalysisTaskRecord) {
+  async function handleRunLoadedTask(summaryTask: AnalysisTaskRecord) {
     setLoadedTaskId('')
+    let task = summaryTask
+    try {
+      task = await getAnalysisTask(summaryTask.id, useSettingsStore.getState().cacheDir, useSettingsStore.getState().projectRoot)
+    } catch (e) {
+      console.error('Failed to load full task', e)
+    }
     await handleRunTask(task)
   }
 
@@ -903,8 +917,14 @@ export function AnalyzePage() {
     }
   }
 
-  function handleOpenTaskDetail(task: AnalysisTaskRecord) {
+  async function handleOpenTaskDetail(summaryTask: AnalysisTaskRecord) {
     setErrorMessage('')
+    let task = summaryTask
+    try {
+      task = await getAnalysisTask(summaryTask.id, useSettingsStore.getState().cacheDir, useSettingsStore.getState().projectRoot)
+    } catch (e) {
+      console.error('Failed to load full task', e)
+    }
     setDetailTask(task)
   }
 
