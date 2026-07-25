@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from collections import deque
 from datetime import datetime
@@ -530,81 +531,40 @@ def drain_stderr(stream, tail: deque[str]) -> None:
     stream.close()
 
 
-def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
+def video_encoding_args(config: dict) -> list[str]:
+    encoder = "libx265" if str(config.get("videoEncoder", "h264")).lower() == "h265" else "libx264"
+    preset = str(config.get("encoderPreset", "medium")).lower()
+    if preset not in {
+        "ultrafast", "superfast", "veryfast", "faster", "fast",
+        "medium", "slow", "slower", "veryslow",
+    }:
+        preset = "medium"
+    args = ["-c:v", encoder, "-preset", preset]
+    if str(config.get("rateControl", "quality")).lower() == "bitrate":
+        bitrate = max(100, min(100000, int(number(config.get("videoBitrate"), 4000))))
+        args.extend(["-b:v", f"{bitrate}k"])
+    else:
+        crf = max(0, min(51, int(number(config.get("crf"), 23))))
+        args.extend(["-crf", str(crf)])
+    args.extend(["-pix_fmt", "yuv420p"])
+    return args
+
+
+def audio_encoding_args(config: dict) -> list[str]:
+    bitrate = max(32, min(512, int(number(config.get("audioBitrate"), 192))))
+    return ["-c:a", "aac", "-b:a", f"{bitrate}k"]
+
+
+def run_ffmpeg_command(
+    command: list[str],
+    total_duration: float,
+    progress_start: float,
+    progress_span: float,
+    progress_stage: str,
+) -> None:
     global ACTIVE_PROCESS
 
-    ffmpeg = resolve_ffmpeg(project_root)
-    inputs = config.get("inputs") or []
-    if not inputs:
-        raise RuntimeError("时间线至少需要一个视频片段。")
-
-    metadata = []
-    for index, item in enumerate(inputs, start=1):
-        path = Path(str(item.get("path", "")))
-        if not path.is_file():
-            raise RuntimeError(f"视频文件不存在: {path}")
-        emit_progress(index / len(inputs) * 8.0, f"读取视频信息 {index}/{len(inputs)}：{path.name}")
-        metadata.append(probe_video(ffmpeg, path))
-
-    output_dir = Path(str(config.get("outputDir", ""))).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = safe_stem(str(config.get("outputName", "")))
-    split_mode = str(config.get("splitMode", "none"))
-    include_audio = bool(config.get("includeAudio", True))
-    audio_tracks = config.get("audioTracks") or []
-
-    command = [ffmpeg, "-hide_banner", "-y"]
-    for item in inputs:
-        command.extend(["-i", str(Path(str(item["path"])))])
-    audio_metadata = []
-    for item in audio_tracks:
-        path = Path(str(item.get("path", "")))
-        if not path.is_file():
-            raise RuntimeError(f"音频文件不存在: {path}")
-        command.extend(["-i", str(path)])
-        audio_metadata.append(probe_audio(ffmpeg, path))
-
-    filters, total_duration, output_has_audio = build_timeline_filter_graph(
-        inputs,
-        metadata,
-        audio_tracks,
-        audio_metadata,
-        config,
-    )
-
-    command.extend(["-filter_complex", ";".join(filters), "-map", "[vout]"])
-    if output_has_audio:
-        command.extend(["-map", "[aout]"])
-    command.extend([
-        "-c:v", "libx264",
-        "-preset", str(config.get("encoderPreset", "medium")),
-        "-crf", str(max(0, min(51, int(number(config.get("crf"), 23))))),
-        "-pix_fmt", "yuv420p",
-    ])
-    if output_has_audio:
-        command.extend(["-c:a", "aac", "-b:a", "192k"])
-    command.extend(["-map_metadata", "-1", "-progress", "pipe:1", "-nostats"])
-
-    if split_mode in {"duration", "count"}:
-        split_value = max(1.0, number(config.get("splitValue"), 600))
-        segment_time = total_duration / split_value if split_mode == "count" else split_value
-        segment_time = max(1.0, segment_time)
-        output_stem = unique_output_stem(output_dir, output_stem)
-        output_pattern = output_dir / f"{output_stem}_%03d.mp4"
-        command.extend([
-            "-force_key_frames", f"expr:gte(t,n_forced*{segment_time:.6f})",
-            "-f", "segment",
-            "-segment_time", f"{segment_time:.6f}",
-            "-reset_timestamps", "1",
-            str(output_pattern),
-        ])
-        expected_pattern = f"{output_stem}_*.mp4"
-    else:
-        output_path = unique_output_path(output_dir, output_stem)
-        command.extend(["-movflags", "+faststart", str(output_path)])
-        expected_pattern = output_path.name
-
-    emit_progress(10.0, f"开始合并 {len(inputs)} 个视频")
+    log(f"FFmpeg command: {subprocess.list2cmdline(command)}")
     stderr_tail: deque[str] = deque(maxlen=30)
     ACTIVE_PROCESS = subprocess.Popen(
         command,
@@ -630,10 +590,8 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
                 elapsed = float(value) / 1_000_000.0
             except ValueError:
                 continue
-            progress = 10.0 + min(1.0, elapsed / max(0.01, total_duration)) * 88.0
-            emit_progress(progress, f"正在合并：{elapsed:.1f}s / {total_duration:.1f}s")
-        elif key == "progress" and value == "end":
-            emit_progress(99.0, "正在整理输出文件")
+            progress = progress_start + min(1.0, elapsed / max(0.01, total_duration)) * progress_span
+            emit_progress(progress, f"{progress_stage}：{elapsed:.1f}s / {total_duration:.1f}s")
 
     exit_code = ACTIVE_PROCESS.wait()
     stderr_thread.join(timeout=3)
@@ -641,6 +599,138 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
     if exit_code != 0:
         details = "\n".join(stderr_tail)
         raise RuntimeError(f"FFmpeg 合并失败，退出码 {exit_code}：{details[-1800:]}")
+
+
+def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
+    global ACTIVE_PROCESS
+
+    ffmpeg = resolve_ffmpeg(project_root)
+    inputs = config.get("inputs") or []
+    if not inputs:
+        raise RuntimeError("时间线至少需要一个视频片段。")
+
+    metadata = []
+    for index, item in enumerate(inputs, start=1):
+        path = Path(str(item.get("path", "")))
+        if not path.is_file():
+            raise RuntimeError(f"视频文件不存在: {path}")
+        emit_progress(index / len(inputs) * 8.0, f"读取视频信息 {index}/{len(inputs)}：{path.name}")
+        metadata.append(probe_video(ffmpeg, path))
+
+    output_dir = Path(str(config.get("outputDir", ""))).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_stem = safe_stem(str(config.get("outputName", "")))
+    split_mode = str(config.get("splitMode", "none"))
+    include_audio = bool(config.get("includeAudio", True))
+    audio_tracks = config.get("audioTracks") or []
+
+    input_args = [ffmpeg, "-hide_banner", "-y"]
+    for item in inputs:
+        input_args.extend(["-i", str(Path(str(item["path"])))])
+    audio_metadata = []
+    for item in audio_tracks:
+        path = Path(str(item.get("path", "")))
+        if not path.is_file():
+            raise RuntimeError(f"音频文件不存在: {path}")
+        input_args.extend(["-i", str(path)])
+        audio_metadata.append(probe_audio(ffmpeg, path))
+
+    filters, total_duration, output_has_audio = build_timeline_filter_graph(
+        inputs,
+        metadata,
+        audio_tracks,
+        audio_metadata,
+        config,
+    )
+
+    render_args = ["-filter_complex", ";".join(filters), "-map", "[vout]"]
+    if output_has_audio:
+        render_args.extend(["-map", "[aout]"])
+    encoding_args = video_encoding_args(config)
+    if output_has_audio:
+        encoding_args.extend(audio_encoding_args(config))
+    encoding_args.extend(["-map_metadata", "-1", "-progress", "pipe:1", "-nostats"])
+
+    if split_mode in {"duration", "count"}:
+        split_value = max(1.0, number(config.get("splitValue"), 600))
+        segment_time = total_duration / split_value if split_mode == "count" else split_value
+        segment_time = max(1.0, segment_time)
+        output_stem = unique_output_stem(output_dir, output_stem)
+        output_pattern = output_dir / f"{output_stem}_%03d.mp4"
+        first_pass_output_args = [
+            "-force_key_frames", f"expr:gte(t,n_forced*{segment_time:.6f})",
+        ]
+        output_args = [
+            "-force_key_frames", f"expr:gte(t,n_forced*{segment_time:.6f})",
+            "-f", "segment",
+            "-segment_time", f"{segment_time:.6f}",
+            "-reset_timestamps", "1",
+            str(output_pattern),
+        ]
+        expected_pattern = f"{output_stem}_*.mp4"
+    else:
+        output_path = unique_output_path(output_dir, output_stem)
+        first_pass_output_args = []
+        output_args = ["-movflags", "+faststart", str(output_path)]
+        expected_pattern = output_path.name
+
+    use_two_pass = (
+        str(config.get("rateControl", "quality")).lower() == "bitrate"
+        and bool(config.get("twoPass", False))
+    )
+    if use_two_pass:
+        with tempfile.TemporaryDirectory(prefix="video_merge_pass_") as pass_dir:
+            passlog = str(Path(pass_dir) / "ffmpeg2pass")
+            first_pass_filters = list(filters)
+            if output_has_audio:
+                first_pass_filters.append("[aout]anullsink")
+            first_pass_args = [
+                "-filter_complex", ";".join(first_pass_filters),
+                "-map", "[vout]",
+                *video_encoding_args(config),
+                "-pass", "1",
+                "-passlogfile", passlog,
+                "-an",
+                "-map_metadata", "-1",
+                "-progress", "pipe:1",
+                "-nostats",
+                *first_pass_output_args,
+                "-f", "null",
+                os.devnull,
+            ]
+            emit_progress(10.0, "第 1 遍：分析画面复杂度")
+            run_ffmpeg_command(
+                [*input_args, *first_pass_args],
+                total_duration,
+                10.0,
+                43.0,
+                "第 1 遍分析",
+            )
+            emit_progress(54.0, "第 2 遍：按目标码率编码")
+            second_pass_args = [
+                *render_args,
+                *encoding_args,
+                "-pass", "2",
+                "-passlogfile", passlog,
+                *output_args,
+            ]
+            run_ffmpeg_command(
+                [*input_args, *second_pass_args],
+                total_duration,
+                54.0,
+                44.0,
+                "第 2 遍编码",
+            )
+    else:
+        emit_progress(10.0, f"开始合并 {len(inputs)} 个视频")
+        run_ffmpeg_command(
+            [*input_args, *render_args, *encoding_args, *output_args],
+            total_duration,
+            10.0,
+            88.0,
+            "正在合并",
+        )
+    emit_progress(99.0, "正在整理输出文件")
 
     outputs = sorted(output_dir.glob(expected_pattern))
     if not outputs:

@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertCircle, ArrowLeft, CheckCircle2, Clapperboard, ExternalLink, Film, FolderOpen, Images, ListPlus, Pause, PlaySquare, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { Badge, GlassPanel, MetricBar, NeonButton, SelectInput } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
-import { captureComparisonFrame, captureVideoFrame, deleteFiles, fileName, formatBytes, localFileSrc, normalizeBackendError, openFile, pathStatus, revealInFolder, type ComparisonFrameOptions, type PathStatus } from '@/services/backend'
+import { authorizeMediaPath, captureComparisonFrame, captureVideoFrame, deleteFiles, fileName, formatBytes, localFileSrc, normalizeBackendError, openFile, revealInFolder, type ComparisonFrameOptions, type PathStatus } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -17,7 +17,7 @@ type FrameViewMode = 'original' | 'comparison'
 type PlaybackFocus = 'sync' | 'source' | 'target'
 type CompareContextSide = 'source' | 'target'
 
-const pathStatusCache = new Map<string, { status: PathStatus | null; error: string }>()
+const mediaPathStatusCache = new Map<string, PathStatus>()
 const framePreviewCache = new Map<string, { dataUrl: string; error: string }>()
 const comparisonFrameCache = new Map<string, { dataUrl: string; error: string }>()
 
@@ -34,6 +34,7 @@ export function ComparePage() {
   const [syncPlaying, setSyncPlaying] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [error, setError] = useState('')
+  const [playbackErrors, setPlaybackErrors] = useState<Partial<Record<Exclude<PlaybackFocus, 'sync'>, string>>>({})
   const [notice, setNotice] = useState('')
   const [videoContextMenu, setVideoContextMenu] = useState<{ x: number; y: number; side: CompareContextSide } | null>(null)
   const [duplicateSelection, setDuplicateSelection] = useState<{ pairId: string; paths: Set<string> }>(() => ({ pairId: '', paths: new Set() }))
@@ -79,6 +80,7 @@ export function ComparePage() {
   const selectedMatchKey = selectedMatch
     ? `${selectedMatch.direction}::${selectedMatch.sourceFrameIndex ?? ''}::${selectedMatch.targetFrameIndex ?? ''}::${selectedMatch.sourceTimestamp ?? ''}::${selectedMatch.targetTimestamp ?? ''}`
     : 'no-match'
+  const playbackError = [playbackErrors.source, playbackErrors.target].filter(Boolean).join('；')
   const selectedDuplicatePaths = duplicateSelection.pairId === selectedPairId ? duplicateSelection.paths : new Set<string>()
   const duplicateMessage = duplicateMessageState.pairId === selectedPairId ? duplicateMessageState.message : ''
   const comparisonFrameOptions = useMemo<ComparisonFrameOptions>(() => ({
@@ -119,7 +121,11 @@ export function ComparePage() {
   const toggleSyncPlayback = useCallback(async () => {
     const source = sourceVideoRef.current
     const target = targetVideoRef.current
-    if (!source || !target) return
+    if (!source || !target) {
+      setSyncPlaying(false)
+      setError('同步播放不可用：左右两侧播放器尚未加载完成。请查看播放器错误详情并重试。')
+      return
+    }
 
     setPlaybackFocus('sync')
     if (!source.paused || !target.paused) {
@@ -129,13 +135,27 @@ export function ComparePage() {
       return
     }
 
+    setError('')
     const results = await Promise.allSettled([source.play(), target.play()])
-    setSyncPlaying(results.some((result) => result.status === 'fulfilled') || !source.paused || !target.paused)
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => normalizeBackendError(result.reason))
+    if (failures.length > 0 || source.paused || target.paused) {
+      source.pause()
+      target.pause()
+      setSyncPlaying(false)
+      setError(`同步播放失败：${failures.join('；') || '至少一侧播放器未能开始播放'}。`)
+      return
+    }
+    setSyncPlaying(true)
   }, [])
 
   const toggleSinglePlayback = useCallback(async (side: Exclude<PlaybackFocus, 'sync'>) => {
     const element = side === 'source' ? sourceVideoRef.current : targetVideoRef.current
-    if (!element) return
+    if (!element) {
+      setError(`${side === 'source' ? '左侧' : '右侧'}播放器尚未加载完成，请查看错误详情并重试。`)
+      return
+    }
 
     setPlaybackFocus(side)
     setSyncPlaying(false)
@@ -143,7 +163,10 @@ export function ComparePage() {
       element.pause()
       return
     }
-    await element.play().catch(() => undefined)
+    setError('')
+    await element.play().catch((playError) => {
+      setError(`${side === 'source' ? '左侧' : '右侧'}视频播放失败：${normalizeBackendError(playError)}`)
+    })
   }, [])
 
   useEffect(() => {
@@ -164,7 +187,10 @@ export function ComparePage() {
   useEffect(() => {
     sourceVideoRef.current?.pause()
     targetVideoRef.current?.pause()
-    const timer = window.setTimeout(() => setSyncPlaying(false), 0)
+    const timer = window.setTimeout(() => {
+      setSyncPlaying(false)
+      setPlaybackErrors({})
+    }, 0)
     return () => window.clearTimeout(timer)
   }, [selectedMatchKey])
 
@@ -491,10 +517,10 @@ export function ComparePage() {
         </div>
       </GlassPanel>
 
-      {(error || notice) && (
-        <div className={error ? 'inline-error compact-message compare-error' : 'compact-message success-message compare-error'}>
-          {error ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
-          {error || notice}
+      {(error || playbackError || notice) && (
+        <div className={error || playbackError ? 'inline-error compact-message compare-error' : 'compact-message success-message compare-error'}>
+          {error || playbackError ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+          {error || playbackError || notice}
         </div>
       )}
 
@@ -516,6 +542,11 @@ export function ComparePage() {
               comparisonOptions={comparisonFrameOptions}
               videoRef={sourceVideoRef}
               onPlaybackFocus={() => setPlaybackFocus('source')}
+              onPlaybackError={(message) => setPlaybackErrors((current) => ({ ...current, source: message }))}
+              onPlaybackReady={() => {
+                setPlaybackErrors((current) => ({ ...current, source: undefined }))
+                setError((current) => current.startsWith('同步播放不可用') ? '' : current)
+              }}
               onOpen={() => void handleOpenVideo(sourceVideoPath)}
               onContextMenu={(event) => openVideoContextMenu(event, 'source')}
             />
@@ -579,6 +610,11 @@ export function ComparePage() {
               comparisonOptions={comparisonFrameOptions}
               videoRef={targetVideoRef}
               onPlaybackFocus={() => setPlaybackFocus('target')}
+              onPlaybackError={(message) => setPlaybackErrors((current) => ({ ...current, target: message }))}
+              onPlaybackReady={() => {
+                setPlaybackErrors((current) => ({ ...current, target: undefined }))
+                setError((current) => current.startsWith('同步播放不可用') ? '' : current)
+              }}
               onOpen={() => void handleOpenVideo(targetVideoPath)}
               onContextMenu={(event) => openVideoContextMenu(event, 'target')}
             />
@@ -791,6 +827,8 @@ function VideoPreview({
   comparisonOptions,
   videoRef,
   onPlaybackFocus,
+  onPlaybackError,
+  onPlaybackReady,
   onOpen,
   onContextMenu,
 }: {
@@ -804,10 +842,13 @@ function VideoPreview({
   comparisonOptions: ComparisonFrameOptions
   videoRef: RefObject<HTMLVideoElement | null>
   onPlaybackFocus: () => void
+  onPlaybackError: (message: string) => void
+  onPlaybackReady: () => void
   onOpen: () => void
   onContextMenu: (event: React.MouseEvent<HTMLElement>) => void
 }) {
-  const [failedPath, setFailedPath] = useState('')
+  const [retryVersion, setRetryVersion] = useState(0)
+  const [mediaFailure, setMediaFailure] = useState<{ path: string; message: string } | null>(null)
   const [statusResult, setStatusResult] = useState<{
     path: string
     status: PathStatus | null
@@ -827,9 +868,10 @@ function VideoPreview({
   const status = statusResult?.path === path ? statusResult.status : null
   const statusError = statusResult?.path === path ? statusResult.error : ''
   const normalizedPath = status?.normalizedPath || path
-  const pathExists = Boolean(path && (!status || (status.exists && status.isFile)))
-  const src = pathExists ? localFileSrc(normalizedPath) : ''
-  const failed = failedPath === normalizedPath
+  const pathReady = Boolean(path && status?.exists && status.isFile)
+  const src = pathReady ? localFileSrc(normalizedPath) : ''
+  const failed = mediaFailure?.path === normalizedPath
+  const mediaFailureMessage = failed ? mediaFailure.message : ''
   const previewKey = `${normalizedPath}::${timestamp ?? ''}::${frameIndex ?? ''}`
   const previewDataUrl = framePreview?.key === previewKey ? framePreview.dataUrl : ''
   const previewError = framePreview?.key === previewKey ? framePreview.error : ''
@@ -839,7 +881,7 @@ function VideoPreview({
   const comparisonLoading = comparisonPreview?.key === comparisonKey
     ? comparisonPreview.loading
     : viewMode === 'comparison'
-      && pathExists
+      && pathReady
       && !comparisonDataUrl
       && !comparisonError
       && Number.isFinite(timestamp ?? Number.NaN)
@@ -848,27 +890,26 @@ function VideoPreview({
     let alive = true
     if (!path) return undefined
 
-    const cached = pathStatusCache.get(path)
+    const cached = mediaPathStatusCache.get(path)
     if (cached) {
-      const timer = window.setTimeout(() => setStatusResult({ path, status: cached.status, error: cached.error }), 0)
+      const timer = window.setTimeout(() => setStatusResult({ path, status: cached, error: '' }), 0)
       return () => window.clearTimeout(timer)
     }
 
-    pathStatus(path)
+    authorizeMediaPath(path)
       .then((nextStatus) => {
-        pathStatusCache.set(path, { status: nextStatus, error: '' })
+        mediaPathStatusCache.set(path, nextStatus)
         if (alive) setStatusResult({ path, status: nextStatus, error: '' })
       })
       .catch((error) => {
         const message = normalizeBackendError(error)
-        pathStatusCache.set(path, { status: null, error: message })
         if (alive) setStatusResult({ path, status: null, error: message })
       })
 
     return () => {
       alive = false
     }
-  }, [path])
+  }, [path, retryVersion])
 
   useEffect(() => {
     const element = videoRef.current
@@ -889,7 +930,7 @@ function VideoPreview({
 
   useEffect(() => {
     let alive = true
-    if (viewMode !== 'original' || !failed || !pathExists || !normalizedPath || !Number.isFinite(timestamp ?? Number.NaN)) return undefined
+    if (viewMode !== 'original' || !failed || !pathReady || !normalizedPath || !Number.isFinite(timestamp ?? Number.NaN)) return undefined
 
     const cached = framePreviewCache.get(previewKey)
     if (cached) {
@@ -911,11 +952,11 @@ function VideoPreview({
     return () => {
       alive = false
     }
-  }, [failed, frameIndex, normalizedPath, pathExists, previewKey, timestamp, viewMode])
+  }, [failed, frameIndex, normalizedPath, pathReady, previewKey, timestamp, viewMode])
 
   useEffect(() => {
     let alive = true
-    if (viewMode !== 'comparison' || !pathExists || !normalizedPath || !Number.isFinite(timestamp ?? Number.NaN)) return undefined
+    if (viewMode !== 'comparison' || !pathReady || !normalizedPath || !Number.isFinite(timestamp ?? Number.NaN)) return undefined
 
     const cached = comparisonFrameCache.get(comparisonKey)
     if (cached) {
@@ -937,7 +978,14 @@ function VideoPreview({
     return () => {
       alive = false
     }
-  }, [comparisonKey, comparisonOptions, frameIndex, normalizedPath, pathExists, timestamp, viewMode])
+  }, [comparisonKey, comparisonOptions, frameIndex, normalizedPath, pathReady, timestamp, viewMode])
+
+  function retryVideoLoad() {
+    mediaPathStatusCache.delete(path)
+    setStatusResult(null)
+    setMediaFailure(null)
+    setRetryVersion((value) => value + 1)
+  }
 
   return (
     <Translated>
@@ -959,11 +1007,12 @@ function VideoPreview({
           ) : (
             <div className="frame-image-missing">
               <Images size={24} />
-              <span>{comparisonLoading ? '正在生成算法视角帧...' : comparisonError ? `算法视角生成失败：${comparisonError}` : videoUnavailableMessage(path, status, false, statusError, '')}</span>
+              <span>{comparisonLoading ? '正在生成算法视角帧...' : comparisonError ? `算法视角生成失败：${comparisonError}` : videoUnavailableMessage(path, status, '', statusError, '')}</span>
             </div>
           )
         ) : src && !failed ? (
           <video
+            key={`${src}::${retryVersion}`}
             ref={videoRef}
             data-side={side}
             src={src}
@@ -972,7 +1021,15 @@ function VideoPreview({
             playsInline
             onPointerDown={onPlaybackFocus}
             onFocus={onPlaybackFocus}
-            onError={() => setFailedPath(normalizedPath)}
+            onCanPlay={() => {
+              setMediaFailure((current) => current?.path === normalizedPath ? null : current)
+              onPlaybackReady()
+            }}
+            onError={(event) => {
+              const message = describeMediaError(event.currentTarget)
+              setMediaFailure({ path: normalizedPath, message })
+              onPlaybackError(`${side === 'source' ? '左侧' : '右侧'}视频加载失败：${message}`)
+            }}
           >
             <track kind="captions" />
           </video>
@@ -981,7 +1038,7 @@ function VideoPreview({
         ) : (
           <div className="frame-image-missing">
             <Film size={24} />
-            <span>{videoUnavailableMessage(path, status, failed, statusError, previewError)}</span>
+            <span>{videoUnavailableMessage(path, status, mediaFailureMessage, statusError, previewError)}</span>
           </div>
         )}
       </div>
@@ -1003,10 +1060,17 @@ function VideoPreview({
           <dt>视角(View)</dt>
           <dd title={viewMode === 'comparison' ? comparisonViewTitle(comparisonOptions) : '原视频播放视角'}>{viewMode === 'comparison' ? '算法视角' : '原视频'}</dd>
         </div>
-        {failed && previewDataUrl && (
-          <div>
+        {(failed || statusError) && (
+          <div className="video-load-diagnostics">
             <dt>预览(Preview)</dt>
-            <dd title="播放器无法加载，已显示帧预览">播放器无法加载，已显示帧预览</dd>
+            <dd title={mediaFailureMessage || statusError}>
+              {previewDataUrl ? '播放器无法加载，已显示帧预览。' : '播放器无法加载。'}
+              {(mediaFailureMessage || statusError) && <small>{mediaFailureMessage || statusError}</small>}
+              <button type="button" onClick={retryVideoLoad}>
+                <RefreshCw size={14} />
+                重新加载
+              </button>
+            </dd>
           </div>
         )}
       </dl>
@@ -1144,12 +1208,27 @@ function isEditableTarget(target: EventTarget | null) {
   return target.isContentEditable || ['input', 'textarea', 'select', 'button'].includes(tagName)
 }
 
-function videoUnavailableMessage(path: string, status: PathStatus | null, failed: boolean, statusError: string, previewError: string) {
+function videoUnavailableMessage(path: string, status: PathStatus | null, failureMessage: string, statusError: string, previewError: string) {
   if (!path) return '报告没有视频路径'
-  if (statusError) return '无法检查视频路径'
+  if (statusError) return `无法授权视频路径：${statusError}`
+  if (!status) return '正在检查并授权视频文件...'
   if (status && !status.exists) return '视频文件不存在'
   if (status && !status.isFile) return '路径不是视频文件'
   if (previewError) return `帧预览失败：${previewError}`
-  if (failed) return '播放器无法加载，正在抽取帧预览'
+  if (failureMessage) return `播放器无法加载，正在抽取帧预览：${failureMessage}`
   return '视频路径不可用'
+}
+
+function describeMediaError(element: HTMLMediaElement) {
+  const error = element.error
+  const labels: Record<number, string> = {
+    1: '加载被中止',
+    2: '网络或文件读取失败',
+    3: '视频解码失败',
+    4: '媒体格式或地址不受支持',
+  }
+  const code = error?.code ?? 0
+  const label = labels[code] ?? '未知媒体错误'
+  const detail = error?.message?.trim()
+  return `MediaError ${code}（${label}）${detail ? `：${detail}` : ''}；networkState=${element.networkState}，readyState=${element.readyState}`
 }

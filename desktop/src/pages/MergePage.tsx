@@ -61,9 +61,12 @@ import {
   type MergeAudioItem,
   type MergeFitMode,
   type MergeQueueItem,
+  type MergeRateControl,
   type MergeRotation,
+  type MergeSettings,
   type MergeSplitMode,
   type MergeTextItem,
+  type MergeVideoEncoder,
 } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -90,6 +93,111 @@ const commonResolutionOptions = [
   { label: '竖屏 1080p', width: 1080, height: 1920 },
   { label: '方形 1080', width: 1080, height: 1080 },
   { label: '标清 480p', width: 854, height: 480 },
+]
+type EncodingPresetSettings = Pick<
+  MergeSettings,
+  | 'width'
+  | 'height'
+  | 'fps'
+  | 'videoEncoder'
+  | 'rateControl'
+  | 'crf'
+  | 'videoBitrate'
+  | 'twoPass'
+  | 'encoderPreset'
+  | 'audioBitrate'
+>
+const encodingPresets: Array<{
+  id: string
+  label: string
+  detail: string
+  settings: EncodingPresetSettings
+}> = [
+  {
+    id: 'standard-1080p30',
+    label: '标准 1080p30',
+    detail: 'H.264 · RF 23 · 质量与速度均衡',
+    settings: {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoEncoder: 'h264',
+      rateControl: 'quality',
+      crf: 23,
+      videoBitrate: 4000,
+      twoPass: false,
+      encoderPreset: 'medium',
+      audioBitrate: 192,
+    },
+  },
+  {
+    id: 'fast-1080p30',
+    label: '快速 1080p30',
+    detail: 'H.264 · RF 22 · 兼容性优先',
+    settings: {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoEncoder: 'h264',
+      rateControl: 'quality',
+      crf: 22,
+      videoBitrate: 4000,
+      twoPass: false,
+      encoderPreset: 'veryfast',
+      audioBitrate: 160,
+    },
+  },
+  {
+    id: 'hq-1080p30',
+    label: '高质量 1080p30',
+    detail: 'H.264 · RF 18 · 细节优先',
+    settings: {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoEncoder: 'h264',
+      rateControl: 'quality',
+      crf: 18,
+      videoBitrate: 6000,
+      twoPass: false,
+      encoderPreset: 'slow',
+      audioBitrate: 192,
+    },
+  },
+  {
+    id: 'small-1080p30',
+    label: '小体积 1080p30',
+    detail: 'H.265 · RF 24 · 空间优先',
+    settings: {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoEncoder: 'h265',
+      rateControl: 'quality',
+      crf: 24,
+      videoBitrate: 3000,
+      twoPass: false,
+      encoderPreset: 'medium',
+      audioBitrate: 128,
+    },
+  },
+  {
+    id: 'fast-720p30',
+    label: '快速 720p30',
+    detail: 'H.264 · RF 22 · 低配置设备',
+    settings: {
+      width: 1280,
+      height: 720,
+      fps: 30,
+      videoEncoder: 'h264',
+      rateControl: 'quality',
+      crf: 22,
+      videoBitrate: 2500,
+      twoPass: false,
+      encoderPreset: 'veryfast',
+      audioBitrate: 128,
+    },
+  },
 ]
 
 interface ClipLayout {
@@ -380,6 +488,17 @@ export function MergePage() {
     (item) => item.width === merge.settings.width && item.height === merge.settings.height,
   ) ? `${merge.settings.width}x${merge.settings.height}` : 'custom'
   const resolutionValue = customResolutionSelected ? 'custom' : matchedResolutionValue
+  const encodingPresetValue = encodingPresets.find(
+    (preset) => Object.entries(preset.settings).every(
+      ([key, value]) => merge.settings[key as keyof EncodingPresetSettings] === value,
+    ),
+  )?.id ?? 'custom'
+  const selectedEncodingPreset = encodingPresets.find((preset) => preset.id === encodingPresetValue)
+  const estimatedOutputSize = merge.settings.rateControl === 'bitrate' && totalDuration > 0
+    ? formatEstimatedSize(
+      totalDuration * (merge.settings.videoBitrate + merge.settings.audioBitrate) / 8 * 1000,
+    )
+    : ''
   const visibleLayouts = activeLayouts.length > 0 ? activeLayouts : previewLayout ? [previewLayout] : []
   const previewLayouts = cropEditing && previewLayout ? [previewLayout] : visibleLayouts
   const previewNormalizedCells = cropEditing
@@ -970,6 +1089,37 @@ export function MergePage() {
       cropY: crop.x,
       cropWidth: crop.height,
       cropHeight: crop.width,
+    })
+  }
+
+  function restoreClipRotation(item: MergeQueueItem) {
+    if (item.rotation === 0) return
+    const info = metadata[normalizePath(item.path)]
+    if (!item.cropEnabled || !info?.readable) {
+      merge.updateVideo(item.id, { rotation: 0 })
+      return
+    }
+
+    let rotation: MergeRotation = item.rotation
+    let dimensions = rotatedDimensions(info.width, info.height, rotation)
+    let crop = cropRectForDimensions(item, dimensions.width, dimensions.height)
+    while (rotation !== 0) {
+      crop = {
+        x: dimensions.height - crop.y - crop.height,
+        y: crop.x,
+        width: crop.height,
+        height: crop.width,
+      }
+      dimensions = { width: dimensions.height, height: dimensions.width }
+      rotation = ((rotation + 90) % 360) as MergeRotation
+    }
+
+    merge.updateVideo(item.id, {
+      rotation: 0,
+      cropX: crop.x,
+      cropY: crop.y,
+      cropWidth: crop.width,
+      cropHeight: crop.height,
     })
   }
 
@@ -1845,12 +1995,14 @@ export function MergePage() {
             )}
             </div>
             {previewClip && cropEditing && (
-              <div className="video-crop-toolbar">
-                <strong><SquareDashedMousePointer />调整视频尺寸</strong>
-                <span>拖动画面重新框选，拖动红框或控制点微调</span>
-                <button type="button" onClick={resetCropSelection}>重置全画面</button>
-                <button type="button" onClick={() => setCropEditing(false)}>完成</button>
-              </div>
+              <button
+                type="button"
+                className="video-crop-reset-button"
+                title="将裁剪框恢复到完整视频画面"
+                onClick={resetCropSelection}
+              >
+                <RotateCcw />重置裁剪框
+              </button>
             )}
             <div className="editor-preview-size-tools">
               <button type="button" title="还原播放窗口默认尺寸" onClick={() => setPreviewSize(defaultPreviewSize)}>
@@ -1919,6 +2071,117 @@ export function MergePage() {
                 <small>也可直接拖动画面；不会允许视频互相覆盖。</small>
               </div>
             )}
+            <div className="editor-encoding-card">
+              <div className="editor-encoding-preset">
+                <label>
+                  <ParameterHint
+                    label="编码预设"
+                    tip="借鉴 HandBrake 的预设工作流：一次选择分辨率、帧率、编码器、质量和音频参数；随后仍可单独修改。"
+                  />
+                  <SelectInput
+                    value={encodingPresetValue}
+                    onChange={(event) => {
+                      const preset = encodingPresets.find((item) => item.id === event.target.value)
+                      if (!preset) return
+                      setCustomResolutionSelected(false)
+                      merge.setSettings(preset.settings)
+                    }}
+                  >
+                    {encodingPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    ))}
+                    <option value="custom" disabled>自定义设置</option>
+                  </SelectInput>
+                </label>
+                <small>
+                  {selectedEncodingPreset?.detail ?? '当前参数已自定义'}
+                  {' · '}实际使用 FFmpeg 渲染，不依赖 HandBrake 安装。
+                </small>
+              </div>
+              <div className="editor-encoding-grid">
+                <label>
+                  <ParameterHint label="视频编码器" tip="H.264 兼容性更广；H.265 通常更省空间，但编码更慢、旧设备兼容性较弱。" />
+                  <SelectInput
+                    value={merge.settings.videoEncoder}
+                    onChange={(event) => merge.setSettings({ videoEncoder: event.target.value as MergeVideoEncoder })}
+                  >
+                    <option value="h264">H.264 (x264)</option>
+                    <option value="h265">H.265 (x265)</option>
+                  </SelectInput>
+                </label>
+                <label>
+                  <ParameterHint
+                    label="码率控制"
+                    tip="恒定质量会按画面复杂度动态分配码率；平均码率用于控制文件大小，建议同时开启两遍编码。"
+                  />
+                  <SelectInput
+                    value={merge.settings.rateControl}
+                    onChange={(event) => {
+                      const rateControl = event.target.value as MergeRateControl
+                      merge.setSettings({ rateControl, twoPass: rateControl === 'bitrate' && merge.settings.twoPass })
+                    }}
+                  >
+                    <option value="quality">恒定质量（推荐）</option>
+                    <option value="bitrate">平均码率</option>
+                  </SelectInput>
+                </label>
+                {merge.settings.rateControl === 'quality' ? (
+                  <NumberField
+                    label="恒定质量 RF"
+                    tip="数值越低画质越高、文件越大。1080p 可从 20–23 开始尝试；该模式无法预先确定文件大小。"
+                    value={merge.settings.crf}
+                    min={0}
+                    max={51}
+                    onChange={(crf) => merge.setSettings({ crf })}
+                  />
+                ) : (
+                  <NumberField
+                    label="视频码率 (kbps)"
+                    tip="平均视频码率决定目标体积。数值越高通常画质越好、文件越大。"
+                    value={merge.settings.videoBitrate}
+                    min={100}
+                    max={100000}
+                    step={100}
+                    onChange={(videoBitrate) => merge.setSettings({ videoBitrate })}
+                  />
+                )}
+                <label>
+                  <ParameterHint label="编码速度" tip="速度越慢通常压缩效率越高；同等画质下文件可能更小，但导出时间更长。" />
+                  <SelectInput
+                    value={merge.settings.encoderPreset}
+                    onChange={(event) => merge.setSettings({ encoderPreset: event.target.value })}
+                  >
+                    <option value="ultrafast">极速</option>
+                    <option value="veryfast">很快</option>
+                    <option value="fast">快速</option>
+                    <option value="medium">均衡</option>
+                    <option value="slow">慢速</option>
+                    <option value="slower">更慢</option>
+                    <option value="veryslow">最慢</option>
+                  </SelectInput>
+                </label>
+                <NumberField
+                  label="音频码率 (kbps)"
+                  tip="音频统一编码为 AAC；语音可用 96–128，普通视频建议 160–192。"
+                  value={merge.settings.audioBitrate}
+                  min={32}
+                  max={512}
+                  step={16}
+                  onChange={(audioBitrate) => merge.setSettings({ audioBitrate })}
+                />
+                {merge.settings.rateControl === 'bitrate' && (
+                  <label className="editor-toggle-row compact editor-two-pass-toggle">
+                    <ParameterHint label="两遍编码" tip="第一遍分析复杂度，第二遍分配码率；目标体积和画质分配更稳定，但耗时接近翻倍。" />
+                    <Toggle checked={merge.settings.twoPass} onChange={(twoPass) => merge.setSettings({ twoPass })} />
+                  </label>
+                )}
+              </div>
+              <div className="editor-encoding-estimate">
+                {merge.settings.rateControl === 'bitrate'
+                  ? `按当前 ${formatPreciseTime(totalDuration)} 时间线估算约 ${estimatedOutputSize || '0 MB'}（含音频，不含少量封装开销）`
+                  : '恒定质量模式：最终大小由画面复杂度决定，无法仅根据源文件大小预先确定。'}
+              </div>
+            </div>
             <div className="editor-advanced-inline">
               <label>
                 <ParameterHint label="画面适配" tip="完整画面会保留整个视频，空余区域使用所选背景色；铺满画布会裁掉超出部分。" />
@@ -1945,14 +2208,6 @@ export function MergePage() {
                 min={1}
                 max={120}
                 onChange={(fps) => merge.setSettings({ fps })}
-              />
-              <NumberField
-                label="画质 CRF"
-                tip="有效设置。H.264 恒定质量参数，数值越低画质越高、文件越大；常用范围 18–28。"
-                value={merge.settings.crf}
-                min={0}
-                max={51}
-                onChange={(crf) => merge.setSettings({ crf })}
               />
               <label>
                 <ParameterHint label="输出分割" tip="有效设置。可把结果按每段时长或指定数量拆成多个 MP4 文件；不分割则生成一个文件。" />
@@ -2087,8 +2342,13 @@ export function MergePage() {
                 <strong>当前预览片段尺寸</strong>
                 <span>{previewClip?.cropEnabled ? `${previewClip.cropWidth} × ${previewClip.cropHeight}，仅显示并导出框内画面` : '当前片段使用完整画面'}</span>
               </div>
-              <button type="button" disabled={!previewClip} onClick={openCropEditor}>
-                <SquareDashedMousePointer />{previewClip?.cropEnabled ? '编辑红框' : '开始调整'}
+              <button
+                type="button"
+                disabled={!previewClip}
+                onClick={() => cropEditing ? setCropEditing(false) : openCropEditor()}
+              >
+                {cropEditing ? <CheckCircle2 /> : <SquareDashedMousePointer />}
+                {cropEditing ? '调整完成' : previewClip?.cropEnabled ? '编辑红框' : '开始调整'}
               </button>
               {previewClip?.cropEnabled && (
                 <button type="button" className="subtle" onClick={() => {
@@ -2551,6 +2811,17 @@ export function MergePage() {
             setClipContextMenu(null)
           }}>
             <RotateCw />向右旋转 90°（默认）
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={clipContextMenu.layout.item.rotation === 0}
+            onClick={() => {
+              restoreClipRotation(clipContextMenu.layout.item)
+              setClipContextMenu(null)
+            }}
+          >
+            <RotateCcw />还原旋转
           </button>
           <button type="button" role="menuitem" onClick={() => {
             const layout = clipContextMenu.layout
@@ -3347,6 +3618,12 @@ function formatPreciseTime(seconds: number) {
   const whole = Math.floor(safe)
   const milliseconds = Math.floor((safe - whole) * 1000)
   return `${formatDuration(whole)}.${String(milliseconds).padStart(3, '0')}`
+}
+
+function formatEstimatedSize(bytes: number) {
+  const safe = Math.max(0, Number.isFinite(bytes) ? bytes : 0)
+  if (safe >= 1_000_000_000) return `${(safe / 1_000_000_000).toFixed(2)} GB`
+  return `${Math.round(safe / 1_000_000)} MB`
 }
 
 function formatTick(seconds: number) {

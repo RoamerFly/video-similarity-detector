@@ -1577,7 +1577,12 @@ function VideoScanRangeSettings() {
         </section>
 
         <section className={enabled.has('resolution') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
-          <h4>分辨率</h4>
+          <h4>
+            <ParameterHint
+              label="分辨率"
+              tip="常用分辨率：480p = 854×480；720p = 1280×720；1080p = 1920×1080；1440p / 2K = 2560×1440；2160p / 4K = 3840×2160；竖屏 1080p = 1080×1920。"
+            />
+          </h4>
           <div className="video-scan-resolution-grid">
             <VideoScanNumberSetting label="最小宽" value={filters.minWidth} min={0} suffix="px" integer disabled={!enabled.has('resolution')} onChange={(value) => settings.setVideoScanFilterValue('minWidth', value)} />
             <VideoScanNumberSetting label="最小高" value={filters.minHeight} min={0} suffix="px" integer disabled={!enabled.has('resolution')} onChange={(value) => settings.setVideoScanFilterValue('minHeight', value)} />
@@ -1587,7 +1592,12 @@ function VideoScanRangeSettings() {
         </section>
 
         <section className={enabled.has('fps') ? 'video-scan-parameter-card' : 'video-scan-parameter-card disabled'}>
-          <h4>帧率</h4>
+          <h4>
+            <ParameterHint
+              label="帧率"
+              tip="常用帧率：23.976 / 24、25、29.97 / 30、50、59.94 / 60、119.88 / 120 fps。筛选小数帧率时，建议在目标值上下保留约 0.5 fps 容差。"
+            />
+          </h4>
           <div className="video-scan-range-row">
             <VideoScanNumberSetting
               label="最低"

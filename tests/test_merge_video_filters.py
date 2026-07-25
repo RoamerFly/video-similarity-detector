@@ -16,6 +16,32 @@ merge_videos = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(merge_videos)
 
 
+def test_video_encoding_args_support_quality_and_average_bitrate():
+    assert merge_videos.video_encoding_args({
+        "videoEncoder": "h264",
+        "rateControl": "quality",
+        "crf": 21,
+        "encoderPreset": "slow",
+    }) == ["-c:v", "libx264", "-preset", "slow", "-crf", "21", "-pix_fmt", "yuv420p"]
+
+    assert merge_videos.video_encoding_args({
+        "videoEncoder": "h265",
+        "rateControl": "bitrate",
+        "videoBitrate": 3500,
+        "encoderPreset": "veryfast",
+    }) == ["-c:v", "libx265", "-preset", "veryfast", "-b:v", "3500k", "-pix_fmt", "yuv420p"]
+
+
+def test_encoding_args_reject_unsupported_values_and_clamp_bitrates():
+    assert merge_videos.video_encoding_args({
+        "videoEncoder": "unknown",
+        "rateControl": "bitrate",
+        "videoBitrate": 999999,
+        "encoderPreset": "not-a-preset",
+    }) == ["-c:v", "libx264", "-preset", "medium", "-b:v", "100000k", "-pix_fmt", "yuv420p"]
+    assert merge_videos.audio_encoding_args({"audioBitrate": 2}) == ["-c:a", "aac", "-b:a", "32k"]
+
+
 def test_rotation_and_clip_crop_are_applied_before_output_scaling():
     metadata = {
         "duration": 10.0,
@@ -265,7 +291,12 @@ def test_real_multitrack_export_produces_expected_canvas_and_audio(tmp_path):
         "splitValue": 600,
         "fps": 30,
         "crf": 23,
+        "videoEncoder": "h264",
+        "rateControl": "bitrate",
+        "videoBitrate": 700,
+        "twoPass": True,
         "encoderPreset": "ultrafast",
+        "audioBitrate": 96,
         "includeAudio": True,
     }, result_path, tmp_path)
 

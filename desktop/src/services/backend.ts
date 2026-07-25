@@ -118,8 +118,13 @@ export interface VideoMergeConfig {
   splitMode: 'none' | 'duration' | 'count'
   splitValue: number
   fps: number
+  videoEncoder: 'h264' | 'h265'
+  rateControl: 'quality' | 'bitrate'
   crf: number
+  videoBitrate: number
+  twoPass: boolean
   encoderPreset: string
+  audioBitrate: number
   includeAudio: boolean
   snapToVideos: boolean
   projectRoot?: string
@@ -775,6 +780,18 @@ export async function pathStatus(path: string): Promise<PathStatus> {
     return { exists: true, isFile: true, normalizedPath: path }
   }
   return invoke<PathStatus>('path_status', {
+    request: { path },
+  })
+}
+
+export async function authorizeMediaPath(path: string): Promise<PathStatus> {
+  if (!path.trim()) {
+    return { exists: false, isFile: false, normalizedPath: '' }
+  }
+  if (!hasTauriRuntime()) {
+    return { exists: true, isFile: true, normalizedPath: path }
+  }
+  return invoke<PathStatus>('authorize_media_path', {
     request: { path },
   })
 }

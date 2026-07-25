@@ -988,8 +988,18 @@ struct VideoMergeConfig {
     split_mode: String,
     split_value: f64,
     fps: u32,
+    #[serde(default = "default_video_encoder")]
+    video_encoder: String,
+    #[serde(default = "default_rate_control")]
+    rate_control: String,
     crf: u32,
+    #[serde(default = "default_video_bitrate")]
+    video_bitrate: u32,
+    #[serde(default)]
+    two_pass: bool,
     encoder_preset: String,
+    #[serde(default = "default_audio_bitrate")]
+    audio_bitrate: u32,
     include_audio: bool,
     #[serde(default = "default_true")]
     snap_to_videos: bool,
@@ -999,6 +1009,22 @@ struct VideoMergeConfig {
 
 fn default_canvas_background() -> String {
     "black".to_string()
+}
+
+fn default_video_encoder() -> String {
+    "h264".to_string()
+}
+
+fn default_rate_control() -> String {
+    "quality".to_string()
+}
+
+fn default_video_bitrate() -> u32 {
+    4000
+}
+
+fn default_audio_bitrate() -> u32 {
+    192
 }
 
 fn default_layout_size() -> f64 {
@@ -1579,13 +1605,26 @@ fn probe_video_metadata_impl(
         return Ok(Vec::new());
     }
 
+    // Write video paths to a temp JSON file to avoid Windows command-line length
+    // limit (32767 chars). Passing hundreds of video paths as CLI arguments
+    // triggers OS error 206 ("文件名或扩展名太长") on Windows.
+    let temp_dir = std::env::temp_dir();
+    let list_file = temp_dir.join(format!("video-sim-metadata-{}.json", timestamp_millis_u64()));
+    let list_json = serde_json::to_string(&resolved_paths)
+        .map_err(|e| format!("序列化视频路径失败: {e}"))?;
+    fs::write(&list_file, list_json)
+        .map_err(|e| format!("写入视频路径临时文件失败: {e}"))?;
+
     let script = r#"
 import json
 import sys
 import cv2
 
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    paths = json.load(f)
+
 rows = []
-for path in sys.argv[1:]:
+for path in paths:
     row = {
         "path": path,
         "width": 0,
@@ -1616,9 +1655,13 @@ for path in sys.argv[1:]:
     rows.append(row)
 print(json.dumps(rows, ensure_ascii=False))
 "#;
-    let mut args = vec!["-c".into(), script.into()];
-    args.extend(resolved_paths);
-    let output = run_capture(&root, &python, args)?;
+    let args = vec!["-c".to_string(), script.to_string(), path_to_string(&list_file)];
+    let result = run_capture(&root, &python, args);
+
+    // Clean up temp file regardless of success or failure
+    let _ = fs::remove_file(&list_file);
+
+    let output = result?;
     if !output.status_success {
         return Err(format!(
             "读取视频信息失败: {}",
@@ -3469,6 +3512,43 @@ fn path_status(app: tauri::AppHandle, request: ReportPathRequest) -> Result<Path
 }
 
 #[tauri::command]
+fn authorize_media_path(
+    app: tauri::AppHandle,
+    request: ReportPathRequest,
+) -> Result<PathStatus, String> {
+    let root = resolve_project_root(&app)?;
+    let raw_path = PathBuf::from(&request.path);
+    let resolved_path = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        root.join(raw_path)
+    };
+    let normalized_path = resolved_path
+        .canonicalize()
+        .unwrap_or_else(|_| resolved_path.clone());
+    let metadata = fs::metadata(&normalized_path).ok();
+    let exists = metadata.is_some();
+    let is_file = metadata.as_ref().is_some_and(|item| item.is_file());
+
+    if is_file {
+        app.asset_protocol_scope()
+            .allow_file(&normalized_path)
+            .map_err(|error| {
+                format!(
+                    "授权播放器访问视频文件失败 {}: {error}",
+                    path_to_string(&normalized_path)
+                )
+            })?;
+    }
+
+    Ok(PathStatus {
+        exists,
+        is_file,
+        normalized_path: path_to_string(normalized_path),
+    })
+}
+
+#[tauri::command]
 fn capture_video_frame(
     app: tauri::AppHandle,
     request: CaptureFrameRequest,
@@ -4566,14 +4646,7 @@ fn open_file(app: tauri::AppHandle, request: ReportPathRequest) -> Result<(), St
 fn reveal_in_folder(app: tauri::AppHandle, request: ReportPathRequest) -> Result<(), String> {
     let root = resolve_project_root(&app)?;
     let path = resolve_user_path(&root, &request.path);
-    let directory = if path.is_dir() {
-        path
-    } else {
-        path.parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| "无法定位文件所在目录".to_string())?
-    };
-    open_os_path(&directory)
+    reveal_os_path(&path)
 }
 
 #[tauri::command]
@@ -4795,6 +4868,7 @@ fn main() {
             read_report,
             read_text_file,
             path_status,
+            authorize_media_path,
             capture_video_frame,
             capture_comparison_frame,
             delete_report,
@@ -5061,9 +5135,17 @@ fn run_capture(root: &Path, python: &str, args: Vec<String>) -> Result<ProcessOu
         command.creation_flags(0x08000000 | 0x00004000);
     }
 
-    let output = command
-        .output()
-        .map_err(|e| format!("无法启动 Python 命令 `{python}`: {e}"))?;
+    let output = command.output().map_err(|e| {
+        if e.raw_os_error() == Some(206) {
+            format!(
+                "无法启动 Python 命令 `{python}`: 文件名或扩展名太长 (os error 206)。\
+                 这通常是因为传入的命令行参数总长度超过了 Windows 的 32767 字符限制，\
+                 而非 Python 可执行文件路径本身过长。请减少单次处理的视频数量。"
+            )
+        } else {
+            format!("无法启动 Python 命令 `{python}`: {e}")
+        }
+    })?;
 
     Ok(ProcessOutput {
         status_success: output.status.success(),
@@ -5835,6 +5917,90 @@ fn open_os_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn reveal_os_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("路径不存在: {}", path.display()));
+    }
+    if path.is_dir() {
+        return open_os_path(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        command.args(windows_reveal_args(path));
+        command
+            .spawn()
+            .map_err(|e| format!("在文件夹中显示失败 {}: {e}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("在 Finder 中显示失败 {}: {e}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let uri = unix_file_uri(path);
+        let shown = Command::new("dbus-send")
+            .args([
+                "--session",
+                "--print-reply",
+                "--reply-timeout=2000",
+                "--dest=org.freedesktop.FileManager1",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+            ])
+            .arg(format!("array:string:{uri}"))
+            .arg("string:")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if shown {
+            return Ok(());
+        }
+
+        let directory = path
+            .parent()
+            .ok_or_else(|| "无法定位文件所在目录".to_string())?;
+        return open_os_path(directory);
+    }
+
+    #[allow(unreachable_code)]
+    Err(format!("当前系统不支持定位文件: {}", path.display()))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_reveal_args(path: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("/select,"),
+        path.as_os_str().to_owned(),
+    ]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_file_uri(path: &Path) -> String {
+    use std::fmt::Write;
+    use std::os::unix::ffi::OsStrExt;
+
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut encoded = String::with_capacity(resolved.as_os_str().as_bytes().len() + 8);
+    for byte in resolved.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    format!("file://{encoded}")
+}
+
 fn kill_process_tree(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let status = Command::new("taskkill")
@@ -6294,6 +6460,22 @@ mod tests {
     };
     use serde_json::json;
     use std::fs;
+    #[cfg(target_os = "windows")]
+    use std::path::Path;
+
+    #[cfg(target_os = "windows")]
+    use super::windows_reveal_args;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reveal_selects_the_exact_target_file() {
+        let path = Path::new(r"C:\视频文件\sample clip.mp4");
+        let args = windows_reveal_args(path);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "/select,");
+        assert_eq!(args[1], path.as_os_str());
+    }
 
     #[test]
     fn task_config_file_keeps_windows_command_line_below_system_limit() {

@@ -6,6 +6,8 @@ export type MergeFitMode = 'contain' | 'cover' | 'stretch'
 export type MergeSplitMode = 'none' | 'duration' | 'count'
 export type MergeRotation = 0 | 90 | 180 | 270
 export type MergeCanvasBackground = 'black' | 'white'
+export type MergeVideoEncoder = 'h264' | 'h265'
+export type MergeRateControl = 'quality' | 'bitrate'
 
 export interface MergeTrack {
   id: string
@@ -69,8 +71,13 @@ export interface MergeSettings {
   splitMode: MergeSplitMode
   splitValue: number
   fps: number
+  videoEncoder: MergeVideoEncoder
+  rateControl: MergeRateControl
   crf: number
+  videoBitrate: number
+  twoPass: boolean
   encoderPreset: string
+  audioBitrate: number
   includeAudio: boolean
   snapToVideos: boolean
 }
@@ -179,8 +186,13 @@ const defaultSettings: MergeSettings = {
   splitMode: 'none',
   splitValue: 600,
   fps: 30,
+  videoEncoder: 'h264',
+  rateControl: 'quality',
   crf: 23,
+  videoBitrate: 4000,
+  twoPass: false,
   encoderPreset: 'medium',
+  audioBitrate: 192,
   includeAudio: true,
   snapToVideos: true,
 }
@@ -694,6 +706,15 @@ function normalizeSettings(settings?: Partial<MergeSettings>): MergeSettings {
     width: Math.max(2, Number(settings?.width) || defaultSettings.width),
     height: Math.max(2, Number(settings?.height) || defaultSettings.height),
     canvasBackground: settings?.canvasBackground === 'white' ? 'white' : 'black',
+    videoEncoder: settings?.videoEncoder === 'h265' ? 'h265' : 'h264',
+    rateControl: settings?.rateControl === 'bitrate' ? 'bitrate' : 'quality',
+    crf: Math.max(
+      0,
+      Math.min(51, Number.isFinite(Number(settings?.crf)) ? Number(settings?.crf) : defaultSettings.crf),
+    ),
+    videoBitrate: Math.max(100, Math.min(100000, Number(settings?.videoBitrate) || defaultSettings.videoBitrate)),
+    twoPass: Boolean(settings?.twoPass),
+    audioBitrate: Math.max(32, Math.min(512, Number(settings?.audioBitrate) || defaultSettings.audioBitrate)),
   }
 }
 
