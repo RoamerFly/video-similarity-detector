@@ -51,6 +51,7 @@ import {
   renameFile,
   normalizeBackendError,
   probeVideoMetadata,
+  listenMetadataProgress,
   revealInFolder,
   runBatchCompare,
   runDuplicateFileCheck,
@@ -97,6 +98,17 @@ interface PendingTaskDraft {
   videos: VideoFile[]
   loadedVideoDir: string
 }
+
+/**
+ * Module-level flag that tracks whether a scan is genuinely in progress.
+ *
+ * Unlike `isScanning` in the zustand store — which can be reset by various
+ * code paths — this variable is only set inside `handleScan` and cleared in
+ * its `finally` block.  It survives component unmount/remount so that when
+ * the user navigates away and back, the mount effect can re-sync
+ * `store.isScanning` with the real scan state.
+ */
+let scanActuallyInProgress = false
 
 export function AnalyzePage() {
   const navigate = useNavigate()
@@ -225,6 +237,27 @@ export function AnalyzePage() {
   }, [errorMessage])
 
   useEffect(() => {
+    let unlisten: (() => void) | undefined
+    listenMetadataProgress((payload) => {
+      const prev = useAnalysisStore.getState().scanMessage || ''
+      const match = prev.match(/^已扫描 (\d+) 个视频/)
+      if (match || scanActuallyInProgress) {
+        const count = match ? match[1] : '...'
+        let msg = `已扫描 ${count} 个视频，${payload.stage}`
+        if (payload.videoName) {
+          msg += `\n正在解析: ${payload.videoName}`
+        }
+        setScanMessage(msg)
+      }
+    }).then((stop) => {
+      if (stop) unlisten = stop
+    })
+    return () => {
+      unlisten?.()
+    }
+  }, [setScanMessage])
+
+  useEffect(() => {
     if (!videoContextMenu) return undefined
     const close = () => setVideoContextMenu(null)
     window.addEventListener('click', close)
@@ -327,16 +360,26 @@ export function AnalyzePage() {
     }
   }, [setAnalysisConfig, setErrorMessage])
 
-  // If the component remounts with isScanning=true from a previous mount,
-  // the scan was interrupted (the async promise is orphaned). Reset to false.
+  // ── Re-sync isScanning on mount ──────────────────────────────────────
+  // When the user navigates away during a scan and comes back, the zustand
+  // store's `isScanning` may have been reset to false by the scan's finally
+  // block (if it completed while the page was unmounted) or by some other
+  // code path.  The module-level `scanActuallyInProgress` flag is the source
+  // of truth: if it is still true the scan is genuinely running, so we
+  // restore `isScanning = true` and a suitable message.  If it is false but
+  // `isScanning` is stuck at true, we clear it.
   useEffect(() => {
-    if (useAnalysisStore.getState().isScanning) {
-      setIsScanning(false)
+    const store = useAnalysisStore.getState()
+    if (scanActuallyInProgress && !store.isScanning) {
+      store.setIsScanning(true)
+      store.setScanMessage(store.scanMessage || '正在扫描视频目录...')
+    } else if (!scanActuallyInProgress && store.isScanning) {
+      store.setIsScanning(false)
     }
-  }, [setIsScanning])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
-    if (useAnalysisStore.getState().runningStatus === 'running') return
     setAnalysisConfig(analysisConfigFromSettings(useSettingsStore.getState()))
   }, [
     settings.videoDir,
@@ -391,6 +434,7 @@ export function AnalyzePage() {
     }
 
     setIsScanning(true)
+    scanActuallyInProgress = true
     setPendingTaskDraft(null)
     setLoadedTaskId('')
     setErrorMessage('')
@@ -422,6 +466,7 @@ export function AnalyzePage() {
       setErrorMessage(message)
       return []
     } finally {
+      scanActuallyInProgress = false
       setIsScanning(false)
     }
   }
@@ -1004,7 +1049,7 @@ export function AnalyzePage() {
       setVideoFileBusy(true)
       setVideoFileAction(`正在重命名 ${target.name}...`)
       try {
-        const result = await renameFile(target.path, trimmed)
+        const result = await renameFile(target.path, trimmed, settings.cacheDir, settings.projectRoot)
         renameScannedVideo(result.oldPath, result.newPath)
         setScanMessage(result.message)
       } catch (error) {
@@ -1371,7 +1416,7 @@ export function AnalyzePage() {
               {isScanning && (
                 <div className="scan-progress-overlay" role="status" aria-live="polite">
                   <RefreshCw size={20} className="spin-slow" />
-                  <span>{scanMessage || '正在扫描视频目录...'}</span>
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{scanMessage || '扫描视频目录...'}</span>
                 </div>
               )}
               {!isScanning && videoFileAction && (
@@ -1390,7 +1435,7 @@ export function AnalyzePage() {
           ) : (
             <div className={isScanning ? 'empty-state-text scan-empty-state is-scanning' : 'empty-state-text'}>
               {isScanning ? <RefreshCw size={22} className="spin-slow" /> : null}
-              <span>{scanMessage}</span>
+              <span style={{ whiteSpace: 'pre-wrap' }}>{scanMessage}</span>
             </div>
           )}
 
@@ -2469,6 +2514,7 @@ async function filterScannedVideos(
   options: {
     projectRoot?: string
     pythonPath?: string
+    cacheDir?: string
     onMetadataStart?: () => void
   } = {},
 ) {
@@ -2502,7 +2548,13 @@ async function filterScannedVideos(
   if (!needsMetadata || next.length === 0) return sortScannedVideos(next, filters)
 
   options.onMetadataStart?.()
-  const metadataRows = await probeVideoMetadata(next.map((video) => video.path), options.projectRoot, options.pythonPath)
+  const metadataRows = await probeVideoMetadata(
+    next.map((video) => video.path),
+    filters.metadataBatchSize,
+    options.projectRoot,
+    options.pythonPath,
+    options.cacheDir
+  )
   const metadataByPath = new Map(metadataRows.map((metadata) => [normalizeVideoPath(metadata.path), metadata]))
   if (hasMetadataFilters(filters)) {
     next = next.filter((video) => metadataMatchesFilters(metadataByPath.get(normalizeVideoPath(video.path)), filters))

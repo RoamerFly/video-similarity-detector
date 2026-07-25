@@ -374,6 +374,7 @@ export interface RenameFileResult {
   oldPath: string
   newPath: string
   message: string
+  cacheMigrated?: boolean
 }
 
 export interface FileMoveStatus {
@@ -675,10 +676,10 @@ export async function scanAnalysisTaskCache(taskId: string, cacheDir: string, pr
   })
 }
 
-export async function probeVideoMetadata(paths: string[], projectRoot?: string, pythonPath?: string) {
+export async function probeVideoMetadata(paths: string[], batchSize?: number, projectRoot?: string, pythonPath?: string, cacheDir?: string) {
   if (!hasTauriRuntime()) return []
   return invoke<VideoMetadata[]>('probe_video_metadata', {
-    request: { paths, projectRoot, pythonPath },
+    request: { paths, batch_size: batchSize, projectRoot, pythonPath, cacheDir },
   })
 }
 
@@ -898,10 +899,10 @@ export async function moveFiles(paths: string[], targetDir: string) {
   })
 }
 
-export async function renameFile(oldPath: string, newName: string) {
+export async function renameFile(oldPath: string, newName: string, cacheDir?: string, projectRoot?: string) {
   if (!hasTauriRuntime()) throw new Error('重命名文件需要在 Tauri 应用中运行。')
   return invoke<RenameFileResult>('rename_file', {
-    request: { oldPath, newName },
+    request: { oldPath, newName, cacheDir: cacheDir ?? '', projectRoot: projectRoot ?? '' },
   })
 }
 
@@ -987,6 +988,13 @@ export async function closeWindow(minimizeToTray: boolean) {
 export async function isWindowMaximized() {
   if (!hasTauriRuntime()) return false
   return invoke<boolean>('is_window_maximized')
+}
+
+export interface MetadataProgressPayload {
+  current: number
+  total: number
+  stage: string
+  videoName?: string
 }
 
 export async function listenAnalysisEvents(handlers: {
@@ -1076,6 +1084,19 @@ export async function listenClipModelInstallProgress(
   if (!hasTauriRuntime()) return () => undefined
   const unlisten = await listen<UpdateDownloadProgress>(
     'clip-model-install-progress',
+    (event) => handler(event.payload),
+  )
+  return () => {
+    unlisten()
+  }
+}
+
+export async function listenMetadataProgress(
+  handler: (payload: MetadataProgressPayload) => void,
+) {
+  if (!hasTauriRuntime()) return () => undefined
+  const unlisten = await listen<MetadataProgressPayload>(
+    'metadata-progress',
     (event) => handler(event.payload),
   )
   return () => {

@@ -426,8 +426,10 @@ struct ScanRequest {
 #[serde(rename_all = "camelCase")]
 struct VideoMetadataRequest {
     paths: Vec<String>,
+    batch_size: Option<usize>,
     project_root: Option<String>,
     python_path: Option<String>,
+    cache_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -449,6 +451,7 @@ struct MetadataProgressPayload {
     current: usize,
     total: usize,
     stage: String,
+    video_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,6 +549,10 @@ struct DeleteFilesRequest {
 struct RenameFileRequest {
     old_path: String,
     new_name: String,
+    #[serde(default)]
+    cache_dir: String,
+    #[serde(default)]
+    project_root: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -554,6 +561,8 @@ struct RenameFileResult {
     old_path: String,
     new_path: String,
     message: String,
+    #[serde(default)]
+    cache_migrated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -1617,36 +1626,80 @@ fn probe_video_metadata_impl(
     app: tauri::AppHandle,
     request: VideoMetadataRequest,
 ) -> Result<Vec<VideoMetadata>, String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use tauri::Manager;
+
     let root = resolve_config_project_root(&app, request.project_root.as_deref())?;
     let python = resolve_python(&app, &root, request.python_path.as_deref());
+    let cache_dir = resolve_user_path(&root, request.cache_dir.as_deref().unwrap_or(".agents"));
+    let video_cache_root = cache_dir.join("video_cache");
+
     let resolved_paths = request
         .paths
         .iter()
         .map(|path| path_to_string(resolve_user_path(&root, path)))
         .collect::<Vec<_>>();
+    
     if resolved_paths.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Batch processing: split video paths into chunks of BATCH_SIZE to avoid
-    // overwhelming a single Python process memory. Each batch writes its own
-    // temp JSON file (also avoids Windows command-line 32767-char limit).
-    // Single-batch failure is non-fatal – we collect what we can and move on.
-    const BATCH_SIZE: usize = 50;
-    let total_batches = (resolved_paths.len() + BATCH_SIZE - 1) / BATCH_SIZE;
     let mut all_results: Vec<VideoMetadata> = Vec::with_capacity(resolved_paths.len());
+    let mut unprobed_paths: Vec<String> = Vec::new();
+    let total_videos = resolved_paths.len();
+
+    // 1. Check cache first
+    for path_str in &resolved_paths {
+        let path = PathBuf::from(path_str);
+        let cache_name = video_cache_dir_name(&path);
+        let metadata_file = video_cache_root.join(&cache_name).join("metadata.json");
+
+        let mut cached = false;
+        if metadata_file.exists() {
+            if let Ok(content) = fs::read_to_string(&metadata_file) {
+                if let Ok(metadata) = serde_json::from_str::<VideoMetadata>(&content) {
+                    all_results.push(metadata);
+                    cached = true;
+                }
+            }
+        }
+        if !cached {
+            unprobed_paths.push(path_str.clone());
+        }
+    }
+
+    if unprobed_paths.is_empty() {
+        // All cached
+        let _ = app.emit(
+            "metadata-progress",
+            MetadataProgressPayload {
+                current: total_videos,
+                total: total_videos,
+                stage: "视频信息读取完成 (命中缓存)".to_string(),
+                video_name: None,
+            },
+        );
+        return Ok(all_results);
+    }
+
+    let batch_size: usize = request.batch_size.unwrap_or(50);
     let temp_dir = std::env::temp_dir();
 
     let script = r#"
 import json
 import sys
 import cv2
+import os
 
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
     paths = json.load(f)
 
 rows = []
-for path in paths:
+for idx, path in enumerate(paths):
+    sys.stdout.write(f"METADATA_PROGRESS|{idx}|{len(paths)}|{path}\n")
+    sys.stdout.flush()
+    
     row = {
         "path": path,
         "width": 0,
@@ -1674,25 +1727,18 @@ for path in paths:
         capture.release()
     except Exception as error:
         row["error"] = str(error)
-    rows.append(row)
-print(json.dumps(rows, ensure_ascii=False))
+    
+    sys.stdout.write(f"METADATA_RESULT|{json.dumps(row, ensure_ascii=False)}\n")
+    sys.stdout.flush()
 "#;
 
     let mut batch_errors: Vec<String> = Vec::new();
+    let unprobed_total = unprobed_paths.len();
+    let mut unprobed_processed = 0;
 
-    for (batch_idx, chunk) in resolved_paths.chunks(BATCH_SIZE).enumerate() {
+    for (batch_idx, chunk) in unprobed_paths.chunks(batch_size).enumerate() {
         let batch_num = batch_idx + 1;
-        let _ = app.emit(
-            "metadata-progress",
-            MetadataProgressPayload {
-                current: batch_num,
-                total: total_batches,
-                stage: format!("正在读取第 {}/{} 批视频信息", batch_num, total_batches),
-            },
-        );
-
-        // Each batch gets its own temp file to keep the payload small and
-        // avoid Windows command-line length issues.
+        
         let list_file = temp_dir.join(format!(
             "video-sim-metadata-{}-{}.json",
             timestamp_millis_u64(),
@@ -1702,69 +1748,105 @@ print(json.dumps(rows, ensure_ascii=False))
             Ok(json) => json,
             Err(e) => {
                 batch_errors.push(format!("第 {batch_num} 批序列化失败: {e}"));
-                let _ = fs::remove_file(&list_file);
                 continue;
             }
         };
         if let Err(e) = fs::write(&list_file, &list_json) {
             batch_errors.push(format!("第 {batch_num} 批写入临时文件失败: {e}"));
-            let _ = fs::remove_file(&list_file);
             continue;
         }
 
+        let mut command = Command::new(&python);
         let args = vec!["-c".to_string(), script.to_string(), path_to_string(&list_file)];
-        let result = run_capture(&root, &python, args);
+        command
+            .current_dir(&root)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000 | 0x00004000);
+        }
 
-        // Clean up temp file regardless of success or failure
-        let _ = fs::remove_file(&list_file);
-
-        match result {
-            Ok(output) if output.status_success => {
-                match serde_json::from_str::<Vec<VideoMetadata>>(output.stdout.trim()) {
-                    Ok(batch_results) => all_results.extend(batch_results),
-                    Err(e) => {
-                        batch_errors.push(format!("第 {batch_num} 批解析失败: {e}"));
+        match command.spawn() {
+            Ok(mut child) => {
+                if let Some(stdout) = child.stdout.take() {
+                    let reader = BufReader::new(stdout);
+                    for line_result in reader.lines() {
+                        if let Ok(line) = line_result {
+                            if line.starts_with("METADATA_PROGRESS|") {
+                                let parts: Vec<&str> = line.splitn(4, '|').collect();
+                                if parts.len() == 4 {
+                                    if let Ok(idx) = parts[1].parse::<usize>() {
+                                        let current_global = all_results.len() + unprobed_processed + idx + 1;
+                                        let path = parts[3];
+                                        let file_name = PathBuf::from(path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                                        
+                                        let _ = app.emit(
+                                            "metadata-progress",
+                                            MetadataProgressPayload {
+                                                current: current_global,
+                                                total: total_videos,
+                                                stage: format!("正在读取参数 (已完成 {}/{}，剩余 {})", current_global, total_videos, total_videos.saturating_sub(current_global)),
+                                                video_name: Some(file_name),
+                                            },
+                                        );
+                                    }
+                                }
+                            } else if line.starts_with("METADATA_RESULT|") {
+                                let json_str = &line["METADATA_RESULT|".len()..];
+                                if let Ok(metadata) = serde_json::from_str::<VideoMetadata>(json_str) {
+                                    // Save cache
+                                    let path = PathBuf::from(&metadata.path);
+                                    let cache_name = video_cache_dir_name(&path);
+                                    let metadata_file = video_cache_root.join(&cache_name).join("metadata.json");
+                                    if let Ok(content) = serde_json::to_string(&metadata) {
+                                        let _ = fs::create_dir_all(metadata_file.parent().unwrap());
+                                        let _ = fs::write(metadata_file, content);
+                                    }
+                                    all_results.push(metadata);
+                                }
+                            }
+                        }
                     }
                 }
-            }
-            Ok(output) => {
-                batch_errors.push(format!(
-                    "第 {batch_num} 批读取失败: {}",
-                    first_non_empty(&output.stderr, &output.stdout)
-                ));
+                let _ = child.wait();
+                unprobed_processed += chunk.len();
             }
             Err(e) => {
                 batch_errors.push(format!("第 {batch_num} 批启动失败: {e}"));
             }
         }
+        let _ = fs::remove_file(&list_file);
     }
 
     let _ = app.emit(
         "metadata-progress",
         MetadataProgressPayload {
-            current: total_batches,
-            total: total_batches,
+            current: total_videos,
+            total: total_videos,
             stage: if batch_errors.is_empty() {
                 "视频信息读取完成".to_string()
             } else {
                 format!("视频信息读取完成（{} 批失败）", batch_errors.len())
             },
+            video_name: None,
         },
     );
 
-    // If ALL batches failed, return error; otherwise return what we have.
     if all_results.is_empty() && !batch_errors.is_empty() {
         return Err(format!(
-            "所有批次均读取失败（共 {total_batches} 批）: {}",
+            "所有批次均读取失败: {}",
             batch_errors.join("; ")
         ));
     }
 
     if !batch_errors.is_empty() {
         eprintln!(
-            "视频元数据探测: {}/{} 批次失败，成功获取 {} 条结果。错误: {}",
+            "视频元数据探测: 失败 {} 批次，成功获取 {} 条结果。错误: {}",
             batch_errors.len(),
-            total_batches,
             all_results.len(),
             batch_errors.join(" | ")
         );
@@ -1772,6 +1854,8 @@ print(json.dumps(rows, ensure_ascii=False))
 
     Ok(all_results)
 }
+
+
 
 fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
     let input_dir = PathBuf::from(request.input_dir);
@@ -4106,6 +4190,14 @@ fn rename_file(request: RenameFileRequest) -> Result<RenameFileResult, String> {
         return Err("源路径不是文件".to_string());
     }
 
+    // Canonicalize old_path BEFORE rename so that the SHA1 digest in
+    // video_cache_dir_name matches Python's `path.resolve(strict=False)`.
+    // canonicalize() resolves symlinks, normalises separators and returns
+    // the real on-disk casing — exactly what Python's resolve() does.
+    let old_path_resolved = old_path
+        .canonicalize()
+        .unwrap_or_else(|_| old_path.clone());
+
     let parent = old_path
         .parent()
         .ok_or_else(|| "无法获取文件所在目录".to_string())?;
@@ -4117,13 +4209,41 @@ fn rename_file(request: RenameFileRequest) -> Result<RenameFileResult, String> {
 
     fs::rename(&old_path, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
 
+    // Canonicalize new_path AFTER rename for the same reason.
+    let new_path_resolved = new_path
+        .canonicalize()
+        .unwrap_or_else(|_| new_path.clone());
+
     let new_path_text = path_to_string(&new_path);
-    let message = format!("已将 \"{}\" 重命名为 \"{}\"", old_path_text, new_path_text);
+
+    // Migrate per-video cache so subsequent analysis can reuse it.
+    let cache_migrated = if !request.cache_dir.is_empty() {
+        let cache_root = if PathBuf::from(&request.cache_dir).is_absolute() {
+            PathBuf::from(&request.cache_dir)
+        } else if !request.project_root.is_empty() {
+            PathBuf::from(&request.project_root).join(&request.cache_dir)
+        } else {
+            PathBuf::from(&request.cache_dir)
+        };
+        migrate_video_cache(&cache_root, &old_path_resolved, &new_path_resolved)
+    } else {
+        false
+    };
+
+    let message = if cache_migrated {
+        format!(
+            "已将 \"{}\" 重命名为 \"{}\"（缓存已同步迁移）",
+            old_path_text, new_path_text
+        )
+    } else {
+        format!("已将 \"{}\" 重命名为 \"{}\"", old_path_text, new_path_text)
+    };
 
     Ok(RenameFileResult {
         old_path: old_path_text,
         new_path: new_path_text,
         message,
+        cache_migrated,
     })
 }
 
@@ -5742,6 +5862,117 @@ fn file_fingerprint(path: &Path) -> Result<String, String> {
     }
 
     Ok(format!("{length:016x}{hash_a:016x}{hash_b:016x}"))
+}
+
+/// Replicate Python's `_safe_cache_name`: replace non-alphanumeric chars
+/// (except `-`, `_`, `.`) with `_`, then strip leading/trailing `.` and `_`.
+fn safe_cache_name(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let result = cleaned.trim_matches(|c| c == '.' || c == '_').to_string();
+    if result.is_empty() {
+        "video".to_string()
+    } else {
+        result
+    }
+}
+
+/// Replicate Python's `get_video_cache_dir` naming logic:
+/// `{stem}_{sha1(resolve(path).casefold())[:12]}`
+fn video_cache_dir_name(path: &Path) -> String {
+    let stem = safe_cache_name(
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("video"),
+    );
+    let identity = normalize_display_path(&path.to_string_lossy()).to_lowercase();
+    let digest = {
+        use sha1::{Digest, Sha1};
+        let mut hasher = Sha1::new();
+        hasher.update(identity.as_bytes());
+        hasher.finalize()
+    };
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let digest_prefix = &hex[..12.min(hex.len())];
+    format!("{stem}_{digest_prefix}")
+}
+
+/// Rename the per-video cache directory and legacy embeddings file when a
+/// video is renamed, so that subsequent analysis runs can reuse the cache.
+fn migrate_video_cache(
+    cache_dir: &Path,
+    old_path: &Path,
+    new_path: &Path,
+) -> bool {
+    let mut migrated = false;
+
+    // 1. Rename video_cache/{old_name} → video_cache/{new_name}
+    let video_cache_root = cache_dir.join("video_cache");
+    let old_cache_name = video_cache_dir_name(old_path);
+    let new_cache_name = video_cache_dir_name(new_path);
+    let old_cache_dir = video_cache_root.join(&old_cache_name);
+    let new_cache_dir = video_cache_root.join(&new_cache_name);
+
+    if old_cache_dir != new_cache_dir && old_cache_dir.is_dir() {
+        if new_cache_dir.exists() {
+            // New cache already exists (unlikely). Remove old to avoid waste.
+            let _ = fs::remove_dir_all(&old_cache_dir);
+        } else if let Err(e) = fs::rename(&old_cache_dir, &new_cache_dir) {
+            eprintln!("rename video_cache dir failed: {e}");
+        } else {
+            migrated = true;
+        }
+    }
+
+    // 2. Rename legacy embeddings/{old_stem}*.npz → {new_stem}*.npz
+    let embeddings_dir = cache_dir.join("embeddings");
+    if embeddings_dir.is_dir() {
+        let old_stem = safe_cache_name(
+            old_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("video"),
+        );
+        let new_stem = safe_cache_name(
+            new_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("video"),
+        );
+        if old_stem != new_stem {
+            if let Ok(entries) = fs::read_dir(&embeddings_dir) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    let file_name = match entry_path.file_name().and_then(|s| s.to_str()) {
+                        Some(name) => name.to_string(),
+                        None => continue,
+                    };
+                    if file_name.starts_with(&format!("{old_stem}")) && file_name.ends_with(".npz") {
+                        let suffix = &file_name[old_stem.len()..];
+                        let new_file_name = format!("{new_stem}{suffix}");
+                        let new_entry_path = embeddings_dir.join(&new_file_name);
+                        if !new_entry_path.exists() {
+                            if let Err(e) = fs::rename(&entry_path, &new_entry_path) {
+                                eprintln!("rename embeddings file failed: {e}");
+                            } else {
+                                migrated = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    migrated
 }
 
 fn duplicate_report_csv(report: &Value) -> String {
