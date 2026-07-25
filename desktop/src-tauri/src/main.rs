@@ -541,6 +541,21 @@ struct DeleteFilesRequest {
     paths: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameFileRequest {
+    old_path: String,
+    new_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameFileResult {
+    old_path: String,
+    new_path: String,
+    message: String,
+}
+
 #[derive(Clone, Default)]
 struct FileMoveState {
     inner: Arc<FileMoveStateInner>,
@@ -4061,6 +4076,58 @@ fn delete_files(request: DeleteFilesRequest) -> Result<DeleteFilesResult, String
 }
 
 #[tauri::command]
+fn rename_file(request: RenameFileRequest) -> Result<RenameFileResult, String> {
+    let old_path_text = normalize_display_path(request.old_path.trim()).trim().to_string();
+    if old_path_text.is_empty() {
+        return Err("文件路径不能为空".to_string());
+    }
+
+    let new_name = request.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err("新文件名不能为空".to_string());
+    }
+
+    let illegal_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    if new_name.chars().any(|c| illegal_chars.contains(&c)) {
+        return Err(format!(
+            "文件名包含非法字符: {}",
+            illegal_chars.iter().collect::<String>()
+        ));
+    }
+
+    if new_name.contains(std::path::MAIN_SEPARATOR) {
+        return Err("新文件名不能包含路径分隔符".to_string());
+    }
+
+    let old_path = PathBuf::from(&old_path_text);
+
+    let metadata = fs::metadata(&old_path).map_err(|e| format!("无法访问源文件: {e}"))?;
+    if !metadata.is_file() {
+        return Err("源路径不是文件".to_string());
+    }
+
+    let parent = old_path
+        .parent()
+        .ok_or_else(|| "无法获取文件所在目录".to_string())?;
+    let new_path = parent.join(&new_name);
+
+    if new_path.exists() && new_path != old_path {
+        return Err(format!("目标文件已存在: {}", path_to_string(&new_path)));
+    }
+
+    fs::rename(&old_path, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
+
+    let new_path_text = path_to_string(&new_path);
+    let message = format!("已将 \"{}\" 重命名为 \"{}\"", old_path_text, new_path_text);
+
+    Ok(RenameFileResult {
+        old_path: old_path_text,
+        new_path: new_path_text,
+        message,
+    })
+}
+
+#[tauri::command]
 async fn move_files(
     state: State<'_, FileMoveState>,
     request: MoveFilesRequest,
@@ -4961,6 +5028,7 @@ fn main() {
             delete_report,
             update_report_entries,
             delete_files,
+            rename_file,
             move_files,
             cancel_move_files,
             get_file_move_status,

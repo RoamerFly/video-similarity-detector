@@ -39,6 +39,10 @@ interface AnalysisState {
   report: BatchReport | null
   errorMessage: string
   activeTaskId: string
+  selectedVideoPaths: Set<string>
+  videoMultiSelect: boolean
+  isScanning: boolean
+  activeSubpage: 'analysis' | 'history'
   setAnalysisConfig: (config: Partial<AnalysisConfig>) => void
   setRunningStatus: (status: RunningStatus) => void
   setProgress: (progress: number, stage?: string, subTask?: { subProgress?: number | null; subStage?: string | null }) => void
@@ -53,6 +57,11 @@ interface AnalysisState {
   setReport: (report: BatchReport | null) => void
   setErrorMessage: (message: string) => void
   setActiveTaskId: (taskId: string) => void
+  setSelectedVideoPaths: (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => void
+  setVideoMultiSelect: (enabled: boolean) => void
+  setIsScanning: (scanning: boolean) => void
+  setActiveSubpage: (subpage: 'analysis' | 'history') => void
+  renameScannedVideo: (oldPath: string, newPath: string) => void
   resetRunState: () => void
 }
 
@@ -106,6 +115,10 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   report: null,
   errorMessage: '',
   activeTaskId: '',
+  selectedVideoPaths: new Set<string>(),
+  videoMultiSelect: false,
+  isScanning: false,
+  activeSubpage: 'analysis',
 
   setAnalysisConfig: (config) =>
     set((state) => ({
@@ -180,6 +193,35 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   setReport: (report) => set({ report }),
   setErrorMessage: (errorMessage) => set({ errorMessage }),
   setActiveTaskId: (activeTaskId) => set({ activeTaskId }),
+  setSelectedVideoPaths: (updater) =>
+    set((state) => ({
+      selectedVideoPaths:
+        typeof updater === 'function' ? updater(state.selectedVideoPaths) : updater,
+    })),
+  setVideoMultiSelect: (videoMultiSelect) => set({ videoMultiSelect }),
+  setIsScanning: (isScanning) => set({ isScanning }),
+  setActiveSubpage: (activeSubpage) => set({ activeSubpage }),
+  renameScannedVideo: (oldPath, newPath) =>
+    set((state) => {
+      const normalizedOld = normalizeVideoPath(oldPath)
+      const normalizedNew = normalizeVideoPath(newPath)
+      const fileName = newPath.split(/[\\/]/).filter(Boolean).pop() ?? newPath
+      const dotIndex = fileName.lastIndexOf('.')
+      const extension = dotIndex >= 0 ? fileName.slice(dotIndex + 1).toLowerCase() : ''
+      const scannedVideos = state.scannedVideos.map((video) =>
+        normalizeVideoPath(video.path) === normalizedOld
+          ? { ...video, path: newPath, name: fileName, extension }
+          : video,
+      )
+      let selectedVideoPaths = state.selectedVideoPaths
+      if (selectedVideoPaths.has(normalizedOld)) {
+        const next = new Set(selectedVideoPaths)
+        next.delete(normalizedOld)
+        next.add(normalizedNew)
+        selectedVideoPaths = next
+      }
+      return { scannedVideos, selectedVideoPaths }
+    }),
   resetRunState: () =>
     set({
       runningStatus: 'idle',
@@ -201,6 +243,10 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       report: null,
       errorMessage: '',
       activeTaskId: '',
+      selectedVideoPaths: new Set<string>(),
+      videoMultiSelect: false,
+      isScanning: false,
+      activeSubpage: 'analysis',
     }),
 }))
 

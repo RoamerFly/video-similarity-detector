@@ -22,6 +22,7 @@ import {
   ListPlus,
   ListChecks,
   Pause,
+  Pencil,
   Play,
   RefreshCw,
   RotateCcw,
@@ -47,6 +48,7 @@ import {
   getAppInfo,
   listAnalysisTasks,
   moveFiles,
+  renameFile,
   normalizeBackendError,
   probeVideoMetadata,
   revealInFolder,
@@ -126,6 +128,15 @@ export function AnalyzePage() {
     setActiveTaskId,
     setReport,
     setResultSummary,
+    selectedVideoPaths,
+    videoMultiSelect,
+    isScanning,
+    activeSubpage,
+    setSelectedVideoPaths,
+    setVideoMultiSelect,
+    setIsScanning,
+    setActiveSubpage,
+    renameScannedVideo,
   } = useAnalysisStore()
   const [isPreparing, setIsPreparing] = useState(false)
   const [isLogDrawerOpen, setIsLogDrawerOpen] = useState(false)
@@ -135,7 +146,7 @@ export function AnalyzePage() {
   const [historyTasks, setHistoryTasks] = useState<AnalysisTaskRecord[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyReady, setHistoryReady] = useState(false)
-  const [activeSubpage, setActiveSubpage] = useState<'analysis' | 'history'>('analysis')
+
   const [detailTask, setDetailTask] = useState<AnalysisTaskRecord | null>(null)
   const [stageTaskId, setStageTaskId] = useState('')
   const [cacheTaskId, setCacheTaskId] = useState('')
@@ -143,21 +154,20 @@ export function AnalyzePage() {
   const [taskCacheScan, setTaskCacheScan] = useState<CacheScanResult | null>(null)
   const [selectedTaskCachePaths, setSelectedTaskCachePaths] = useState<Set<string>>(() => new Set())
   const [taskCacheBusy, setTaskCacheBusy] = useState(false)
-  const [videoMultiSelect, setVideoMultiSelect] = useState(false)
-  const [selectedVideoPaths, setSelectedVideoPaths] = useState<Set<string>>(() => new Set())
+
+
   const [videoContextMenu, setVideoContextMenu] = useState<VideoContextMenuState | null>(null)
   const [videoFileBusy, setVideoFileBusy] = useState(false)
   const [videoFileAction, setVideoFileAction] = useState('')
   const [isMovingFiles, setIsMovingFiles] = useState(false)
   const [movingVideoTargets, setMovingVideoTargets] = useState<VideoFile[]>([])
-  const [isScanning, setIsScanning] = useState(false)
+
   const [pendingTaskDraft, setPendingTaskDraft] = useState<PendingTaskDraft | null>(null)
   const [taskCreateDialogOpen, setTaskCreateDialogOpen] = useState(false)
   const [loadedTaskId, setLoadedTaskId] = useState('')
   const [taskLoadDialogOpen, setTaskLoadDialogOpen] = useState(false)
   const pauseRequestedTaskId = useRef('')
   const historyRefreshInFlight = useRef(false)
-  const scanInFlight = useRef(false)
   const isRunning = runningStatus === 'running'
   const isBusy = isRunning || isPreparing
   const latestLog = logs[logs.length - 1]
@@ -317,6 +327,14 @@ export function AnalyzePage() {
     }
   }, [setAnalysisConfig, setErrorMessage])
 
+  // If the component remounts with isScanning=true from a previous mount,
+  // the scan was interrupted (the async promise is orphaned). Reset to false.
+  useEffect(() => {
+    if (useAnalysisStore.getState().isScanning) {
+      setIsScanning(false)
+    }
+  }, [setIsScanning])
+
   useEffect(() => {
     if (useAnalysisStore.getState().runningStatus === 'running') return
     setAnalysisConfig(analysisConfigFromSettings(useSettingsStore.getState()))
@@ -362,7 +380,7 @@ export function AnalyzePage() {
   }, [clockNow, displayedStages, displayedTask])
 
   async function handleScan(dir = settings.videoDir) {
-    if (scanInFlight.current) {
+    if (useAnalysisStore.getState().isScanning) {
       setScanMessage('正在扫描视频目录，请稍候...')
       return videos
     }
@@ -372,7 +390,6 @@ export function AnalyzePage() {
       return []
     }
 
-    scanInFlight.current = true
     setIsScanning(true)
     setPendingTaskDraft(null)
     setLoadedTaskId('')
@@ -405,7 +422,6 @@ export function AnalyzePage() {
       setErrorMessage(message)
       return []
     } finally {
-      scanInFlight.current = false
       setIsScanning(false)
     }
   }
@@ -971,6 +987,35 @@ export function AnalyzePage() {
     }
   }
 
+  async function renameVideoFiles(targets: VideoFile[]) {
+    if (targets.length === 0 || videoFileBusy) return
+    setVideoContextMenu(null)
+    setErrorMessage('')
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i]
+      const currentName = target.name
+      const prompt = targets.length > 1
+        ? `重命名视频文件（${i + 1}/${targets.length}）：`
+        : '重命名视频文件：'
+      const newName = window.prompt(prompt, currentName)
+      if (newName === null) continue
+      const trimmed = newName.trim()
+      if (!trimmed || trimmed === currentName) continue
+      setVideoFileBusy(true)
+      setVideoFileAction(`正在重命名 ${target.name}...`)
+      try {
+        const result = await renameFile(target.path, trimmed)
+        renameScannedVideo(result.oldPath, result.newPath)
+        setScanMessage(result.message)
+      } catch (error) {
+        setErrorMessage(`重命名失败：${normalizeBackendError(error)}`)
+      } finally {
+        setVideoFileBusy(false)
+        setVideoFileAction('')
+      }
+    }
+  }
+
   function addVideosToMergeList(targets: VideoFile[]) {
     if (targets.length === 0) return
     setVideoContextMenu(null)
@@ -1280,7 +1325,7 @@ export function AnalyzePage() {
                     type="button"
                     className={videoMultiSelect ? 'active' : ''}
                     onClick={() => {
-                      setVideoMultiSelect((current) => !current)
+                      setVideoMultiSelect(!videoMultiSelect)
                       setSelectedVideoPaths(new Set())
                     }}
                     disabled={videoFileBusy}
@@ -1501,6 +1546,10 @@ export function AnalyzePage() {
           <button type="button" role="menuitem" onClick={() => void moveVideoFiles(selectedVideosForAction(videoContextMenu.video))} disabled={videoFileBusy}>
             <FolderOpen size={15} />
             移动到目录
+          </button>
+          <button type="button" role="menuitem" onClick={() => void renameVideoFiles(selectedVideosForAction(videoContextMenu.video))} disabled={videoFileBusy}>
+            <Pencil size={15} />
+            重命名
           </button>
           <button type="button" role="menuitem" onClick={() => addVideosToMergeList(selectedVideosForAction(videoContextMenu.video))}>
             <ListPlus size={15} />

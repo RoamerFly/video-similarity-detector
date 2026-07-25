@@ -370,6 +370,12 @@ export interface MoveFilesResult {
   message: string
 }
 
+export interface RenameFileResult {
+  oldPath: string
+  newPath: string
+  message: string
+}
+
 export interface FileMoveStatus {
   running: boolean
   cancelRequested: boolean
@@ -889,6 +895,13 @@ export async function moveFiles(paths: string[], targetDir: string) {
   if (!hasTauriRuntime()) return { movedPaths: [], failed: [], message: '移动文件需要在 Tauri 应用中运行。' }
   return invoke<MoveFilesResult>('move_files', {
     request: { paths, targetDir },
+  })
+}
+
+export async function renameFile(oldPath: string, newName: string) {
+  if (!hasTauriRuntime()) throw new Error('重命名文件需要在 Tauri 应用中运行。')
+  return invoke<RenameFileResult>('rename_file', {
+    request: { oldPath, newName },
   })
 }
 
