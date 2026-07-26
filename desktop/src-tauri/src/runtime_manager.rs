@@ -220,11 +220,6 @@ pub fn python_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
 
 fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
     let flavor = detect_build_flavor();
-    let compatibility_issue = if flavor == "gpu" {
-        cuda_13_compatibility_issue()
-    } else {
-        None
-    };
     let expected_version = expected_version();
     let root = storage_root(app)?;
     let runtime_dir = root.join("env");
@@ -239,7 +234,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             .as_ref()
             .filter(|legacy| !paths_equivalent(legacy, &runtime_dir));
         return Ok(RuntimeStatus {
-            ready: version_matches && compatibility_issue.is_none(),
+            ready: version_matches,
             managed: true,
             legacy_fallback: false,
             legacy_migration_available: false,
@@ -253,9 +248,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             runtime_dir: display_path(&runtime_dir),
             python_path: display_path(&python),
             asset_name,
-            message: if let Some(issue) = compatibility_issue {
-                issue
-            } else if version_matches {
+            message: if version_matches {
                 "env 运行环境已就绪。".to_string()
             } else {
                 "检测到运行环境文件，但版本清单缺失或不匹配，请重新安装。".to_string()
@@ -272,7 +265,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             .as_ref()
             .is_some_and(|safe| legacy_env.as_ref().is_some_and(|found| found == safe));
         return Ok(RuntimeStatus {
-            ready: compatibility_issue.is_none(),
+            ready: true,
             managed: false,
             legacy_fallback: true,
             legacy_migration_available: migration_available,
@@ -284,9 +277,8 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             runtime_dir: display_path(&runtime_dir),
             python_path: display_path(&python),
             asset_name,
-            message: compatibility_issue.unwrap_or_else(|| {
-                "已检测到安装目录中的旧版 env；可就地登记并继续使用，无需重新下载。".to_string()
-            }),
+            message: "已检测到安装目录中的旧版 env；可就地登记并继续使用，无需重新下载。"
+                .to_string(),
         });
     }
 
@@ -303,9 +295,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
         runtime_dir: display_path(&runtime_dir),
         python_path: String::new(),
         asset_name,
-        message: compatibility_issue.unwrap_or_else(|| {
-            "尚未安装 AI 运行环境。应用本体保持轻量，首次使用前需下载一次。".to_string()
-        }),
+        message: "尚未安装 AI 运行环境。应用本体保持轻量，首次使用前需下载一次。".to_string(),
     })
 }
 
@@ -1033,13 +1023,17 @@ fn cuda_13_compatibility_issue() -> Option<String> {
     if !cfg!(target_os = "windows") {
         return Some("CUDA 13.0 GPU 运行环境目前仅支持 Windows x64。".to_string());
     }
-    let output = match Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=compute_cap,driver_version",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=compute_cap,driver_version",
+        "--format=csv,noheader,nounits",
+    ]);
+    #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = match command.output() {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();

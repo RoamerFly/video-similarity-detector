@@ -29,6 +29,8 @@ macOS/Linux 的可写数据根目录采用相同的 `env/`、`models/` 和 `data
 
 Windows GPU runtime 固定使用 PyTorch 的 CUDA 13.0 构建。下载前会通过 `nvidia-smi` 检查主 GPU：要求 Turing 或更新架构（计算能力 7.5+）以及 R580 或更新驱动。不满足条件时会停止大文件下载并提示改用 CPU 包。
 
+普通启动和运行环境状态刷新只检查本地文件与版本清单，不执行 `nvidia-smi`。GPU 兼容性探测仅在用户安装或登记 GPU runtime 时执行；Windows 子进程使用无控制台窗口模式。
+
 旧版本安装目录中的 `env` 若仍保留在当前可执行文件旁，会被自动识别并立即兼容使用。Windows 设置页的“就地登记”只在现有 `env` 内写入 `.runtime.json`，不会移动或复制大型文件，也不会重新下载。macOS/Linux 若检测到旧包体旁的环境，则迁移到平台可写数据目录。
 
 ## 发布资产

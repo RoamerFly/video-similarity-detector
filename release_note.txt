@@ -21,6 +21,7 @@
 - 修复 macOS/Linux 独立 runtime 解压后可能丢失 Unix 可执行权限的问题。
 - Windows CUDA 13.0 runtime 固定使用 PyTorch 2.9.1，并在构建时校验依赖版本，避免复用本地错误环境造成包体膨胀；GPU runtime 保持为小于 GitHub 2 GiB 限制的单个 ZIP。
 - 修复 Intel macOS 运行环境中 NumPy 与 OpenCV 版本不兼容、导致依赖安装失败的问题。
+- 修复 Windows GPU 版启动时长时间显示白页、界面卡顿以及黑色命令窗口闪现的问题。
 
 ## 下载建议
 
