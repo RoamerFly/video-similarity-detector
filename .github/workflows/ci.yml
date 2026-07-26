@@ -94,17 +94,40 @@ jobs:
           $payloadRoot = Join-Path $smokeRoot "payload"
           $payloadZip = Join-Path $smokeRoot "payload.zip"
           $updaterExe = Join-Path $smokeRoot "updater.exe"
+          $installRoot = Join-Path $smokeRoot "installed"
           New-Item -ItemType Directory -Force $payloadRoot | Out-Null
-          Set-Content -LiteralPath (Join-Path $payloadRoot "smoke.txt") -Value "ok" -Encoding ASCII
+          foreach ($directory in @("scripts", "video_sim")) {
+            New-Item -ItemType Directory -Force (Join-Path $payloadRoot $directory) | Out-Null
+          }
+          Copy-Item -LiteralPath "$env:WINDIR\System32\where.exe" `
+            -Destination (Join-Path $payloadRoot "video-similarity-desktop.exe")
+          Set-Content -LiteralPath (Join-Path $payloadRoot "scripts\new.txt") -Value "new" -Encoding ASCII
+          Set-Content -LiteralPath (Join-Path $payloadRoot "video_sim\new.txt") -Value "new" -Encoding ASCII
           Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
           & ".\scripts\build-windows-self-extractor.ps1" `
             -PayloadZip $payloadZip `
             -OutputExe $updaterExe `
             -DisplayName "Video Similarity" `
-            -InstallFolderName "Video Similarity" `
-            -PreserveRuntimeOnUpdate
+            -InstallFolderName "Video Similarity"
           if (!(Test-Path -LiteralPath $updaterExe -PathType Leaf)) {
             throw "Windows updater packager smoke test did not create updater.exe."
+          }
+          foreach ($directory in @("env", "models", "data")) {
+            New-Item -ItemType Directory -Force (Join-Path $installRoot $directory) | Out-Null
+            Set-Content -LiteralPath (Join-Path $installRoot "$directory\preserved.txt") `
+              -Value "preserved" -Encoding ASCII
+          }
+          $process = Start-Process -FilePath $updaterExe -ArgumentList @(
+            "--target", "`"$installRoot`"", "--update", "--auto-start", "--auto-close",
+            "--no-launch", "--no-shortcuts"
+          ) -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Windows updater preservation smoke test failed with exit code $($process.ExitCode)."
+          }
+          foreach ($directory in @("env", "models", "data")) {
+            if (!(Test-Path -LiteralPath (Join-Path $installRoot "$directory\preserved.txt"))) {
+              throw "Windows updater removed the preserved $directory directory."
+            }
           }
 
       - name: Set up Rust

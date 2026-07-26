@@ -1075,7 +1075,7 @@ Output structure:
 
 Run:
 1. Double-click run-video-similarity.bat or video-similarity-desktop.exe.
-2. On first launch, install the versioned runtime into the app-local data directory when prompted.
+2. On first launch, install the runtime into env\ beside the executable when prompted.
 3. Future app updates reuse that runtime instead of downloading it again.
 
 Acceptance:

@@ -138,7 +138,7 @@ pub async fn migrate_legacy_runtime(
     emit_progress(&app, 0, 0, 100.0, "旧版运行环境迁移完成");
     let mut status = runtime_status(&app)?;
     status.message = if legacy_removed {
-        "旧版运行环境已迁移到应用数据目录，无需重新下载。".to_string()
+        "旧版运行环境已就地登记或完成迁移，无需重新下载。".to_string()
     } else {
         "运行环境已迁移完成，但旧目录未能自动删除；可在设置中重试清理。".to_string()
     };
@@ -172,7 +172,7 @@ pub async fn remove_legacy_runtime(
 }
 
 pub fn asset_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app_local_root(app)?.join("assets"))
+    storage_root(app)
 }
 
 pub fn configure_environment(app: &tauri::AppHandle) -> Result<(), String> {
@@ -204,17 +204,10 @@ pub fn configure_environment(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn python_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
-    let flavor = detect_build_flavor();
-    let version = expected_version();
     let mut candidates = Vec::new();
 
-    if let Ok(root) = app_local_root(app) {
-        let managed = root
-            .join("runtime")
-            .join("versions")
-            .join(version)
-            .join(flavor);
-        candidates.extend(python_candidates_below(&managed));
+    if let Ok(root) = storage_root(app) {
+        candidates.extend(python_candidates_below(&root));
     }
 
     candidates.extend(
@@ -233,32 +226,29 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
         None
     };
     let expected_version = expected_version();
-    let runtime_dir = app_local_root(app)?
-        .join("runtime")
-        .join("versions")
-        .join(&expected_version)
-        .join(&flavor);
+    let root = storage_root(app)?;
+    let runtime_dir = root.join("env");
     let asset_name = runtime_asset_name(&expected_version, &flavor);
-    let managed_python = first_existing_python(&runtime_dir);
+    let managed_python = first_existing_python(&root);
     let manifest = read_manifest(&runtime_dir.join(".runtime.json"));
     let safe_legacy_dir = safe_legacy_runtime_dir(app);
 
-    if let Some(python) = managed_python {
-        let version_matches = manifest
+    if let (Some(python), Some(manifest)) = (managed_python, manifest.as_ref()) {
+        let version_matches = manifest.version.eq(&expected_version) && manifest.flavor == flavor;
+        let cleanup_legacy = safe_legacy_dir
             .as_ref()
-            .is_some_and(|value| value.version == expected_version && value.flavor == flavor);
+            .filter(|legacy| !paths_equivalent(legacy, &runtime_dir));
         return Ok(RuntimeStatus {
             ready: version_matches && compatibility_issue.is_none(),
             managed: true,
             legacy_fallback: false,
             legacy_migration_available: false,
-            legacy_cleanup_available: safe_legacy_dir.is_some(),
-            legacy_runtime_dir: safe_legacy_dir
-                .as_deref()
-                .map(display_path)
+            legacy_cleanup_available: cleanup_legacy.is_some(),
+            legacy_runtime_dir: cleanup_legacy
+                .map(|path| display_path(path))
                 .unwrap_or_default(),
             expected_version,
-            installed_version: manifest.as_ref().map(|value| value.version.clone()),
+            installed_version: Some(manifest.version.clone()),
             flavor,
             runtime_dir: display_path(&runtime_dir),
             python_path: display_path(&python),
@@ -266,7 +256,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             message: if let Some(issue) = compatibility_issue {
                 issue
             } else if version_matches {
-                "应用数据目录中的运行环境已就绪。".to_string()
+                "env 运行环境已就绪。".to_string()
             } else {
                 "检测到运行环境文件，但版本清单缺失或不匹配，请重新安装。".to_string()
             },
@@ -295,7 +285,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             python_path: display_path(&python),
             asset_name,
             message: compatibility_issue.unwrap_or_else(|| {
-                "正在兼容使用旧版内置运行环境；可迁移到应用数据目录完成升级。".to_string()
+                "已检测到安装目录中的旧版 env；可就地登记并继续使用，无需重新下载。".to_string()
             }),
         });
     }
@@ -327,20 +317,36 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
         ensure_cuda_13_compatible()?;
     }
     let version = expected_version();
-    let runtime_root = app_local_root(app)?.join("runtime");
-    let target = runtime_root.join("versions").join(&version).join(&flavor);
+    let runtime_root = storage_root(app)?;
+    let target = runtime_root.join("env");
+
+    if paths_equivalent(&source, &target) {
+        if first_existing_python(&runtime_root).is_none() {
+            return Err("旧版运行环境校验失败：未找到 Python 可执行文件。".to_string());
+        }
+        write_runtime_manifest(
+            &target,
+            RuntimeManifest {
+                version,
+                flavor,
+                asset_name: "legacy-local-registration".to_string(),
+                sha256: "local-registration".to_string(),
+                installed_at_ms: timestamp_millis(),
+            },
+        )?;
+        return Ok(true);
+    }
 
     if target.exists()
-        && first_existing_python(&target).is_some()
+        && first_existing_python(&runtime_root).is_some()
         && read_manifest(&target.join(".runtime.json"))
             .is_some_and(|manifest| manifest.version == version && manifest.flavor == flavor)
     {
-        return remove_legacy_directory(&source, &runtime_root).map(|_| true);
+        return remove_legacy_directory(&source, &target).map(|_| true);
     }
 
-    fs::create_dir_all(&runtime_root)
-        .map_err(|error| format!("创建应用数据运行环境目录失败: {error}"))?;
-    let staging = runtime_root.join(format!(".migrate-{}", timestamp_millis()));
+    fs::create_dir_all(&runtime_root).map_err(|error| format!("创建安装目录失败: {error}"))?;
+    let staging = runtime_root.join(format!(".runtime-migrate-{}", timestamp_millis()));
     let staging_env = staging.join("env");
     fs::create_dir_all(&staging)
         .map_err(|error| format!("创建运行环境迁移临时目录失败: {error}"))?;
@@ -367,23 +373,14 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
             sha256: "local-migration".to_string(),
             installed_at_ms: timestamp_millis(),
         };
-        fs::write(
-            staging.join(".runtime.json"),
-            serde_json::to_vec_pretty(&manifest)
-                .map_err(|error| format!("生成迁移运行环境清单失败: {error}"))?,
-        )
-        .map_err(|error| format!("写入迁移运行环境清单失败: {error}"))?;
+        write_runtime_manifest(&staging_env, manifest)?;
 
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("创建运行环境版本目录失败: {error}"))?;
-        }
-        let backup = target.with_extension(format!("old-{}", timestamp_millis()));
+        let backup = runtime_root.join(format!(".env-old-{}", timestamp_millis()));
         if target.exists() {
             fs::rename(&target, &backup)
                 .map_err(|error| format!("备份旧托管运行环境失败: {error}"))?;
         }
-        if let Err(error) = fs::rename(&staging, &target) {
+        if let Err(error) = fs::rename(&staging_env, &target) {
             if backup.exists() {
                 let _ = fs::rename(&backup, &target);
             }
@@ -392,6 +389,7 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
         if backup.exists() {
             let _ = fs::remove_dir_all(&backup);
         }
+        let _ = fs::remove_dir_all(&staging);
         Ok(())
     })();
 
@@ -408,7 +406,7 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
     if moved_source {
         return Ok(true);
     }
-    Ok(remove_legacy_directory(&source, &runtime_root).is_ok())
+    Ok(remove_legacy_directory(&source, &target).is_ok())
 }
 
 fn remove_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<(), String> {
@@ -418,8 +416,8 @@ fn remove_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<(), String> {
     }
     let source = safe_legacy_runtime_dir(app)
         .ok_or_else(|| "未找到可安全清理的旧版内置运行环境。".to_string())?;
-    let runtime_root = app_local_root(app)?.join("runtime");
-    remove_legacy_directory(&source, &runtime_root)
+    let managed_env = storage_root(app)?.join("env");
+    remove_legacy_directory(&source, &managed_env)
 }
 
 fn remove_legacy_directory(source: &Path, managed_runtime_root: &Path) -> Result<(), String> {
@@ -501,7 +499,10 @@ async fn install_runtime_impl(
     }
     let version = expected_version();
     let asset_name = runtime_asset_name(&version, &flavor);
-    let download_root = app_local_root(app)?.join("runtime").join("downloads");
+    let download_root = storage_root(app)?
+        .join("data")
+        .join(".downloads")
+        .join("runtime");
     fs::create_dir_all(&download_root)
         .map_err(|error| format!("创建运行环境下载目录失败: {error}"))?;
     let archive_path = download_root.join(&asset_name);
@@ -633,8 +634,8 @@ async fn install_runtime_impl(
     }
 
     emit_progress(app, 0, 0, 84.0, "正在解压运行环境");
-    let install_root = app_local_root(app)?.join("runtime");
-    let target = install_root.join("versions").join(&version).join(&flavor);
+    let install_root = storage_root(app)?;
+    let target = install_root.join("env");
     let archive_for_install = archive_path.clone();
     let asset_for_manifest = asset_name.clone();
     let version_for_manifest = version.clone();
@@ -847,9 +848,8 @@ fn install_archive(
     target: &Path,
     manifest: RuntimeManifest,
 ) -> Result<(), String> {
-    fs::create_dir_all(runtime_root)
-        .map_err(|error| format!("创建应用数据运行环境目录失败: {error}"))?;
-    let staging = runtime_root.join(format!(".install-{}", timestamp_millis()));
+    fs::create_dir_all(runtime_root).map_err(|error| format!("创建安装目录失败: {error}"))?;
+    let staging = runtime_root.join(format!(".runtime-install-{}", timestamp_millis()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建运行环境临时目录失败: {error}"))?;
 
     let result = (|| {
@@ -883,25 +883,21 @@ fn install_archive(
             restore_zip_permissions(&destination, entry.unix_mode())?;
         }
 
-        if first_existing_python(&staging).is_none() {
+        let staging_env = staging.join("env");
+        if first_existing_python(&staging).is_none() || !staging_env.is_dir() {
             return Err("运行环境包校验失败：未找到 Python 可执行文件。".to_string());
         }
-        fs::write(
-            staging.join(".runtime.json"),
-            serde_json::to_vec_pretty(&manifest)
-                .map_err(|error| format!("生成运行环境清单失败: {error}"))?,
-        )
-        .map_err(|error| format!("写入运行环境清单失败: {error}"))?;
+        write_runtime_manifest(&staging_env, manifest)?;
 
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
-                .map_err(|error| format!("创建运行环境版本目录失败: {error}"))?;
+                .map_err(|error| format!("创建运行环境目标目录失败: {error}"))?;
         }
-        let backup = target.with_extension(format!("old-{}", timestamp_millis()));
+        let backup = runtime_root.join(format!(".env-old-{}", timestamp_millis()));
         if target.exists() {
             fs::rename(target, &backup).map_err(|error| format!("备份旧运行环境失败: {error}"))?;
         }
-        if let Err(error) = fs::rename(&staging, target) {
+        if let Err(error) = fs::rename(&staging_env, target) {
             if backup.exists() {
                 let _ = fs::rename(&backup, target);
             }
@@ -959,6 +955,52 @@ fn app_local_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
         .map_err(|error| format!("无法定位应用数据目录: {error}"))
+}
+
+fn storage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    if let Some(root) = windows_install_root() {
+        return Ok(root);
+    }
+
+    app_local_root(app)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_install_root() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    windows_install_root_for_executable(&executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_install_root_for_executable(executable: &Path) -> Option<PathBuf> {
+    let root = executable.parent()?;
+    let packaged = root.join(".video-similarity-install.json").is_file()
+        || root.join("BUILD_FLAVOR.txt").is_file()
+            && root.join("scripts").is_dir()
+            && root.join("video_sim").is_dir();
+    packaged.then(|| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    if cfg!(target_os = "windows") {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn write_runtime_manifest(directory: &Path, manifest: RuntimeManifest) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| format!("创建运行环境目录失败: {error}"))?;
+    fs::write(
+        directory.join(".runtime.json"),
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("生成运行环境清单失败: {error}"))?,
+    )
+    .map_err(|error| format!("写入运行环境清单失败: {error}"))
 }
 
 fn expected_version() -> String {
@@ -1243,12 +1285,15 @@ fn timestamp_millis() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::windows_install_root_for_executable;
     use super::{
-        copy_dir_recursive, cuda_13_compatibility_issue_from_output, parse_checksum,
-        parse_parts_manifest, partial_download_path, python_candidates_below, runtime_asset_name,
-        runtime_asset_name_for_platform,
+        copy_dir_recursive, cuda_13_compatibility_issue_from_output, install_archive,
+        parse_checksum, parse_parts_manifest, partial_download_path, python_candidates_below,
+        runtime_asset_name, runtime_asset_name_for_platform, RuntimeManifest,
     };
     use std::fs;
+    use std::io::Write as _;
 
     #[test]
     fn runtime_asset_name_includes_version_platform_and_flavor() {
@@ -1358,6 +1403,70 @@ mod tests {
         assert_eq!(
             fs::read(destination.join("python").join("bin").join("python")).unwrap(),
             b"runtime"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_archive_replaces_only_the_install_root_env_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-runtime-install-{}",
+            super::timestamp_millis()
+        ));
+        let archive_path = root.join("runtime.zip");
+        let target = root.join("env");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old-runtime.txt"), b"old").unwrap();
+
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        let options = zip::write::SimpleFileOptions::default();
+        let python_path = if cfg!(target_os = "windows") {
+            "env/python/python.exe"
+        } else {
+            "env/python/bin/python"
+        };
+        archive.start_file(python_path, options).unwrap();
+        archive.write_all(b"runtime").unwrap();
+        archive.finish().unwrap();
+
+        install_archive(
+            &archive_path,
+            &root,
+            &target,
+            RuntimeManifest {
+                version: "1".to_string(),
+                flavor: "cpu".to_string(),
+                asset_name: "runtime.zip".to_string(),
+                sha256: "test".to_string(),
+                installed_at_ms: 1,
+            },
+        )
+        .unwrap();
+
+        assert!(target.join(".runtime.json").is_file());
+        assert!(!target.join("env").exists());
+        assert!(!target.join("old-runtime.txt").exists());
+        assert!(root.join(python_path).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_packaged_runtime_uses_the_custom_executable_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-custom-install-{}",
+            super::timestamp_millis()
+        ));
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::create_dir_all(root.join("video_sim")).unwrap();
+        fs::write(root.join("BUILD_FLAVOR.txt"), b"gpu").unwrap();
+        let executable = root.join("video-similarity-desktop.exe");
+        fs::write(&executable, b"app").unwrap();
+
+        assert_eq!(
+            windows_install_root_for_executable(&executable).unwrap(),
+            root.canonicalize().unwrap()
         );
         let _ = fs::remove_dir_all(root);
     }

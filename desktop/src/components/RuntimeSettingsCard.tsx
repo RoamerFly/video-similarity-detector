@@ -59,7 +59,7 @@ export function RuntimeSettingsCard() {
 
   async function handleInstall() {
     const canMigrate = status?.legacyFallback && status.legacyMigrationAvailable
-    const action = status?.managed ? '重新安装' : canMigrate ? '本地迁移到应用数据目录' : '下载'
+    const action = status?.managed ? '重新安装' : canMigrate ? '就地登记现有环境' : '下载'
     if (!window.confirm(`${action} ${status?.flavor === 'gpu' ? 'GPU / CUDA' : 'CPU'} 运行环境？`)) return
     setInstalling(true)
     setError('')
@@ -115,12 +115,12 @@ export function RuntimeSettingsCard() {
         </div>
         <div>
           <span>存储方式</span>
-          <strong>{status?.managed ? '应用数据目录' : status?.legacyFallback ? '旧版内置' : '待安装'}</strong>
+          <strong>{status?.managed ? '安装目录 env' : status?.legacyFallback ? '现有 env' : '待安装'}</strong>
         </div>
       </div>
       {status?.runtimeDir && (
         <p className="update-install-path" title={status.runtimeDir}>
-          应用数据目录：{status.runtimeDir}
+          运行环境目录：{status.runtimeDir}
         </p>
       )}
       <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>
@@ -162,9 +162,9 @@ export function RuntimeSettingsCard() {
             : status?.managed
               ? '重装环境'
               : status?.legacyFallback && status.legacyMigrationAvailable
-                ? '本地迁移'
+                ? '就地登记'
                 : status?.legacyFallback
-                  ? '安装到应用数据目录'
+                  ? '重新安装环境'
                   : '安装环境'}
         </NeonButton>
         {status?.legacyCleanupAvailable && (

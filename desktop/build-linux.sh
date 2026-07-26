@@ -295,7 +295,7 @@ Run:
   ./run-video-similarity.sh
 
 The release package keeps the app lightweight. On first launch, install the
-versioned runtime into the app-local data directory when prompted. Future app
+versioned runtime into the writable app data directory when prompted. Future app
 updates reuse that runtime instead of downloading it again.
 EOF
 }

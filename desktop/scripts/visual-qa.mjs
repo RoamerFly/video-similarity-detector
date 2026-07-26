@@ -470,8 +470,8 @@ async function installTauriMock(page, language) {
             expectedVersion: '1',
             installedVersion: '1',
             flavor: 'cpu',
-            runtimeDir: 'C:\\Users\\VisualQA\\AppData\\Local\\video-similarity\\runtime\\versions\\1\\cpu',
-            pythonPath: 'C:\\Users\\VisualQA\\AppData\\Local\\video-similarity\\runtime\\versions\\1\\cpu\\env\\python\\python.exe',
+            runtimeDir: 'D:\\Video Similarity\\env',
+            pythonPath: 'D:\\Video Similarity\\env\\python\\python.exe',
             assetName: 'Video_Similarity-runtime-v1-windows-x64-cpu.zip',
             message: 'Managed runtime is ready.',
           }
@@ -502,7 +502,7 @@ async function installTauriMock(page, language) {
         if (cmd === 'get_clip_model_status') {
           return {
             installed: true,
-            modelDir: 'C:\\Users\\VisualQA\\AppData\\Local\\video-similarity\\assets\\models\\clip-vit-base-patch32',
+            modelDir: 'D:\\Video Similarity\\models\\clip-vit-base-patch32',
             sizeBytes: 605_000_000,
             message: 'Offline CLIP model is ready.',
             requiredFiles: ['config.json', 'preprocessor_config.json', 'pytorch_model.bin'],

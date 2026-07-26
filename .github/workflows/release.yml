@@ -182,12 +182,12 @@ jobs:
           )
 
           light_dist="$(mktemp -d)"
-          cp -a "$dist_dir/." "$light_dist/"
-          rm -rf \
-            "$light_dist/env" \
-            "$light_dist/installer" \
-            "$light_dist/models" \
-            "$light_dist/data"
+          find "$dist_dir" -mindepth 1 -maxdepth 1 \
+            ! -name env \
+            ! -name installer \
+            ! -name models \
+            ! -name data \
+            -exec cp -a {} "$light_dist/" \;
           find "$light_dist" -maxdepth 1 -type f \
             \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -delete
           test ! -e "$light_dist/env"
@@ -443,9 +443,15 @@ jobs:
             Set-Content -LiteralPath "$runtimeZip.sha256" -Encoding ASCII
 
           $portableRoot = Join-Path $env:RUNNER_TEMP "video-similarity-portable"
-          Copy-Item $dist $portableRoot -Recurse
-          foreach ($directory in @("env", "installer", "models", "data")) {
-            Remove-Item (Join-Path $portableRoot $directory) -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $portableRoot | Out-Null
+          $excludedDirectories = @("env", "installer", "models", "data")
+          Get-ChildItem -LiteralPath $dist | Where-Object {
+            $excludedDirectories -notcontains $_.Name
+          } | Copy-Item -Destination $portableRoot -Recurse
+          foreach ($directory in $excludedDirectories) {
+            if (Test-Path -LiteralPath (Join-Path $portableRoot $directory)) {
+              throw "Lightweight application root unexpectedly contains $directory."
+            }
           }
           $portableZip = "release-assets\$base-portable.zip"
           & 7z a -tzip -mx=7 $portableZip (Join-Path $portableRoot "*")
@@ -488,8 +494,7 @@ jobs:
             -PayloadZip $updaterZip `
             -OutputExe $updaterOutput `
             -DisplayName $displayName `
-            -InstallFolderName $installFolder `
-            -PreserveRuntimeOnUpdate
+            -InstallFolderName $installFolder
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $updaterOutput)) {
             throw "Lightweight Windows updater was not generated."
           }
@@ -627,12 +632,12 @@ jobs:
           )
 
           light_dist="$(mktemp -d)"
-          cp -a "$dist_dir/." "$light_dist/"
-          rm -rf \
-            "$light_dist/env" \
-            "$light_dist/installer" \
-            "$light_dist/models" \
-            "$light_dist/data"
+          find "$dist_dir" -mindepth 1 -maxdepth 1 \
+            ! -name env \
+            ! -name installer \
+            ! -name models \
+            ! -name data \
+            -exec cp -a {} "$light_dist/" \;
           find "$light_dist" -maxdepth 1 -type f \
             \( -name "*.dmg" -o -name "*.app.tar.gz" \) -delete
           test ! -e "$light_dist/env"
@@ -944,3 +949,31 @@ jobs:
             release-assets/*
           fail_on_unmatched_files: true
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Remove obsolete release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+            --jq '.id')"
+          find release-assets model-assets -maxdepth 1 -type f \
+            -printf '%f\n' | sort -u > expected-assets.txt
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if ! grep -Fqx "$asset_name" expected-assets.txt; then
+              echo "Deleting obsolete release asset: $asset_name"
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            fi
+          done < <(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              --jq '.[] | [.id, .name] | @tsv'
+          )
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[].name' | sort -u > published-assets.txt
+          diff -u expected-assets.txt published-assets.txt

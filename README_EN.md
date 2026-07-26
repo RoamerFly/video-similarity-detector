@@ -48,7 +48,9 @@ Open [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/re
 
 Starting with v1.1.0, the application and AI runtime are distributed separately. The installer or portable package is lightweight. On first launch, the app installs the matching Python, PyTorch, and FFmpeg runtime once. CPU runtimes are generally a few hundred MB; the Windows GPU runtime is close to 2 GiB.
 
-Later button, merge-editor, UI, or business-logic updates only download a tens-of-MB application update and reuse the installed runtime and model. A runtime is downloaded again only when its own version changes. If a v1.0.x `env` still exists beside the app, migrate it from Settings instead of downloading it again.
+On Windows, the executable, `scripts`, `video_sim`, `env`, `models`, and `data` all stay under the custom folder selected in the installer. Overwrite updates replace only the application and business-code files, preserving the large `env`, `models`, and `data` directories.
+
+Later button, merge-editor, UI, or business-logic updates only download a tens-of-MB application update and reuse the installed runtime and model. A runtime is downloaded again only when its own version changes. If a v1.0.x `env` still exists beside the app, the new version detects and uses it automatically; Settings can register it in place without moving or downloading it.
 
 Files beginning with `Video_Similarity-runtime-`, plus `.sha256`, `*-updater`, `.sig`, and updater JSON files, are selected and verified automatically. Most users should not download them manually. The Windows installer still supports custom paths, overwrite upgrades, and preserving user data and settings during uninstall.
 
