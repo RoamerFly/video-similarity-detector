@@ -34,7 +34,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   APP_NAME: Video_Similarity
@@ -44,23 +44,24 @@ env:
   PYTHON_VERSION: "3.10"
   CLIP_MODEL_REVISION: "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
   DOWNLOAD_GUIDE: |
-    ## Download Guide
+    ## 下载建议
 
-    - Windows CPU installer, recommended for most users: `Video_Similarity-v*-windows-x64-cpu-installer.exe`
-    - Windows GPU installer, for NVIDIA Turing-or-newer GPUs (compute capability 7.5+) with R580+ drivers: `Video_Similarity-v*-windows-x64-gpu-installer.exe`
-    - Windows portable package: matching `windows-x64-*-portable.zip`; unzip it and run the exe inside
-    - macOS Apple Silicon / M-series: `Video_Similarity-v*-macos-arm64-installer.dmg`
-    - macOS Intel: `Video_Similarity-v*-macos-x64-installer.dmg`
-    - Linux Debian/Ubuntu: `Video_Similarity-v*-linux-x64-installer.deb`
-    - Linux Fedora/openSUSE/RHEL: `Video_Similarity-v*-linux-x64-installer.rpm`
-    - Linux portable package: `Video_Similarity-v*-linux-x64-portable.tar.gz`
-    Application installers and portable packages are lightweight and no longer contain the large Python/FFmpeg runtime. On first launch, the app automatically downloads the matching runtime once; the CPU runtime is generally a few hundred MB, while the Windows CUDA runtime is close to 2 GiB. The first AI analysis can also download the separate CLIP model (about 600 MB).
+    - Windows 普通用户：下载 `Video_Similarity-v*-windows-x64-cpu-installer.exe`
+    - Windows NVIDIA GPU 用户：显卡为图灵架构或更新（计算能力 7.5 及以上），且驱动为 R580 或更新时，可下载 `Video_Similarity-v*-windows-x64-gpu-installer.exe`
+    - Windows 免安装版：下载对应的 `windows-x64-*-portable.zip`，解压后运行其中的程序
+    - macOS Apple 芯片（M 系列）：下载 `Video_Similarity-v*-macos-arm64-installer.dmg`
+    - macOS Intel 芯片：下载 `Video_Similarity-v*-macos-x64-installer.dmg`
+    - Linux Debian/Ubuntu：下载 `Video_Similarity-v*-linux-x64-installer.deb`
+    - Linux Fedora/openSUSE/RHEL：下载 `Video_Similarity-v*-linux-x64-installer.rpm`
+    - Linux 免安装版：下载 `Video_Similarity-v*-linux-x64-portable.tar.gz`
 
-    Later UI, editor, button, style, Rust, or Python business-logic updates only download the tens-of-MB application update. The installed runtime and model are reused unless their own versions change. If a v1.0.x `env` still exists beside the executable, migrate it from Settings to avoid downloading it again.
+    从 v1.1.0 开始，应用安装包不再包含庞大的 Python/FFmpeg 运行环境。首次启动时，程序会自动下载一次与设备匹配的运行环境：CPU 版通常为几百 MB，Windows GPU 版接近 2 GiB。首次进行 AI 分析时，还可能单独下载约 600 MB 的 CLIP 模型。
 
-    Runtime assets are single resumable ZIP files named `Video_Similarity-runtime-v*-windows-x64-{cpu|gpu}.zip`, `Video_Similarity-runtime-v*-macos-{arm64|x64}.zip`, and `Video_Similarity-runtime-v*-linux-x64.zip`. The offline model asset is `clip-vit-base-patch32.zip`.
+    以后如果只是更新界面、编辑器、按钮、样式、Rust 或 Python 业务逻辑，用户通常只需下载几十 MB 的应用更新；已经安装的运行环境和模型会继续复用，只有它们自身升级时才重新下载。v1.0.x 用户若程序旁仍有旧 `env` 目录，可在“设置”中迁移，避免重复下载。
 
-    `*-updater.exe`, `.sig`, runtime `.sha256`, and `latest.json` / `windows.json` / `darwin.json` / `linux.json` are mainly for automatic installation, updates, and signature/checksum verification. Most users do not need to download them manually.
+    每个平台和运行模式都只提供一个支持断点续传的运行环境 ZIP，并附带一个 `.sha256` 校验文件，不会出现同一模块拆成多个 part 压缩包的情况。离线模型文件名为 `clip-vit-base-patch32.zip`。
+
+    `*-updater.exe`、`.sig`、运行环境 `.sha256`，以及 `latest.json`、`windows.json`、`darwin.json`、`linux.json` 主要供程序自动安装、更新和校验使用，普通用户无需手动下载。
 jobs:
   quality:
     name: Quality checks
@@ -799,7 +800,7 @@ jobs:
             if [ -s release_note.txt ]; then
               release_notes="$(cat release_note.txt)"
             else
-              release_notes=$'## Release Notes\n\n- This release includes refreshed app builds, updater metadata, and the offline CLIP model asset.'
+              release_notes=$'## 更新内容\n\n- 本次发布包含最新应用构建、自动更新元数据和离线 CLIP 模型资源。'
             fi
           fi
           echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"

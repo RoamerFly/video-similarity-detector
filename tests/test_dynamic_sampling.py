@@ -244,8 +244,8 @@ class TestDynamicFrameSamplerBasic:
         assert isinstance(rf.phash, str)
         assert isinstance(rf.thumbnail_path, str)
 
-    def test_thumbnail_saved(self, tmp_path):
-        """Test that thumbnails are actually saved to disk."""
+    def test_retained_frame_keeps_preprocessed_pixels_in_memory(self, tmp_path):
+        """Retained frames avoid thumbnail I/O and keep CLIP input pixels in memory."""
         video_path = tmp_path / "test_thumb.mp4"
         self._create_test_video(video_path, num_frames=10)
 
@@ -257,11 +257,15 @@ class TestDynamicFrameSamplerBasic:
 
         retained = sampler.sample(video_path)
 
-        # Check that thumbnail files exist
+        assert retained
         for rf in retained:
-            thumb_path = Path(rf.thumbnail_path)
-            assert thumb_path.exists(), f"Thumbnail not found: {thumb_path}"
-            assert thumb_path.suffix == ".jpg"
+            assert rf.thumbnail_path == ""
+            assert isinstance(rf.clip_frame, np.ndarray)
+            assert rf.clip_frame.dtype == np.uint8
+            assert rf.clip_frame.ndim == 3
+            assert rf.clip_frame.shape[2] == 3
+
+        assert not list((tmp_path / "frames").rglob("*.jpg"))
 
     def test_video_not_found_error(self, tmp_path):
         """Test that FileNotFoundError is raised for missing video."""
