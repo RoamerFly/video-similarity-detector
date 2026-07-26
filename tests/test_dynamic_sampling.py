@@ -17,6 +17,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+pytest.importorskip("scipy", reason="ImageHash pHash tests require SciPy")
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

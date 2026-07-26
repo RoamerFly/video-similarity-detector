@@ -5,7 +5,8 @@ param(
     [string]$OutputExe,
     [string]$DisplayName = "Video Similarity",
     [string]$InstallFolderName = "Video Similarity",
-    [string]$ExecutableName = "video-similarity-desktop.exe"
+    [string]$ExecutableName = "video-similarity-desktop.exe",
+    [switch]$PreserveRuntimeOnUpdate
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,7 @@ function Convert-ToCSharpLiteral([string]$Value) {
 $escapedDisplayName = Convert-ToCSharpLiteral $DisplayName
 $escapedInstallFolder = Convert-ToCSharpLiteral $InstallFolderName
 $escapedExecutableName = Convert-ToCSharpLiteral $ExecutableName
+$preserveRuntimeOnUpdateLiteral = if ($PreserveRuntimeOnUpdate) { "true" } else { "false" }
 $uninstallerPath = Join-Path ([System.IO.Path]::GetTempPath()) ("video-similarity-uninstall-" + [guid]::NewGuid().ToString("N") + ".exe")
 $uninstallerSource = @"
 using System;
@@ -463,6 +465,7 @@ internal static class VideoSimilarityInstaller
     internal const string DisplayName = "$escapedDisplayName";
     internal const string InstallFolderName = "$escapedInstallFolder";
     internal const string ExecutableName = "$escapedExecutableName";
+    internal const bool PreserveRuntimeOnUpdate = $preserveRuntimeOnUpdateLiteral;
 
     [STAThread]
     private static int Main(string[] args)
@@ -891,7 +894,7 @@ internal sealed class InstallerForm : Form
                 TextValue.Get("5q2j5Zyo5riF55CG5pen55qE56iL5bqP5paH5Lu2Li4u"),
                 TextValue.Get("55So5oi35pWw5o2u55uu5b2V5Lya6KKr5L+d55WZ44CC")
             ));
-            CleanupManagedFiles(options.Target);
+            CleanupManagedFiles(options.Target, VideoSimilarityInstaller.PreserveRuntimeOnUpdate);
         }
 
         ExtractPayload(options.Target, options.IsUpdate, backgroundWorker, e);
@@ -1020,9 +1023,12 @@ internal sealed class InstallerForm : Form
         }
     }
 
-    private static void CleanupManagedFiles(string target)
+    private static void CleanupManagedFiles(string target, bool preserveRuntime)
     {
-        foreach (string relative in new string[] { "env", "scripts", "video_sim" })
+        string[] managedDirectories = preserveRuntime
+            ? new string[] { "scripts", "video_sim" }
+            : new string[] { "env", "scripts", "video_sim" };
+        foreach (string relative in managedDirectories)
         {
             string path = Path.Combine(target, relative);
             if (Directory.Exists(path))
@@ -1034,6 +1040,7 @@ internal sealed class InstallerForm : Form
             VideoSimilarityInstaller.ExecutableName,
             "requirements.txt",
             "requirements-runtime.txt",
+            "runtime-version.txt",
             "run-video-similarity.bat",
             "README_windows.txt",
             "BUILD_FLAVOR.txt",

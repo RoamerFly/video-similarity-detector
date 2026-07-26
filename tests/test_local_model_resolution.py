@@ -8,6 +8,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODEL_LOCATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODEL_LOCATOR)
 DEFAULT_EMBEDDING_MODEL = MODEL_LOCATOR.DEFAULT_EMBEDDING_MODEL
+embedding_model_fingerprint = MODEL_LOCATOR.embedding_model_fingerprint
 resolve_embedding_model_source = MODEL_LOCATOR.resolve_embedding_model_source
 
 
@@ -44,3 +45,17 @@ def test_incomplete_local_model_falls_back_to_hugging_face(tmp_path: Path, monke
     (incomplete / "config.json").write_text("{}", encoding="utf-8")
 
     assert resolve_embedding_model_source(tmp_path) == DEFAULT_EMBEDDING_MODEL
+
+
+def test_local_model_fingerprint_changes_with_model_files(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("VIDEO_SIM_CLIP_MODEL_DIR", raising=False)
+    model_dir = tmp_path / "models" / "clip-vit-base-patch32"
+    write_model_snapshot(model_dir)
+
+    first = embedding_model_fingerprint(tmp_path)
+    (model_dir / "config.json").write_text('{"revision": 2}', encoding="utf-8")
+    second = embedding_model_fingerprint(tmp_path)
+
+    assert first.startswith("local-sha256:")
+    assert second.startswith("local-sha256:")
+    assert first != second

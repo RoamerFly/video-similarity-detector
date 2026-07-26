@@ -1,12 +1,4 @@
 from pathlib import Path
-import sys
-import types
-
-
-decord_stub = types.ModuleType("decord")
-decord_stub.VideoReader = object
-decord_stub.cpu = lambda *_args, **_kwargs: None
-sys.modules.setdefault("decord", decord_stub)
 
 from video_sim import scanner
 

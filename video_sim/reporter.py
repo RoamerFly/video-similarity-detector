@@ -5,15 +5,19 @@ Provides report generation for search results and batch operations.
 Supports JSON, CSV, and HTML output formats.
 """
 
+from __future__ import annotations
+
 import csv
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from video_sim.config import Config
-from video_sim.matcher import ContainmentResult, SearchResult
+
+if TYPE_CHECKING:
+    from video_sim.matcher import ContainmentResult, SearchResult
 
 
 @dataclass

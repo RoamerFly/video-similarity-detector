@@ -39,17 +39,22 @@
 
 ### Download And Install
 
-Download the latest build from [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/releases):
+Open [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/releases) and download only the application package for your system:
 
-- Windows: use `windows-x64-cpu-installer.exe` for most PCs; use `windows-x64-gpu-installer.exe` only with compatible NVIDIA GPU drivers.
-- macOS: download the `macos-arm64` or `macos-x64` `.dmg` / portable package.
+- Windows: use `windows-x64-cpu-installer.exe` for most PCs. Use `windows-x64-gpu-installer.exe` only for NVIDIA Turing-or-newer GPUs (compute capability 7.5+) with R580+ drivers.
+- macOS: use the `macos-arm64-installer.dmg` for Apple Silicon or the `macos-x64-installer.dmg` for Intel Macs.
 - Linux: download `.deb`, `.rpm`, or the portable `.tar.gz`.
+- To run without installing, choose the matching package whose name contains `portable`, extract it, and start the app.
 
-The installers and portable packages include Python, FFmpeg, FFprobe, and the main runtime dependencies. The Windows installer supports custom install paths, overwrite upgrades, and uninstall options that can preserve `data/`, `videos/`, `embeddings/`, reports, and UI settings.
+Starting with v1.1.0, the application and AI runtime are distributed separately. The installer or portable package is lightweight. On first launch, the app installs the matching Python, PyTorch, and FFmpeg runtime once. CPU runtimes are generally a few hundred MB; the Windows GPU runtime is close to 2 GiB.
+
+Later button, merge-editor, UI, or business-logic updates only download a tens-of-MB application update and reuse the installed runtime and model. A runtime is downloaded again only when its own version changes. If a v1.0.x `env` still exists beside the app, migrate it from Settings instead of downloading it again.
+
+Files beginning with `Video_Similarity-runtime-`, plus `.sha256`, `*-updater`, `.sig`, and updater JSON files, are selected and verified automatically. Most users should not download them manually. The Windows installer still supports custom paths, overwrite upgrades, and preserving user data and settings during uninstall.
 
 ### Offline Model
 
-AI similarity analysis uses `openai/clip-vit-base-patch32`. The app downloads it on first use. For offline use, download this asset from Releases:
+AI similarity analysis uses `openai/clip-vit-base-patch32`. The model is stored separately from the app and runtime; the app downloads about 600 MB on first use and reuses it for later small updates. For offline use, download this asset from Releases:
 
 ```text
 clip-vit-base-patch32.zip

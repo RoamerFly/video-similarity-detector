@@ -512,7 +512,7 @@ function Test-BundledPythonEnv([string]$PythonExe, [bool]$RequireCuda = $false) 
     $cudaRequiredLiteral = if ($RequireCuda) { "True" } else { "False" }
     $probe = @"
 import importlib.util
-missing = [name for name in ["numpy", "torch", "transformers", "PIL", "cv2", "decord", "faiss", "imagehash", "tqdm"] if importlib.util.find_spec(name) is None]
+missing = [name for name in ["numpy", "scipy", "torch", "transformers", "PIL", "cv2", "decord", "faiss", "imagehash", "tqdm"] if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing modules: " + ", ".join(missing))
 import torch
@@ -527,15 +527,60 @@ print("Bundled Python env OK")
     Invoke-Checked { $probe | & $PythonExe - } "Bundled Python dependency probe failed."
 }
 
-function Test-TorchCudaReady([string]$PythonExe) {
+function Test-TorchRequirementsReady(
+    [string]$PythonExe,
+    [string[]]$Requirements,
+    [bool]$RequireCuda = $false
+) {
     if (-not (Test-Path $PythonExe)) {
         return $false
     }
 
+    $requireCudaLiteral = if ($RequireCuda) { "True" } else { "False" }
+    $probe = @"
+from importlib.metadata import PackageNotFoundError, version
+from pip._vendor.packaging.requirements import Requirement
+import base64
+import json
+import sys
+
+applicable = []
+requirements = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+for raw in requirements:
+    requirement = Requirement(raw)
+    if requirement.marker is None or requirement.marker.evaluate():
+        applicable.append(requirement)
+
+if len(applicable) != 1:
+    raise SystemExit(1)
+
+requirement = applicable[0]
+try:
+    installed = version(requirement.name)
+except PackageNotFoundError:
+    raise SystemExit(1)
+
+if requirement.specifier and not requirement.specifier.contains(installed, prereleases=True):
+    raise SystemExit(1)
+
+if ${requireCudaLiteral}:
+    import torch
+    if not torch.version.cuda:
+        raise SystemExit(1)
+"@
+
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & $PythonExe -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" *> $null
+        $cleanRequirements = [string[]]@(
+            $Requirements | ForEach-Object { [string]$_ }
+        )
+        $requirementsJson = ConvertTo-Json -InputObject $cleanRequirements -Compress
+        $requirementsBase64 = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes($requirementsJson)
+        )
+        $pythonArgs = @("-", $requirementsBase64)
+        $probe | & $PythonExe @pythonArgs *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -680,7 +725,7 @@ function New-TauriBuildOverride([string]$EnvName) {
                 "../../scripts",
                 "../../video_sim",
                 "../../requirements.txt",
-                "../$EnvName"
+                "../runtime-version.txt"
             )
         }
     } | ConvertTo-Json -Depth 5
@@ -877,8 +922,12 @@ if ($SkipPythonEnv) {
     $otherPackages = @($runtimePackages | Where-Object { $_ -notmatch '^torch([<>=!~].*)?$' })
 
     if ($torchPackages.Count -gt 0) {
-        if ($GpuBuild -and (Test-TorchCudaReady $activePythonExe) -and -not $CleanPythonEnv) {
-            Write-Host "  - CUDA torch already available; skipping torch reinstall." -ForegroundColor Green
+        if (
+            $GpuBuild -and
+            -not $CleanPythonEnv -and
+            (Test-TorchRequirementsReady $activePythonExe $torchPackages $true)
+        ) {
+            Write-Host "  - Pinned CUDA torch already available; skipping torch reinstall." -ForegroundColor Green
         } elseif ($GpuBuild) {
             Write-Host "  - Installing CUDA torch from: $TorchIndexUrl" -ForegroundColor Gray
             Install-RequirementLines $activePythonExe $torchPackages "Failed to install CUDA torch into bundled env." @("--upgrade", "--force-reinstall", "--index-url", $TorchIndexUrl)
@@ -994,6 +1043,7 @@ Copy-Directory (Join-Path $repoRoot "video_sim") (Join-Path $distDir "video_sim"
 Remove-PortableSourceWaste $distDir
 Copy-Item -LiteralPath $requirements -Destination (Join-Path $distDir "requirements.txt") -Force
 Copy-Item -LiteralPath $runtimeRequirements -Destination (Join-Path $distDir "requirements-runtime.txt") -Force
+Copy-Item -LiteralPath (Join-Path $desktopDir "runtime-version.txt") -Destination (Join-Path $distDir "runtime-version.txt") -Force
 Set-Content -LiteralPath (Join-Path $distDir "BUILD_FLAVOR.txt") -Value $(if ($GpuBuild) { "gpu" } else { "cpu" }) -Encoding ASCII
 
 Copy-Directory $envDir (Join-Path $distDir "env")
@@ -1011,8 +1061,6 @@ set "USE_TF=0"
 set "TRANSFORMERS_NO_TF=1"
 set "TF_CPP_MIN_LOG_LEVEL=2"
 set "PYTHONNOUSERSITE=1"
-set "VIDEO_SIM_FFMPEG=%~dp0env\ffmpeg.exe"
-set "PATH=%~dp0env;%PATH%"
 start "" "%~dp0video-similarity-desktop.exe"
 "@
 Set-Content -LiteralPath (Join-Path $distDir "run-video-similarity.bat") -Value $launcher -Encoding ASCII
@@ -1022,15 +1070,13 @@ Video Similarity - Windows portable package
 
 Output structure:
 - video-similarity-desktop.exe: executable app.
-- env\python\: bundled runtime and dependencies.
-- env\ffmpeg.exe and env\ffprobe.exe: bundled standalone media tools.
-- data\: analysis data and reports.
+- scripts\ and video_sim\: analysis engine copied next to the executable.
+- runtime-version.txt and BUILD_FLAVOR.txt: runtime compatibility markers.
 
 Run:
 1. Double-click run-video-similarity.bat or video-similarity-desktop.exe.
-2. Keep the in-app Python path as the default value "python" to use env\python automatically.
-3. scripts, video_sim and requirements.txt are copied next to the exe.
-4. Reports are written to data\reports by default.
+2. On first launch, install the versioned runtime into the app-local data directory when prompted.
+3. Future app updates reuse that runtime instead of downloading it again.
 
 Acceptance:
 - Settings -> check environment should show Python and batch_compare.py as available.

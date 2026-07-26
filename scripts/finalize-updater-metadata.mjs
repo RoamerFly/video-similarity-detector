@@ -34,8 +34,8 @@ function platform(assetName) {
   }
 }
 
-const cpuAsset = `Video_Similarity-${version}-windows-x64-cpu-installer.exe`
-const gpuAsset = `Video_Similarity-${version}-windows-x64-gpu-installer.exe`
+const cpuAsset = `Video_Similarity-${version}-windows-x64-cpu-updater.exe`
+const gpuAsset = `Video_Similarity-${version}-windows-x64-gpu-updater.exe`
 const macosArmAsset = `Video_Similarity-${version}-macos-arm64-installer.dmg`
 const macosX64Asset = `Video_Similarity-${version}-macos-x64-installer.dmg`
 const linuxAsset = `Video_Similarity-${version}-linux-x64-installer.deb`

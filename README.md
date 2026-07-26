@@ -39,17 +39,22 @@
 
 ### 下载与安装
 
-前往 [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/releases) 下载对应平台版本：
+前往 [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/releases)，只需下载与你的系统对应的应用安装包：
 
-- Windows：推荐普通用户下载 `windows-x64-cpu-installer.exe`；有兼容 NVIDIA 显卡和驱动时可下载 `windows-x64-gpu-installer.exe`。
-- macOS：下载 `macos-arm64` 或 `macos-x64` 的 `.dmg` / 便携包。
+- Windows：大多数用户下载 `windows-x64-cpu-installer.exe`；使用 NVIDIA Turing 或更新架构显卡（计算能力 7.5+、R580+ 驱动）时，可下载 `windows-x64-gpu-installer.exe`。
+- macOS：M 系列芯片下载 `macos-arm64-installer.dmg`，Intel 芯片下载 `macos-x64-installer.dmg`。
 - Linux：下载 `.deb`、`.rpm` 或便携 `.tar.gz`。
+- 不想安装时，可以选择同平台的 `portable` 便携包，解压后直接运行。
 
-安装包和便携包会内置 Python、FFmpeg、FFprobe 及主要运行依赖。Windows 安装版支持自定义目录、覆盖升级和卸载时选择是否保留 `data/`、`videos/`、`embeddings/`、报告与界面设置。
+从 v1.1.0 开始，应用与 AI 运行环境分开发布。安装包和便携包本身较小；第一次启动时，应用会自动安装一次对应的 Python、PyTorch 和 FFmpeg 运行环境。CPU 环境通常为数百 MB，Windows GPU 环境接近 2 GiB，请预留足够的下载时间和磁盘空间。
+
+以后如果只是新增按钮、修改合并视频页面、修复界面或业务逻辑，更新程序只下载十几至几十 MB 的应用更新，不会重复下载运行环境和模型。只有运行环境版本确实发生变化时，才会再次下载。v1.0.x 用户如果程序旁仍保留旧 `env`，可以在“设置”中直接迁移，无需重新下载。
+
+Release 中以 `Video_Similarity-runtime-` 开头的文件、`.sha256`、`*-updater`、`.sig` 和更新 JSON 均由应用自动选择和校验，普通用户不需要手动下载。Windows 安装版仍支持自定义目录、覆盖升级和卸载时选择是否保留数据、报告与界面设置。
 
 ### 离线模型
 
-AI 相似度分析使用 `openai/clip-vit-base-patch32`。首次分析会自动下载模型；离线使用可从 Release 下载：
+AI 相似度分析使用 `openai/clip-vit-base-patch32`。模型与应用、运行环境分别保存，首次分析会自动下载约 600 MB 的模型，后续小更新不会重复下载。离线使用可从 Release 下载：
 
 ```text
 clip-vit-base-patch32.zip

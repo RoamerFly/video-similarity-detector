@@ -1,16 +1,10 @@
 import json
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from scripts import batch_compare
-
-decord_stub = types.ModuleType("decord")
-decord_stub.VideoReader = object
-decord_stub.cpu = lambda *_args, **_kwargs: None
-sys.modules.setdefault("decord", decord_stub)
 
 from video_sim.embedder import FrameEmbeddingCache
 from video_sim.preprocess import PreprocessConfig
@@ -93,6 +87,37 @@ def test_frame_cache_profiles_use_short_numbered_directories(tmp_path: Path):
         frame_step=30,
     )
     assert second_path.parent.name == "2"
+
+
+def test_frame_cache_round_trip_does_not_require_pickle(tmp_path: Path):
+    video = tmp_path / "safe.mp4"
+    video.write_bytes(b"video")
+    cache_path = _save_minimal_cache(video, tmp_path / "data", PreprocessConfig())
+
+    with np.load(cache_path, allow_pickle=False) as raw:
+        for key in raw.files:
+            np.asarray(raw[key])
+
+    loaded = FrameEmbeddingCache.load(cache_path)
+    assert loaded.video_path == str(video.resolve())
+    assert loaded.phashes == ["phash"]
+    assert loaded.embeddings.shape == (1, 2)
+
+
+def test_legacy_pickled_cache_is_rejected(tmp_path: Path):
+    cache_path = tmp_path / "legacy.npz"
+    np.savez(
+        cache_path,
+        video_path=np.asarray("video.mp4", dtype=object),
+        frame_indices=np.array([0], dtype=np.int64),
+        timestamps=np.array([0.0], dtype=np.float32),
+        phashes=np.asarray(["phash"], dtype=object),
+        thumbnail_paths=np.asarray([], dtype=object),
+        embeddings=np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="unsafe pickled object arrays"):
+        FrameEmbeddingCache.load(cache_path)
 
 
 def test_task_cache_artifacts_are_cache_dir_relative_and_deduped(tmp_path: Path):

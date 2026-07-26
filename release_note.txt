@@ -1,28 +1,51 @@
-## 新版本内容
+## v1.1.0 新版本内容
 
-本版本重点完善了视频合并页面的播放体验、结果展示逻辑以及针对海量视频分析时的底层稳定性。
+本版本重点完成 Windows、macOS、Linux 应用本体与 AI 运行环境的全面解耦，同时继续拆分视频合并编辑器，完善自动化测试和海量视频分析稳定性。
 
 ### 新增与优化
 
 - 优化合并视频页面：新增双进度条展示，下方长进度条代表全局总进度，右侧短进度条精准显示当前单片段进度。
+- 将 60 FPS 播放时钟与大型编辑器页面解耦，并拆分播放控件、播放头、属性面板和导出状态组件，减少播放与导出日志更新引发的整页重绘。
 - 完善多片段音频的联动逻辑：播放至下一片段时右侧音量状态可实时、准确跟随切换。
 - 增强“统一音量”功能：增加“统一成功”的操作提示，并稍微加强了按钮按下的视觉反馈动画。
+- 补全合并编辑器的英文界面翻译，并增加中英文 Merge 页面生产构建可视化冒烟检查。
 - 优化结果总览页面逻辑：明确“删除与该视频相关记录”操作为仅删除相对比的记录条数，不再错误影响整个报告文件。
+- Windows、macOS 和 Linux 的 Python、PyTorch、FFmpeg 运行环境改为独立版本化资产，支持代理、断点续传、取消、SHA-256 校验和原子安装；Windows 继续按 CPU/GPU 分包。
+- 三端安装包、便携包和应用更新资产不再携带大型 AI 运行环境、模型与可变数据目录。首次启动按需安装一次；只修改应用时，后续更新预计保持在十几至几十 MB，无需重复下载几个 GB。
+- 当前可执行文件旁仍保留的旧版内置 `env` 可从设置页直接迁移到应用本地数据目录，无需重新下载；迁移后可安全清理旧目录，避免长期占用双份空间。
+- 增加播放时钟和时间线行为测试，并将时间线排布、边界激活、拖拽避让、预览画布、几何换算、字幕解析、媒体元数据与拖放逻辑从大型页面迁出，`MergePage.tsx` 已降至约 3000 行并可继续渐进拆分。
+- 清理重复 CSS、未使用组件、依赖与模板资源，降低安装依赖数量和维护成本。
+- 大型视频库的候选筛选与并行比较改为有界处理，避免预先创建全部视频对或一次性提交全部任务。
 
 ### 修复的问题
 
 - 修复了分析阶段，开始分析海量视频时，因进程参数过大导致的 Windows 命令行长度超限报错问题。
+- 修复旧任务恢复时仍可能携带超长匹配键的问题，并为任务失败对增加明确计数。
 - 解决了音频在特定情况下的播放与同步问题。
 - 修复因 TypeScript 缺失属性导致的前端构建失败，以及 GPU Windows Packager 构建时的进程占用问题，提升整体编译打包稳定性。
+- 修复帧缓存依赖不安全 pickle 数据的问题；旧格式会自动失效并安全重建。
+- 固定离线 CLIP 模型版本，并在发布构建和应用安装时执行 SHA-256 完整性校验。
+- 修复 macOS/Linux 独立 runtime 解压后可能丢失 Unix 可执行权限的问题。
+- 更新程序会选择当前系统和架构对应的轻量应用资产，并显示远端更新包大小；运行环境和模型不会随应用更新重复安装。
+- Windows CUDA 13.0 runtime 固定使用 PyTorch 2.9.1，并在构建时校验依赖版本，避免复用本地错误环境造成包体膨胀；GPU runtime 保持为小于 GitHub 2 GiB 限制的单个 ZIP。
 
 ## 下载建议
 
-- Windows 安装版（推荐大多数用户）：下载 `Video_Similarity-v1.0.14-windows-x64-installer.exe`
-- Windows 便携版（免安装）：下载 `Video_Similarity-v1.0.14-windows-x64-portable.zip`，解压后运行里面的 `Video Similarity.exe`
-- macOS Apple Silicon / M 系列：下载 `Video_Similarity-v1.0.14-macos-arm64-installer.dmg`
-- macOS Intel：下载 `Video_Similarity-v1.0.14-macos-x64-installer.dmg`
-- Linux Debian/Ubuntu：下载 `Video_Similarity-v1.0.14-linux-x64-installer.deb`
-- Linux Fedora/openSUSE/RHEL：下载 `Video_Similarity-v1.0.14-linux-x64-installer.rpm`
-- Linux 通用便携：下载 `Video_Similarity-v1.0.14-linux-x64-portable.tar.gz`
+普通用户只需要下载一个与系统对应的应用包：
 
-`.sig` 和 `latest.json` 主要用于自动更新与签名校验，普通安装通常不需要手动下载。
+- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.1.0-windows-x64-cpu-installer.exe`
+- Windows GPU 安装版：`Video_Similarity-v1.1.0-windows-x64-gpu-installer.exe`
+- macOS M 系列：`Video_Similarity-v1.1.0-macos-arm64-installer.dmg`
+- macOS Intel：`Video_Similarity-v1.1.0-macos-x64-installer.dmg`
+- Linux Debian/Ubuntu：`Video_Similarity-v1.1.0-linux-x64-installer.deb`
+- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.1.0-linux-x64-installer.rpm`
+
+不想安装时，可以选择同平台文件名中带 `portable` 的便携包，解压后直接运行。
+
+以上安装包和便携包都是轻量应用包，不再内置大型 AI 环境。新用户第一次启动时，应用会自动安装一次对应的 runtime：CPU 版通常为数百 MB，Windows GPU 版接近 2 GiB。第一次分析还会按需下载约 600 MB 的 CLIP 模型。旧用户如果原有 `env` 仍在程序旁，可以从设置页直接迁移，避免重新下载。
+
+从 v1.1.0 开始，如果后续只是新增按钮、修改合并视频页面、修复界面或业务逻辑，更新程序只下载十几至几十 MB 的应用更新，原有 runtime 和模型会继续使用。只有 runtime 或模型版本确实改变时，才会重新下载对应资产。
+
+`Video_Similarity-runtime-v1-*`、`.sha256`、`*-updater.exe`、`.sig` 和更新 JSON 均由应用自动选择、下载或校验，普通用户不需要手动下载。
+
+Windows GPU runtime 使用 CUDA 13.0，仅适用于 Turing 或更新架构（计算能力 7.5+）且安装 R580+ 驱动的 NVIDIA 显卡。其他设备请选择 CPU 包，避免无效下载。

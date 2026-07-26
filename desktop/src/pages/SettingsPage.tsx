@@ -31,6 +31,7 @@ import {
   Toggle,
 } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
+import { RuntimeSettingsCard } from '@/components/RuntimeSettingsCard'
 import { Translated } from '@/i18n/Translated'
 import {
   cancelUpdateDownload,
@@ -731,6 +732,7 @@ function BaseSettings({
       </div>
 
       <div className="settings-side-stack">
+        <RuntimeSettingsCard />
         <div className="settings-about-card">
           <div className="about-title">
             <Info size={24} />

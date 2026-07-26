@@ -110,6 +110,7 @@ def ensure_video_indexed(
             skip_threshold=skip_threshold,
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
+            source_duration_sec=sampler.source_duration_sec,
         )
     print(f"    Saved cache: {cache_path}")
 

@@ -1157,35 +1157,36 @@ export function ResultsPage() {
         onKeepReport={() => void handleDeleteAllResults(false)}
         onDeleteReport={() => void handleDeleteAllResults(true)}
       />
-      <ReportListDialog
-        open={reportListDialogOpen}
-        reports={reportOptions}
-        busy={deletingResults}
-        onClose={() => setReportListDialogOpen(false)}
-        onDeleteSelected={async (paths) => {
-          setDeletingResults(true)
-          try {
-            for (const p of paths) {
-              await deleteReport(p)
+      {reportListDialogOpen && (
+        <ReportListDialog
+          reports={reportOptions}
+          busy={deletingResults}
+          onClose={() => setReportListDialogOpen(false)}
+          onDeleteSelected={async (paths) => {
+            setDeletingResults(true)
+            try {
+              for (const p of paths) {
+                await deleteReport(p)
+              }
+              setNotice(`已成功删除 ${paths.length} 个报告。`)
+              setReportListDialogOpen(false)
+              if (activeReport && paths.includes(activeReport.jsonPath || activeReport.csvPath || activeReport.htmlPath || activeReport.path || '')) {
+                setReport(null)
+                setResultSummary(null)
+                setActiveReport(null)
+                setSelectedIds(new Set())
+                setSelectedVideoKeys(new Set())
+                setSelectedPair(null)
+              }
+              void handleRefreshReports()
+            } catch (err) {
+              setError(normalizeBackendError(err))
+            } finally {
+              setDeletingResults(false)
             }
-            setNotice(`已成功删除 ${paths.length} 个报告。`)
-            setReportListDialogOpen(false)
-            if (activeReport && paths.includes(activeReport.jsonPath || activeReport.csvPath || activeReport.htmlPath || activeReport.path || '')) {
-              setReport(null)
-              setResultSummary(null)
-              setActiveReport(null)
-              setSelectedIds(new Set())
-              setSelectedVideoKeys(new Set())
-              setSelectedPair(null)
-            }
-            void handleRefreshReports()
-          } catch (err) {
-            setError(normalizeBackendError(err))
-          } finally {
-            setDeletingResults(false)
-          }
-        }}
-      />
+          }}
+        />
+      )}
     </div>
     </Translated>
   )
@@ -1494,25 +1495,17 @@ function resolveResultVideoPath(path: string, name: string, videoDir: string) {
 }
 
 function ReportListDialog({
-  open,
   reports,
   onClose,
   onDeleteSelected,
   busy
 }: {
-  open: boolean
   reports: ReportSummary[]
   onClose: () => void
   onDeleteSelected: (paths: string[]) => Promise<void>
   busy: boolean
 }) {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
-
-  useEffect(() => {
-    if (open) setSelectedPaths(new Set())
-  }, [open])
-
-  if (!open) return null
 
   const handleSelectAll = (checked: boolean) => {
     if (checked) {

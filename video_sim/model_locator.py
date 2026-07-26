@@ -1,6 +1,8 @@
 """Locate an optional application-local CLIP model for offline use."""
 
 import os
+import hashlib
+import json
 from pathlib import Path
 from typing import Optional, Union
 
@@ -97,3 +99,44 @@ def resolve_embedding_model_source(
             return snapshot
 
     return DEFAULT_EMBEDDING_MODEL
+
+
+def embedding_model_fingerprint(
+    project_root: Optional[Union[str, Path]] = None,
+) -> str:
+    """Return a stable cache identity for the resolved embedding model."""
+    source = resolve_embedding_model_source(project_root)
+    if not isinstance(source, Path):
+        return f"huggingface:{source}"
+
+    files = []
+    for name in (
+        "config.json",
+        "preprocessor_config.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+    ):
+        path = source / name
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        entry = {
+            "name": name,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+        if stat.st_size <= 2 * 1024 * 1024:
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        files.append(entry)
+
+    payload = json.dumps(
+        {
+            "path": str(source.resolve(strict=False)),
+            "files": files,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"local-sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"

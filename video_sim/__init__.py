@@ -11,7 +11,7 @@ Usage:
     # These work immediately (no torch/faiss loading):
     from video_sim import Config, VideoScanner, VideoInfo, scan_videos
     from video_sim import BatchReportData, write_json_report, write_csv_report, write_html_report
-    from video_sim import PreprocessConfig, ResizeMode
+    from video_sim import PreprocessConfig, ResizeMode  # lazily imports OpenCV
 
     # These trigger lazy loading of heavy dependencies:
     from video_sim import VideoEmbedder, VideoIndexer, VideoMatcher
@@ -19,7 +19,7 @@ Usage:
     from video_sim.segmenter import fixed_window_similarity, aggregate_segments
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ============================================================================
 # Lightweight imports only - no torch, faiss, transformers, cv2, etc.
@@ -33,7 +33,6 @@ from video_sim.reporter import (
     write_csv_report,
     write_html_report,
 )
-from video_sim.preprocess import PreprocessConfig, ResizeMode
 
 # ============================================================================
 # Heavy modules - available via lazy loading
@@ -46,6 +45,8 @@ _LAZY_MODULES = {
     "dynamic_sample_frames": ("video_sim.frame_sampler", "dynamic_sample_frames"),
     "RetainedFrame": ("video_sim.frame_sampler", "RetainedFrame"),
     "compute_phash_similarity": ("video_sim.frame_sampler", "compute_phash_similarity"),
+    "PreprocessConfig": ("video_sim.preprocess", "PreprocessConfig"),
+    "ResizeMode": ("video_sim.preprocess", "ResizeMode"),
     "VideoEmbedder": ("video_sim.embedder", "VideoEmbedder"),
     "embed_video": ("video_sim.embedder", "embed_video"),
     "FrameEmbeddingCache": ("video_sim.embedder", "FrameEmbeddingCache"),
@@ -81,9 +82,9 @@ __all__ = [
     "write_json_report",
     "write_csv_report",
     "write_html_report",
+    # Heavy (lazy loaded)
     "PreprocessConfig",
     "ResizeMode",
-    # Heavy (lazy loaded)
     "FrameSampler",
     "sample_frames",
     "compute_frame_features",

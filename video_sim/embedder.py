@@ -33,10 +33,11 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 from video_sim.preprocess import PreprocessConfig, preprocess_frame_for_clip
 from video_sim.model_locator import (
     DEFAULT_EMBEDDING_MODEL,
+    embedding_model_fingerprint,
     resolve_embedding_model_source,
 )
 
-FRAME_CACHE_SCHEMA_VERSION = 2
+FRAME_CACHE_SCHEMA_VERSION = 3
 
 
 def frames_to_pil(frames: np.ndarray) -> List[Image.Image]:
@@ -319,14 +320,14 @@ class FrameEmbeddingCache:
             with open(tmp_path, "wb") as f:
                 np.savez(
                     f,
-                    video_path=self.video_path,
+                    video_path=np.asarray(self.video_path, dtype=np.str_),
                     frame_indices=self.frame_indices,
                     timestamps=self.timestamps,
-                    phashes=np.array(self.phashes, dtype=object),
-                    thumbnail_paths=np.array(self.thumbnail_paths, dtype=object),
+                    phashes=np.asarray(self.phashes, dtype=np.str_),
+                    thumbnail_paths=np.asarray(self.thumbnail_paths, dtype=np.str_),
                     embeddings=self.embeddings,
-                    preprocess_config=np.array(config_json, dtype=object),
-                    metadata=np.array(metadata_json, dtype=object),
+                    preprocess_config=np.asarray(config_json, dtype=np.str_),
+                    metadata=np.asarray(metadata_json, dtype=np.str_),
                 )
             tmp_path.replace(path)
         finally:
@@ -355,32 +356,41 @@ class FrameEmbeddingCache:
         if not path.exists():
             raise FileNotFoundError(f"Cache file not found: {path}")
 
-        data = np.load(str(path), allow_pickle=True)
+        try:
+            with np.load(str(path), allow_pickle=False) as data:
+                # Load preprocess_config if present
+                preprocess_config = None
+                if "preprocess_config" in data:
+                    config_json = _np_scalar_to_string(data["preprocess_config"])
+                    if config_json:
+                        config_dict = json.loads(config_json)
+                        preprocess_config = PreprocessConfig.from_dict(config_dict)
 
-        # Load preprocess_config if present
-        preprocess_config = None
-        if "preprocess_config" in data:
-            config_json = _np_scalar_to_string(data["preprocess_config"])
-            if config_json:
-                config_dict = json.loads(config_json)
-                preprocess_config = PreprocessConfig.from_dict(config_dict)
+                metadata = None
+                if "metadata" in data:
+                    metadata_json = _np_scalar_to_string(data["metadata"])
+                    if metadata_json:
+                        metadata = json.loads(metadata_json)
 
-        metadata = None
-        if "metadata" in data:
-            metadata_json = _np_scalar_to_string(data["metadata"])
-            if metadata_json:
-                metadata = json.loads(metadata_json)
-
-        return cls(
-            video_path=_np_scalar_to_string(data["video_path"]),
-            frame_indices=data["frame_indices"],
-            timestamps=data["timestamps"],
-            phashes=data["phashes"].tolist() if hasattr(data["phashes"], "tolist") else list(data["phashes"]),
-            thumbnail_paths=data["thumbnail_paths"].tolist() if hasattr(data["thumbnail_paths"], "tolist") else list(data["thumbnail_paths"]),
-            embeddings=data["embeddings"],
-            preprocess_config=preprocess_config,
-            metadata=metadata,
-        )
+                return cls(
+                    video_path=_np_scalar_to_string(data["video_path"]),
+                    frame_indices=np.asarray(data["frame_indices"]),
+                    timestamps=np.asarray(data["timestamps"]),
+                    phashes=np.asarray(data["phashes"], dtype=np.str_).tolist(),
+                    thumbnail_paths=np.asarray(
+                        data["thumbnail_paths"], dtype=np.str_
+                    ).tolist(),
+                    embeddings=np.asarray(data["embeddings"]),
+                    preprocess_config=preprocess_config,
+                    metadata=metadata,
+                )
+        except ValueError as error:
+            if "Object arrays cannot be loaded" in str(error):
+                raise ValueError(
+                    "Legacy frame cache contains unsafe pickled object arrays; "
+                    "delete or rebuild the cache"
+                ) from error
+            raise
 
     @classmethod
     def get_video_cache_dir(
@@ -453,7 +463,7 @@ class FrameEmbeddingCache:
         max_gap_sec: Optional[float],
         frame_step: Optional[int] = None,
         preprocess_config: Optional["PreprocessConfig"] = None,
-        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        embedding_model: Optional[str] = None,
     ) -> Dict[str, object]:
         """Build metadata used to decide whether a frame cache is still valid."""
         if preprocess_config is None:
@@ -471,7 +481,7 @@ class FrameEmbeddingCache:
             "max_gap_sec": _round_optional_float(max_gap_sec),
             "frame_step": max(1, int(frame_step or 1)),
             "preprocess_config": preprocess_config.to_dict(),
-            "embedding_model": embedding_model,
+            "embedding_model": embedding_model or embedding_model_fingerprint(),
         }
 
     @classmethod
@@ -597,6 +607,7 @@ def embed_frames_with_cache(
     skip_threshold: Optional[float] = None,
     max_gap_sec: Optional[float] = None,
     frame_step: Optional[int] = None,
+    source_duration_sec: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> FrameEmbeddingCache:
     """
@@ -693,11 +704,15 @@ def embed_frames_with_cache(
         preprocess_config=preprocess_config,
     )
     retained_duration_sec = max((float(rf.timestamp) for rf in retained_frames), default=0.0)
+    duration_sec = max(
+        retained_duration_sec,
+        float(source_duration_sec or 0.0),
+    )
     metadata.update(
         {
             "retained_frame_count": len(retained_frames),
             "retained_duration_sec": retained_duration_sec,
-            "duration_sec": retained_duration_sec,
+            "duration_sec": duration_sec,
         }
     )
 

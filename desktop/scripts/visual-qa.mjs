@@ -10,23 +10,31 @@ const repoRoot = path.resolve(desktopDir, '..')
 const routes = [
   { id: 'page1_analyze_page', route: '/', baseline: 'page/page1_analyze_page.png', title: '分析任务' },
   { id: 'page2_results_page', route: '/results', baseline: 'page/page2_results_page.png', title: '结果总览' },
-  { id: 'page3_reports_page', route: '/reports', baseline: 'page/page3_reports_page.png', title: '报告中心' },
   { id: 'page4_settings_page', route: '/settings', baseline: 'page/page4_settings_page.png', title: '设置' },
+  { id: 'page5_merge_page', route: '/merge', baseline: null, title: '视频合并' },
 ]
 
 const options = parseArgs(process.argv.slice(2))
 const targetUrl = options.url ?? process.env.VISUAL_QA_URL ?? 'http://127.0.0.1:5173/'
+const selectedRoutes = options.route
+  ? routes.filter((route) => route.route === options.route || route.id === options.route)
+  : routes
+if (selectedRoutes.length === 0) {
+  throw new Error(`Unknown visual QA route: ${options.route}`)
+}
 const viewport = {
   width: Number(options.width ?? process.env.VISUAL_QA_WIDTH ?? 1586),
   height: Number(options.height ?? process.env.VISUAL_QA_HEIGHT ?? 992),
 }
 const maxDiffRatio = Number(options.maxDiffRatio ?? process.env.VISUAL_QA_MAX_DIFF_RATIO ?? 0.03)
+const navigationTimeout = Number(options.navigationTimeout ?? process.env.VISUAL_QA_NAVIGATION_TIMEOUT ?? 45000)
 const mockTauri = options.realTauri !== true
 const headed = options.headed === true || process.env.HEADED === '1'
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
 const outputDir = path.resolve(desktopDir, 'visual-qa-output', timestamp)
 
 const { chromium, PNG, pixelmatch } = await loadDependencies()
+const managedDevServer = await startManagedDevServerIfNeeded(targetUrl, options)
 
 fs.mkdirSync(outputDir, { recursive: true })
 
@@ -48,22 +56,22 @@ page.on('pageerror', (error) => {
 })
 
 if (mockTauri) {
-  await installTauriMock(page)
+  await installTauriMock(page, options.language)
 }
 
 const results = []
 
-for (const route of routes) {
+for (const route of selectedRoutes) {
   const beforeErrorCount = pageErrors.length
   const beforeConsoleCount = consoleMessages.length
   const url = routeUrl(targetUrl, route.route)
   const actualPath = path.join(outputDir, `${route.id}.actual.png`)
   const diffPath = path.join(outputDir, `${route.id}.diff.png`)
-  const baselinePath = path.resolve(repoRoot, route.baseline)
+  const baselinePath = route.baseline ? path.resolve(repoRoot, route.baseline) : null
 
   let result
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeout })
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
     await page.locator('.app-frame').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
     await page.waitForTimeout(350)
@@ -74,7 +82,17 @@ for (const route of routes) {
     const actual = PNG.sync.read(screenshot)
     const blackStats = getBlackStats(actual)
 
-    if (!fs.existsSync(baselinePath)) {
+    if (!baselinePath) {
+      const routeErrors = pageErrors.slice(beforeErrorCount)
+      result = {
+        ...baseResult(route, url, actualPath, diffPath, baselinePath),
+        ok: !blackStats.isMostlyBlack && routeErrors.length === 0,
+        smokeOnly: true,
+        blackStats,
+        pageErrors: routeErrors,
+        consoleMessages: consoleMessages.slice(beforeConsoleCount),
+      }
+    } else if (!fs.existsSync(baselinePath)) {
       result = {
         ...baseResult(route, url, actualPath, diffPath, baselinePath),
         ok: false,
@@ -127,6 +145,7 @@ for (const route of routes) {
 }
 
 await browser.close()
+await managedDevServer?.close()
 
 const report = {
   generatedAt: new Date().toISOString(),
@@ -156,8 +175,45 @@ function parseArgs(args) {
     else if (arg === '--width') parsed.width = args[++index]
     else if (arg === '--height') parsed.height = args[++index]
     else if (arg === '--max-diff-ratio') parsed.maxDiffRatio = args[++index]
+    else if (arg === '--navigation-timeout') parsed.navigationTimeout = args[++index]
+    else if (arg === '--route') parsed.route = args[++index]
+    else if (arg === '--language') parsed.language = args[++index]
   }
   return parsed
+}
+
+async function startManagedDevServerIfNeeded(url, parsedOptions) {
+  if (await urlResponds(url)) return null
+  const parsedUrl = new URL(url)
+  const localHost = parsedUrl.hostname === '127.0.0.1' || parsedUrl.hostname === 'localhost'
+  if (parsedOptions.url || !localHost || parsedOptions.realTauri === true) {
+    throw new Error(`Visual QA target is not reachable: ${url}`)
+  }
+
+  const { build, preview } = await import('vite')
+  await build({ root: desktopDir })
+  const server = await preview({
+    root: desktopDir,
+    preview: {
+      host: parsedUrl.hostname,
+      port: Number(parsedUrl.port || 5173),
+      strictPort: true,
+    },
+  })
+  return {
+    close: () => new Promise((resolve, reject) => {
+      server.httpServer.close((error) => error ? reject(error) : resolve())
+    }),
+  }
+}
+
+async function urlResponds(url) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
+    return response.ok
+  } catch {
+    return false
+  }
 }
 
 async function loadDependencies() {
@@ -179,7 +235,15 @@ async function loadDependencies() {
   }
 }
 
-async function installTauriMock(page) {
+async function installTauriMock(page, language) {
+  if (language) {
+    await page.addInitScript((appLanguage) => {
+      window.localStorage.setItem('video-similarity-settings', JSON.stringify({
+        state: { appLanguage },
+        version: 0,
+      }))
+    }, language)
+  }
   await page.addInitScript(() => {
     const samplePairs = [
       {
@@ -265,6 +329,7 @@ async function installTauriMock(page) {
       {
         id: 'report_2026_05_24',
         path: 'D:\\Reports\\report_2026_05_24.json',
+        jsonPath: 'D:\\Reports\\report_2026_05_24.json',
         csvPath: 'D:\\Reports\\report_2026_05_24.csv',
         htmlPath: 'D:\\Reports\\report_2026_05_24.html',
         name: 'report_2026_05_24.json',
@@ -275,10 +340,12 @@ async function installTauriMock(page) {
         pairCount: 55,
         warningCount: 0,
         status: '已完成',
+        formats: ['json', 'csv', 'html'],
       },
       {
         id: 'hp_compare',
         path: 'D:\\Reports\\HP 对比报告.json',
+        jsonPath: 'D:\\Reports\\HP 对比报告.json',
         csvPath: 'D:\\Reports\\HP 对比报告.csv',
         htmlPath: 'D:\\Reports\\HP 对比报告.html',
         name: 'HP 对比报告.json',
@@ -289,10 +356,12 @@ async function installTauriMock(page) {
         pairCount: 16,
         warningCount: 0,
         status: '已完成',
+        formats: ['json', 'csv', 'html'],
       },
       {
         id: 'batch_01',
         path: 'D:\\Reports\\批量检测结果_01.json',
+        jsonPath: 'D:\\Reports\\批量检测结果_01.json',
         csvPath: 'D:\\Reports\\批量检测结果_01.csv',
         htmlPath: 'D:\\Reports\\批量检测结果_01.html',
         name: '批量检测结果_01.json',
@@ -303,10 +372,12 @@ async function installTauriMock(page) {
         pairCount: 190,
         warningCount: 0,
         status: '生成中',
+        formats: ['json', 'csv', 'html'],
       },
       {
         id: 'weekly',
         path: 'D:\\Reports\\相似度分析_周报.json',
+        jsonPath: 'D:\\Reports\\相似度分析_周报.json',
         csvPath: 'D:\\Reports\\相似度分析_周报.csv',
         htmlPath: 'D:\\Reports\\相似度分析_周报.html',
         name: '相似度分析_周报.json',
@@ -317,10 +388,12 @@ async function installTauriMock(page) {
         pairCount: 105,
         warningCount: 0,
         status: '已完成',
+        formats: ['json', 'csv', 'html'],
       },
       {
         id: 'abnormal',
         path: 'D:\\Reports\\异常对比_20260520.json',
+        jsonPath: 'D:\\Reports\\异常对比_20260520.json',
         csvPath: 'D:\\Reports\\异常对比_20260520.csv',
         htmlPath: 'D:\\Reports\\异常对比_20260520.html',
         name: '异常对比_20260520.json',
@@ -331,6 +404,7 @@ async function installTauriMock(page) {
         pairCount: 36,
         warningCount: 1,
         status: '失败',
+        formats: ['json'],
       },
     ]
 
@@ -379,12 +453,62 @@ async function installTauriMock(page) {
             defaultCacheDir: 'data',
             defaultOutputDir: 'data\\reports',
             appName: 'video-similarity-desktop',
-            version: '1.0.0',
+            version: '1.1.0',
+            buildFlavor: 'cpu',
+            installType: 'portable',
+            installRoot: 'D:\\Agent\\Project\\video-containment-detector',
+          }
+        }
+        if (cmd === 'get_runtime_status') {
+          return {
+            ready: true,
+            managed: true,
+            legacyFallback: false,
+            legacyMigrationAvailable: false,
+            legacyCleanupAvailable: false,
+            legacyRuntimeDir: '',
+            expectedVersion: '1',
+            installedVersion: '1',
+            flavor: 'cpu',
+            runtimeDir: 'C:\\Users\\VisualQA\\AppData\\Local\\video-similarity\\runtime\\versions\\1\\cpu',
+            pythonPath: 'C:\\Users\\VisualQA\\AppData\\Local\\video-similarity\\runtime\\versions\\1\\cpu\\env\\python\\python.exe',
+            assetName: 'Video_Similarity-runtime-v1-windows-x64-cpu.zip',
+            message: 'Managed runtime is ready.',
           }
         }
         if (cmd === 'scan_videos') return videos
         if (cmd === 'list_reports') return reports
         if (cmd === 'read_report') return sampleReport
+        if (cmd === 'read_text_file') return JSON.stringify(sampleReport)
+        if (cmd === 'path_status') {
+          return {
+            exists: true,
+            isFile: true,
+            normalizedPath: 'D:\\Reports\\report_2026_05_24.json',
+          }
+        }
+        if (cmd === 'list_analysis_tasks' || cmd === 'list_config_templates') return []
+        if (cmd === 'get_file_move_status') {
+          return {
+            running: false,
+            cancelRequested: false,
+            completed: 0,
+            total: 0,
+            currentPath: '',
+            targetDir: '',
+            pendingPaths: [],
+          }
+        }
+        if (cmd === 'get_clip_model_status') {
+          return {
+            installed: true,
+            modelDir: 'C:\\Users\\VisualQA\\AppData\\Local\\video-similarity\\assets\\models\\clip-vit-base-patch32',
+            sizeBytes: 605_000_000,
+            message: 'Offline CLIP model is ready.',
+            requiredFiles: ['config.json', 'preprocessor_config.json', 'pytorch_model.bin'],
+            missingFiles: [],
+          }
+        }
         if (cmd === 'run_batch_compare' || cmd === 'run_compare_two') {
           return {
             success: true,

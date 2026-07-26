@@ -29,7 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, RLock
@@ -674,6 +674,7 @@ def build_resume_signature(videos: list[Path], args, preprocess_config, resolved
         "error_severe_limit": args.error_severe_limit,
         "error_missing_limit": args.error_missing_limit,
         "preflight_validation": not args.skip_stream_validation,
+        "early_stop": not bool(args.disable_early_stop),
         "crop_black_borders": preprocess_config.crop_black_borders,
         "resize_mode": preprocess_config.resize_mode.value,
         "input_size": preprocess_config.input_size,
@@ -691,6 +692,20 @@ def pair_key(video_a: Path, video_b: Path) -> str:
         )
     left, right = sorted(identities)
     return f"{left}||{right}"
+
+
+def cache_duration_seconds(cache) -> float:
+    metadata = cache.metadata if isinstance(cache.metadata, dict) else {}
+    for key in ("duration_sec", "source_duration_sec", "retained_duration_sec"):
+        try:
+            duration = float(metadata.get(key) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            return duration
+    if len(cache.timestamps) > 0:
+        return max(0.0, float(cache.timestamps[-1]))
+    return 0.0
 
 
 def task_video_records(videos: list[Path]) -> list[dict]:
@@ -1037,6 +1052,7 @@ def start_task_manifest(
         "videoCount": len(video_records),
         "totalPairs": max(0, int(total_pairs)),
         "completedPairs": max(0, int(completed_pairs)),
+        "failedPairs": 0,
         "progress": task_stage_progress(merge_task_stages(existing.get("stages"))),
         "stage": "正在恢复历史进度" if completed_pairs else "准备比较视频对",
         "matchKey": match_key,
@@ -1111,6 +1127,7 @@ def activate_task_manifest(
         "videoCount": len(videos),
         "totalPairs": total_pairs,
         "completedPairs": 0 if directory_changed else max(0, int(existing.get("completedPairs") or 0)),
+        "failedPairs": 0,
         "progress": task_stage_progress(stages),
         "stage": "检测到增量视频，正在重新校验并复用未变化缓存" if directory_changed else "正在校验视频码流",
         "matchKey": match_key,
@@ -1291,6 +1308,7 @@ def ensure_video_indexed(
         skip_threshold=skip_threshold,
         max_gap_sec=max_gap_sec,
         frame_step=frame_step,
+        source_duration_sec=sampler.source_duration_sec,
         progress_callback=embed_progress_callback,
     )
     log(f"  Saved cache: {cache_path}")
@@ -2059,6 +2077,7 @@ def main():
         if key in pair_units
     )
     completed_pair_count = len(resumed_candidate_pairs)
+    failed_pair_count = 0
     if completed_pair_count:
         emit_progress(
             "compare",
@@ -2140,8 +2159,8 @@ def main():
             )
 
         def store_parallel_pair(current_pair_key: str, result, cache_a, cache_b):
-            duration_a = cache_a.timestamps[-1] if len(cache_a.timestamps) > 0 else 0
-            duration_b = cache_b.timestamps[-1] if len(cache_b.timestamps) > 0 else 0
+            duration_a = cache_duration_seconds(cache_a)
+            duration_b = cache_duration_seconds(cache_b)
             windows_a_to_b = fixed_window_similarity(
                 result.matches_a_to_b,
                 window_size=args.window_size,
@@ -2180,81 +2199,110 @@ def main():
 
         with ThreadPoolExecutor(max_workers=compare_workers) as executor:
             future_meta = {}
-            for pair_index, (video_a, video_b) in enumerate(video_pairs, start=1):
-                raise_if_cancelled(cancel_file)
-                current_pair_key = pair_key(video_a, video_b)
-                current_pair_units = pair_units[current_pair_key]
-                cached_pair = resume_state.get("pairs", {}).get(current_pair_key)
-                if cached_pair:
-                    report_data.video_pairs.append(cached_pair)
-                    log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
-                    continue
-                pair_sub_label = f"当前比较：{video_a.name} ↔ {video_b.name}"
-                future = executor.submit(
-                    compute_exact_pair,
-                    pair_index,
-                    video_a,
-                    video_b,
-                    current_pair_key,
-                    current_pair_units,
-                    pair_sub_label,
-                )
-                future_meta[future] = (
-                    pair_index,
-                    video_a,
-                    video_b,
-                    current_pair_key,
-                    current_pair_units,
-                    pair_sub_label,
-                )
+            pair_iterator = iter(enumerate(video_pairs, start=1))
+            pairs_exhausted = False
+            max_in_flight = max(compare_workers, compare_workers * 4)
 
-            for future in as_completed(future_meta):
-                pair_index, video_a, video_b, current_pair_key, current_pair_units, pair_sub_label = future_meta[future]
-                try:
+            while future_meta or not pairs_exhausted:
+                while not pairs_exhausted and len(future_meta) < max_in_flight:
                     raise_if_cancelled(cancel_file)
-                    result = future.result()
-                    store_parallel_pair(current_pair_key, result, video_caches[video_a], video_caches[video_b])
-                    with progress_lock:
-                        in_flight_pair_units.pop(current_pair_key, None)
-                        compare_units_done += current_pair_units
-                        completed_pair_count += 1
-                    update_task_manifest(
-                        completedPairs=completed_pair_count,
-                        progress=round(completed_pair_count / max(1, total_pairs) * 100.0, 2),
-                        stage=f"已完成视频对 {completed_pair_count}/{total_pairs}",
+                    try:
+                        pair_index, (video_a, video_b) = next(pair_iterator)
+                    except StopIteration:
+                        pairs_exhausted = True
+                        break
+
+                    current_pair_key = pair_key(video_a, video_b)
+                    current_pair_units = pair_units[current_pair_key]
+                    cached_pair = resume_state.get("pairs", {}).get(current_pair_key)
+                    if cached_pair:
+                        report_data.video_pairs.append(cached_pair)
+                        log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
+                        continue
+
+                    pair_sub_label = f"当前比较：{video_a.name} ↔ {video_b.name}"
+                    future = executor.submit(
+                        compute_exact_pair,
+                        pair_index,
+                        video_a,
+                        video_b,
+                        current_pair_key,
+                        current_pair_units,
+                        pair_sub_label,
                     )
-                    emit_progress(
-                        "compare",
-                        compare_units_done,
-                        compare_units_total,
-                        f"完成比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
-                        1,
-                        1,
-                        f"{pair_sub_label} · 比较完成",
+                    future_meta[future] = (
+                        pair_index,
+                        video_a,
+                        video_b,
+                        current_pair_key,
+                        current_pair_units,
+                        pair_sub_label,
                     )
-                except AnalysisCancelled:
-                    raise
-                except Exception as e:
-                    warning_msg = (
-                        "Failed to compare videos: "
-                        f"video_a={display_path(video_a)}; "
-                        f"video_b={display_path(video_b)}; "
-                        f"reason={e}"
-                    )
-                    log(f"\nWarning: {warning_msg}")
-                    report_data.add_warning(warning_msg)
-                    with progress_lock:
-                        in_flight_pair_units.pop(current_pair_key, None)
-                        compare_units_done += current_pair_units
-                    emit_progress(
-                        "compare",
-                        compare_units_done,
-                        compare_units_total,
-                        f"跳过失败比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
-                        1,
-                        1,
-                        f"{pair_sub_label} · 比较失败",
-                    )
+
+                if not future_meta:
+                    continue
+
+                completed_futures, _ = wait(
+                    tuple(future_meta),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in completed_futures:
+                    pair_index, video_a, video_b, current_pair_key, current_pair_units, pair_sub_label = future_meta.pop(future)
+                    try:
+                        raise_if_cancelled(cancel_file)
+                        result = future.result()
+                        store_parallel_pair(current_pair_key, result, video_caches[video_a], video_caches[video_b])
+                        with progress_lock:
+                            in_flight_pair_units.pop(current_pair_key, None)
+                            compare_units_done += current_pair_units
+                            completed_pair_count += 1
+                        processed_pair_count = completed_pair_count + failed_pair_count
+                        update_task_manifest(
+                            completedPairs=processed_pair_count,
+                            failedPairs=failed_pair_count,
+                            progress=round(processed_pair_count / max(1, total_pairs) * 100.0, 2),
+                            stage=f"已处理视频对 {processed_pair_count}/{total_pairs}",
+                        )
+                        emit_progress(
+                            "compare",
+                            compare_units_done,
+                            compare_units_total,
+                            f"完成比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
+                            1,
+                            1,
+                            f"{pair_sub_label} · 比较完成",
+                        )
+                    except AnalysisCancelled:
+                        raise
+                    except Exception as e:
+                        failed_pair_count += 1
+                        warning_msg = (
+                            "Failed to compare videos: "
+                            f"video_a={display_path(video_a)}; "
+                            f"video_b={display_path(video_b)}; "
+                            f"reason={e}"
+                        )
+                        log(f"\nWarning: {warning_msg}")
+                        report_data.add_warning(warning_msg)
+                        with progress_lock:
+                            in_flight_pair_units.pop(current_pair_key, None)
+                            compare_units_done += current_pair_units
+                        processed_pair_count = completed_pair_count + failed_pair_count
+                        update_task_manifest(
+                            completedPairs=processed_pair_count,
+                            failedPairs=failed_pair_count,
+                            progress=round(processed_pair_count / max(1, total_pairs) * 100.0, 2),
+                            stage=f"已处理视频对 {processed_pair_count}/{total_pairs}，失败 {failed_pair_count} 对",
+                        )
+                        emit_progress(
+                            "compare",
+                            compare_units_done,
+                            compare_units_total,
+                            f"跳过失败比较 {pair_index}/{total_pairs}：{video_a.name} / {video_b.name}",
+                            1,
+                            1,
+                            f"{pair_sub_label} · 比较失败",
+                        )
 
         video_pairs = []
 
@@ -2317,8 +2365,8 @@ def main():
             )
 
             # Compute directional window similarity so A→B and B→A are not mixed.
-            duration_a = cache_a.timestamps[-1] if len(cache_a.timestamps) > 0 else 0
-            duration_b = cache_b.timestamps[-1] if len(cache_b.timestamps) > 0 else 0
+            duration_a = cache_duration_seconds(cache_a)
+            duration_b = cache_duration_seconds(cache_b)
             windows_a_to_b = fixed_window_similarity(
                 result.matches_a_to_b,
                 window_size=args.window_size,
@@ -2361,10 +2409,12 @@ def main():
                     log(f"Warning: Failed to save resume checkpoint: {compact_error(checkpoint_error)}")
             compare_units_done += current_pair_units
             completed_pair_count += 1
+            processed_pair_count = completed_pair_count + failed_pair_count
             update_task_manifest(
-                completedPairs=completed_pair_count,
-                progress=round(completed_pair_count / max(1, total_pairs) * 100.0, 2),
-                stage=f"已完成视频对 {completed_pair_count}/{total_pairs}",
+                completedPairs=processed_pair_count,
+                failedPairs=failed_pair_count,
+                progress=round(processed_pair_count / max(1, total_pairs) * 100.0, 2),
+                stage=f"已处理视频对 {processed_pair_count}/{total_pairs}",
             )
             emit_progress(
                 "compare",
@@ -2379,6 +2429,7 @@ def main():
         except AnalysisCancelled:
             raise
         except Exception as e:
+            failed_pair_count += 1
             warning_msg = (
                 "Failed to compare videos: "
                 f"video_a={display_path(video_a)}; "
@@ -2388,6 +2439,13 @@ def main():
             log(f"\nWarning: {warning_msg}")
             report_data.add_warning(warning_msg)
             compare_units_done += current_pair_units
+            processed_pair_count = completed_pair_count + failed_pair_count
+            update_task_manifest(
+                completedPairs=processed_pair_count,
+                failedPairs=failed_pair_count,
+                progress=round(processed_pair_count / max(1, total_pairs) * 100.0, 2),
+                stage=f"已处理视频对 {processed_pair_count}/{total_pairs}，失败 {failed_pair_count} 对",
+            )
             emit_progress(
                 "compare",
                 compare_units_done,
@@ -2437,7 +2495,7 @@ def main():
     log(f"Pairs compared: {len(report_data.video_pairs)}")
     log(
         "Candidate pairs: "
-        f"{len(video_pairs)}/{candidate_selection.all_pair_count} "
+        f"{total_pairs}/{candidate_selection.all_pair_count} "
         f"(limit per video: {candidate_selection.candidate_limit or 'all'})"
     )
     log(f"Warnings: {len(report_data.warnings)}")
@@ -2456,8 +2514,9 @@ def main():
     update_task_manifest(
         status="completed",
         completedPairs=total_pairs,
+        failedPairs=failed_pair_count,
         progress=100.0,
-        stage="分析完成",
+        stage=f"分析完成，{failed_pair_count} 对失败" if failed_pair_count else "分析完成",
         reportJson=_portable_path(json_path),
         reportCsv=_portable_path(csv_path),
         reportHtml=_portable_path(html_path),

@@ -9,13 +9,6 @@ Uses artificial vectors to verify:
 
 import numpy as np
 import pytest
-import sys
-import types
-
-decord_stub = types.ModuleType("decord")
-decord_stub.VideoReader = object
-decord_stub.cpu = lambda *_args, **_kwargs: None
-sys.modules.setdefault("decord", decord_stub)
 
 from video_sim.embedder import FrameEmbeddingCache
 from video_sim.indexer import FrameIndexResult, build_frame_index

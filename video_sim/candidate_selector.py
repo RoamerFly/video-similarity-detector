@@ -43,14 +43,18 @@ def select_candidate_pairs(
     symmetric: a pair is kept when either side selects the other.
     """
     videos = list(video_caches.keys())
-    all_pairs = list(combinations(videos, 2))
-    all_pair_count = len(all_pairs)
+    all_pair_count = len(videos) * (len(videos) - 1) // 2
     limit = max(0, int(candidate_limit))
 
-    if len(videos) < 2 or limit == 0 or limit >= len(videos) - 1:
+    if len(videos) < 2:
         if progress_callback:
             progress_callback(len(videos), max(1, len(videos)), "全部视频对")
-        return CandidateSelection(all_pairs, all_pair_count, limit)
+        return CandidateSelection([], all_pair_count, limit)
+
+    if limit == 0 or limit >= len(videos) - 1:
+        if progress_callback:
+            progress_callback(len(videos), max(1, len(videos)), "全部视频对")
+        return CandidateSelection(list(combinations(videos, 2)), all_pair_count, limit)
 
     index_blocks = []
     owner_blocks = []
@@ -80,7 +84,15 @@ def select_candidate_pairs(
             progress_callback(video_id + 1, len(videos) * 2, f"读取缓存：{video_path.name}")
 
     if not index_blocks or any(len(block) == 0 for block in index_blocks):
-        return CandidateSelection(all_pairs, all_pair_count, limit)
+        invalid_videos = [
+            videos[index].name
+            for index, block in enumerate(index_blocks)
+            if len(block) == 0
+        ]
+        raise ValueError(
+            "Candidate selection requires a non-empty embedding cache for every video; "
+            f"invalid caches: {', '.join(invalid_videos[:8])}"
+        )
 
     global_embeddings = np.ascontiguousarray(np.vstack(index_blocks), dtype="float32")
     global_owners = np.concatenate(owner_blocks)

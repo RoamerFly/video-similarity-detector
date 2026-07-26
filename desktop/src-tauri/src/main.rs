@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod runtime_manager;
+
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,6 +39,20 @@ const RELEASES_LATEST_PAGE_URL: &str =
 const CLIP_MODEL_DOWNLOAD_URL: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download/clip-vit-base-patch32.zip";
 const CLIP_MODEL_DIR_NAME: &str = "clip-vit-base-patch32";
+const CLIP_MODEL_FILE_HASHES: &[(&str, &str)] = &[
+    (
+        "config.json",
+        "b575ef3c36f2a057fa19e221650105052d61cc9c1a972ec15019c6261ec98770",
+    ),
+    (
+        "preprocessor_config.json",
+        "910e70b3956ac9879ebc90b22fb3bc8a75b6a0677814500101a4c072bd7857bd",
+    ),
+    (
+        "pytorch_model.bin",
+        "a63082132ba4f97a80bea76823f544493bffa8082296d62d71581a4feff1576f",
+    ),
+];
 const ANALYSIS_VIDEO_CONTEXT_PREFIX: &str = "ANALYSIS_VIDEO_CONTEXT|";
 const ANALYSIS_VIDEO_QUARANTINED_PREFIX: &str = "ANALYSIS_VIDEO_QUARANTINED|";
 static CLOSE_BEHAVIOR: AtomicU8 = AtomicU8::new(CLOSE_BEHAVIOR_ASK);
@@ -159,11 +175,14 @@ fn normalized_proxy_url(proxy_url: Option<&str>) -> Result<Option<reqwest::Url>,
     let Some(value) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    let parsed = reqwest::Url::parse(value)
-        .map_err(|e| format!("代理地址格式无效，请使用 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890：{e}"))?;
+    let parsed = reqwest::Url::parse(value).map_err(|e| {
+        format!("代理地址格式无效，请使用 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890：{e}")
+    })?;
     match parsed.scheme() {
         "http" | "https" | "socks5" | "socks5h" => Ok(Some(parsed)),
-        scheme => Err(format!("不支持的代理协议 {scheme}，请使用 http、https、socks5 或 socks5h")),
+        scheme => Err(format!(
+            "不支持的代理协议 {scheme}，请使用 http、https、socks5 或 socks5h"
+        )),
     }
 }
 
@@ -182,9 +201,37 @@ fn apply_reqwest_proxy(
     proxy_url: Option<&str>,
 ) -> Result<reqwest::ClientBuilder, String> {
     Ok(match normalized_proxy_url(proxy_url)? {
-        Some(proxy) => builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("创建代理配置失败: {e}"))?),
+        Some(proxy) => {
+            builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("创建代理配置失败: {e}"))?)
+        }
         None => builder,
     })
+}
+
+async fn remote_asset_size(url: &str, proxy_url: Option<&str>) -> u64 {
+    let client = match apply_reqwest_proxy(
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20)),
+        proxy_url,
+    )
+    .and_then(|builder| {
+        builder
+            .build()
+            .map_err(|error| format!("初始化更新包大小检测客户端失败: {error}"))
+    }) {
+        Ok(client) => client,
+        Err(_) => return 0,
+    };
+    client
+        .head(url)
+        .header(reqwest::header::USER_AGENT, "video-similarity-desktop")
+        .send()
+        .await
+        .ok()
+        .filter(|response| response.status().is_success())
+        .and_then(|response| response.content_length())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -376,7 +423,7 @@ impl DecoderWarningAccumulator {
             self.other += 1;
         }
 
-        if self.total == 100 || self.total % 1000 == 0 {
+        if self.total == 100 || self.total.is_multiple_of(1000) {
             self.last_reported = self.total;
             return Some(self.format_summary("视频解码告警累计"));
         }
@@ -853,6 +900,7 @@ struct UpdateAnalysisTaskRequest {
     progress: Option<f64>,
     total_pairs: Option<usize>,
     completed_pairs: Option<usize>,
+    failed_pairs: Option<usize>,
     videos: Option<Vec<AnalysisTaskVideo>>,
     report_json: Option<String>,
     report_csv: Option<String>,
@@ -931,6 +979,8 @@ struct AnalysisTaskRecord {
     total_pairs: usize,
     #[serde(default)]
     completed_pairs: usize,
+    #[serde(default)]
+    failed_pairs: usize,
     #[serde(default)]
     progress: f64,
     #[serde(default)]
@@ -1097,7 +1147,10 @@ fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
 }
 
 #[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle, proxy_url: Option<String>) -> Result<UpdateInfo, String> {
+async fn check_for_updates(
+    app: tauri::AppHandle,
+    proxy_url: Option<String>,
+) -> Result<UpdateInfo, String> {
     let root = resolve_project_root(&app)?;
     let current_version = app.package_info().version.to_string();
     let build_flavor = detect_build_flavor(&root);
@@ -1119,6 +1172,7 @@ async fn check_for_updates(app: tauri::AppHandle, proxy_url: Option<String>) -> 
             let update_available = true;
             let can_auto_install = cfg!(target_os = "windows");
             let download_url_str = update.download_url.to_string();
+            let asset_size = remote_asset_size(&download_url_str, proxy_url.as_deref()).await;
             let asset_name = download_url_str
                 .rsplit_once('/')
                 .map(|(_, name)| name.to_string())
@@ -1128,9 +1182,11 @@ async fn check_for_updates(app: tauri::AppHandle, proxy_url: Option<String>) -> 
                 latest_version
             );
             let message = if can_auto_install {
-                format!("发现新版本 v{latest_version}，可保留数据直接覆盖安装")
+                format!("发现轻量更新 v{latest_version}，应用数据、AI 运行环境和模型将继续保留")
             } else {
-                format!("发现新版本 v{latest_version}，请打开发布页下载")
+                format!(
+                    "发现轻量更新 v{latest_version}，请打开发布页下载；现有 AI 运行环境和模型无需重复下载"
+                )
             };
 
             Ok(UpdateInfo {
@@ -1142,7 +1198,7 @@ async fn check_for_updates(app: tauri::AppHandle, proxy_url: Option<String>) -> 
                 published_at: update.date.map(|d| d.to_string()).unwrap_or_default(),
                 asset_name,
                 asset_url: update.download_url.to_string(),
-                asset_size: 0,
+                asset_size,
                 build_flavor,
                 install_type,
                 install_root: path_to_string(install_root),
@@ -1273,13 +1329,23 @@ async fn download_and_install_update(
 
 #[tauri::command]
 fn get_clip_model_status(app: tauri::AppHandle) -> Result<ClipModelStatus, String> {
-    let root = resolve_project_root(&app)?;
-    Ok(clip_model_status_for_root(&root))
+    let asset_root = runtime_manager::asset_root(&app)?;
+    let managed = clip_model_status_for_root(&asset_root);
+    if managed.installed {
+        return Ok(managed);
+    }
+
+    let legacy_root = resolve_project_root(&app)?;
+    let legacy = clip_model_status_for_root(&legacy_root);
+    Ok(if legacy.installed { legacy } else { managed })
 }
 
 #[tauri::command]
-async fn install_clip_model(app: tauri::AppHandle, proxy_url: Option<String>) -> Result<ClipModelStatus, String> {
-    let root = resolve_project_root(&app)?;
+async fn install_clip_model(
+    app: tauri::AppHandle,
+    proxy_url: Option<String>,
+) -> Result<ClipModelStatus, String> {
+    let root = runtime_manager::asset_root(&app)?;
     let model_root = root.join("models");
     fs::create_dir_all(&model_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
 
@@ -1371,10 +1437,7 @@ async fn download_file_with_resume(
         request = request.header(reqwest::header::RANGE, format!("bytes={existing_bytes}-"));
     }
 
-    let mut response = request
-        .send()
-        .await
-        .map_err(|e| format!("连接失败: {e}"))?;
+    let mut response = request.send().await.map_err(|e| format!("连接失败: {e}"))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
@@ -1411,7 +1474,11 @@ async fn download_file_with_resume(
         } else {
             5.0
         },
-        if can_resume { "正在续传离线 CLIP 模型" } else { "正在下载离线 CLIP 模型" },
+        if can_resume {
+            "正在续传离线 CLIP 模型"
+        } else {
+            "正在下载离线 CLIP 模型"
+        },
     );
 
     while let Some(chunk) = response
@@ -1433,7 +1500,11 @@ async fn download_file_with_resume(
             downloaded_bytes,
             total_bytes,
             progress.min(70.0),
-            if can_resume { "正在续传离线 CLIP 模型" } else { "正在下载离线 CLIP 模型" },
+            if can_resume {
+                "正在续传离线 CLIP 模型"
+            } else {
+                "正在下载离线 CLIP 模型"
+            },
         );
     }
     output
@@ -1640,7 +1711,7 @@ fn probe_video_metadata_impl(
         .iter()
         .map(|path| path_to_string(resolve_user_path(&root, path)))
         .collect::<Vec<_>>();
-    
+
     if resolved_paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -1739,7 +1810,7 @@ for idx, path in enumerate(paths):
 
     for (batch_idx, chunk) in unprobed_paths.chunks(batch_size).enumerate() {
         let batch_num = batch_idx + 1;
-        
+
         let list_file = temp_dir.join(format!(
             "video-sim-metadata-{}-{}.json",
             timestamp_millis_u64(),
@@ -1758,13 +1829,17 @@ for idx, path in enumerate(paths):
         }
 
         let mut command = Command::new(&python);
-        let args = vec!["-c".to_string(), script.to_string(), path_to_string(&list_file)];
+        let args = vec![
+            "-c".to_string(),
+            script.to_string(),
+            path_to_string(&list_file),
+        ];
         command
             .current_dir(&root)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        
+
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1775,44 +1850,52 @@ for idx, path in enumerate(paths):
             Ok(mut child) => {
                 if let Some(stdout) = child.stdout.take() {
                     let reader = BufReader::new(stdout);
-                    for line_result in reader.lines() {
-                        if let Ok(line) = line_result {
-                            if line.starts_with("METADATA_PROGRESS|") {
-                                let parts: Vec<&str> = line.splitn(4, '|').collect();
-                                if parts.len() == 4 {
-                                    if let Ok(idx) = parts[1].parse::<usize>() {
-                                        let current_global = all_results.len() + unprobed_processed + idx + 1;
-                                        let path = parts[3];
-                                        let file_name = PathBuf::from(path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                                        
-                                        let is_last = current_global == total_videos;
-                                        if is_last || last_emit_time.elapsed().as_millis() > 100 {
-                                            last_emit_time = std::time::Instant::now();
-                                            let _ = app.emit(
-                                                "metadata-progress",
-                                                MetadataProgressPayload {
-                                                    current: current_global,
-                                                    total: total_videos,
-                                                    stage: format!("正在读取参数 (已完成 {}/{}，剩余 {})", current_global, total_videos, total_videos.saturating_sub(current_global)),
-                                                    video_name: Some(file_name),
-                                                },
-                                            );
-                                        }
+                    for line in reader.lines().map_while(Result::ok) {
+                        if line.starts_with("METADATA_PROGRESS|") {
+                            let parts: Vec<&str> = line.splitn(4, '|').collect();
+                            if parts.len() == 4 {
+                                if let Ok(idx) = parts[1].parse::<usize>() {
+                                    let current_global =
+                                        all_results.len() + unprobed_processed + idx + 1;
+                                    let path = parts[3];
+                                    let file_name = PathBuf::from(path)
+                                        .file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    let is_last = current_global == total_videos;
+                                    if is_last || last_emit_time.elapsed().as_millis() > 100 {
+                                        last_emit_time = std::time::Instant::now();
+                                        let _ = app.emit(
+                                            "metadata-progress",
+                                            MetadataProgressPayload {
+                                                current: current_global,
+                                                total: total_videos,
+                                                stage: format!(
+                                                    "正在读取参数 (已完成 {}/{}，剩余 {})",
+                                                    current_global,
+                                                    total_videos,
+                                                    total_videos.saturating_sub(current_global)
+                                                ),
+                                                video_name: Some(file_name),
+                                            },
+                                        );
                                     }
                                 }
-                            } else if line.starts_with("METADATA_RESULT|") {
-                                let json_str = &line["METADATA_RESULT|".len()..];
-                                if let Ok(metadata) = serde_json::from_str::<VideoMetadata>(json_str) {
-                                    // Save cache
-                                    let path = PathBuf::from(&metadata.path);
-                                    let cache_name = video_cache_dir_name(&path);
-                                    let metadata_file = video_cache_root.join(&cache_name).join("metadata.json");
-                                    if let Ok(content) = serde_json::to_string(&metadata) {
-                                        let _ = fs::create_dir_all(metadata_file.parent().unwrap());
-                                        let _ = fs::write(metadata_file, content);
-                                    }
-                                    all_results.push(metadata);
+                            }
+                        } else if let Some(json_str) = line.strip_prefix("METADATA_RESULT|") {
+                            if let Ok(metadata) = serde_json::from_str::<VideoMetadata>(json_str) {
+                                // Save cache
+                                let path = PathBuf::from(&metadata.path);
+                                let cache_name = video_cache_dir_name(&path);
+                                let metadata_file =
+                                    video_cache_root.join(&cache_name).join("metadata.json");
+                                if let Ok(content) = serde_json::to_string(&metadata) {
+                                    let _ = fs::create_dir_all(metadata_file.parent().unwrap());
+                                    let _ = fs::write(metadata_file, content);
                                 }
+                                all_results.push(metadata);
                             }
                         }
                     }
@@ -1842,10 +1925,7 @@ for idx, path in enumerate(paths):
     );
 
     if all_results.is_empty() && !batch_errors.is_empty() {
-        return Err(format!(
-            "所有批次均读取失败: {}",
-            batch_errors.join("; ")
-        ));
+        return Err(format!("所有批次均读取失败: {}", batch_errors.join("; ")));
     }
 
     if !batch_errors.is_empty() {
@@ -1859,8 +1939,6 @@ for idx, path in enumerate(paths):
 
     Ok(all_results)
 }
-
-
 
 fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
     let input_dir = PathBuf::from(request.input_dir);
@@ -1878,7 +1956,7 @@ fn scan_videos_impl(request: ScanRequest) -> Result<Vec<VideoFile>, String> {
         &mut videos,
         true,
     )?;
-    videos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    videos.sort_by_key(|video| video.name.to_lowercase());
     Ok(videos)
 }
 
@@ -2182,16 +2260,24 @@ fn list_analysis_tasks(
         if record.stages.is_empty() {
             record.stages = default_analysis_task_stages();
         }
-        
+
         // Strip out large lists to reduce IPC payload
         record.videos.clear();
-        if let Some(arr) = record.config.get_mut("videoPaths").and_then(|v| v.as_array_mut()) {
+        if let Some(arr) = record
+            .config
+            .get_mut("videoPaths")
+            .and_then(|v| v.as_array_mut())
+        {
             arr.clear();
         }
-        if let Some(arr) = record.config.get_mut("video_paths").and_then(|v| v.as_array_mut()) {
+        if let Some(arr) = record
+            .config
+            .get_mut("video_paths")
+            .and_then(|v| v.as_array_mut())
+        {
             arr.clear();
         }
-        
+
         tasks.push(record);
     }
     tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
@@ -2218,10 +2304,11 @@ fn get_analysis_task(
     if !manifest_path.exists() {
         return Err("任务不存在".to_string());
     }
-    
+
     let content = fs::read_to_string(&manifest_path).map_err(|e| format!("读取任务失败: {e}"))?;
-    let mut record = serde_json::from_str::<AnalysisTaskRecord>(&content).map_err(|e| format!("解析任务失败: {e}"))?;
-    
+    let mut record = serde_json::from_str::<AnalysisTaskRecord>(&content)
+        .map_err(|e| format!("解析任务失败: {e}"))?;
+
     if record.id.is_empty() {
         record.id = request.task_id;
     }
@@ -2231,7 +2318,7 @@ fn get_analysis_task(
     if record.stages.is_empty() {
         record.stages = default_analysis_task_stages();
     }
-    
+
     Ok(record)
 }
 
@@ -2271,6 +2358,7 @@ fn create_analysis_task(
         video_count: 0,
         total_pairs: 0,
         completed_pairs: 0,
+        failed_pairs: 0,
         progress: 0.0,
         stage: "等待启动".to_string(),
         match_key: request.task_match_key,
@@ -2321,6 +2409,9 @@ fn update_analysis_task(
     }
     if let Some(completed_pairs) = request.completed_pairs {
         record.completed_pairs = completed_pairs;
+    }
+    if let Some(failed_pairs) = request.failed_pairs {
+        record.failed_pairs = failed_pairs;
     }
     if let Some(videos) = request.videos {
         record.video_count = videos.len();
@@ -2491,8 +2582,11 @@ fn scan_analysis_task_cache(
 fn run_batch_compare(
     app: tauri::AppHandle,
     task_state: State<'_, TaskState>,
-    config: RunBatchCompareConfig,
+    mut config: RunBatchCompareConfig,
 ) -> Result<AnalysisFinishedPayload, String> {
+    config.task_match_key = Some(compact_task_match_key(
+        config.task_match_key.as_deref().unwrap_or_default(),
+    ));
     let root = resolve_config_project_root(&app, config.project_root.as_deref())?;
     let video_dir = resolve_user_path(&root, &config.video_dir);
     if config.video_dir.trim().is_empty() {
@@ -2613,12 +2707,7 @@ fn run_batch_compare(
         "--candidate-limit".into(),
         config.candidate_limit.unwrap_or(20).to_string(),
         "--compare-workers".into(),
-        config
-            .compare_workers
-            .unwrap_or(1)
-            .max(1)
-            .min(8)
-            .to_string(),
+        config.compare_workers.unwrap_or(1).clamp(1, 8).to_string(),
         "--max-gap-sec".into(),
         config.max_gap_sec.to_string(),
         "--frame-step".into(),
@@ -3010,7 +3099,7 @@ fn run_duplicate_file_check_impl(
                 Err(error) => failed.push(format!("{}: {error}", path.display())),
             }
         }
-        selected.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        selected.sort_by_key(|video| video.name.to_lowercase());
         if selected.is_empty() {
             return Err("扫描范围内没有可检查的视频文件".to_string());
         }
@@ -4214,7 +4303,9 @@ fn delete_files(request: DeleteFilesRequest) -> Result<DeleteFilesResult, String
 
 #[tauri::command]
 fn rename_file(request: RenameFileRequest) -> Result<RenameFileResult, String> {
-    let old_path_text = normalize_display_path(request.old_path.trim()).trim().to_string();
+    let old_path_text = normalize_display_path(request.old_path.trim())
+        .trim()
+        .to_string();
     if old_path_text.is_empty() {
         return Err("文件路径不能为空".to_string());
     }
@@ -4247,9 +4338,7 @@ fn rename_file(request: RenameFileRequest) -> Result<RenameFileResult, String> {
     // video_cache_dir_name matches Python's `path.resolve(strict=False)`.
     // canonicalize() resolves symlinks, normalises separators and returns
     // the real on-disk casing — exactly what Python's resolve() does.
-    let old_path_resolved = old_path
-        .canonicalize()
-        .unwrap_or_else(|_| old_path.clone());
+    let old_path_resolved = old_path.canonicalize().unwrap_or_else(|_| old_path.clone());
 
     let parent = old_path
         .parent()
@@ -4263,9 +4352,7 @@ fn rename_file(request: RenameFileRequest) -> Result<RenameFileResult, String> {
     fs::rename(&old_path, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
 
     // Canonicalize new_path AFTER rename for the same reason.
-    let new_path_resolved = new_path
-        .canonicalize()
-        .unwrap_or_else(|_| new_path.clone());
+    let new_path_resolved = new_path.canonicalize().unwrap_or_else(|_| new_path.clone());
 
     let new_path_text = path_to_string(&new_path);
 
@@ -4516,10 +4603,7 @@ fn copy_file_interruptible(
     output.flush()?;
     if copied != expected_bytes {
         let _ = fs::remove_file(destination);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "复制后的文件大小不一致",
-        ));
+        return Err(std::io::Error::other("复制后的文件大小不一致"));
     }
     Ok(copied)
 }
@@ -5125,16 +5209,16 @@ fn main() {
         .manage(UpdateCancelState::default())
         .manage(MergeTaskState::default())
         .manage(FileMoveState::default())
-        .plugin(tauri_plugin_shell::init())
+        .manage(runtime_manager::RuntimeManagerState::default())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|_app| {
-            setup_tray(_app)?;
+        .setup(|app| {
+            runtime_manager::configure_environment(app.handle()).map_err(std::io::Error::other)?;
+            setup_tray(app)?;
             #[cfg(debug_assertions)]
             {
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window.open_devtools();
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
                 }
             }
             Ok(())
@@ -5168,6 +5252,11 @@ fn main() {
             open_release_page,
             get_clip_model_status,
             install_clip_model,
+            runtime_manager::get_runtime_status,
+            runtime_manager::install_runtime,
+            runtime_manager::migrate_legacy_runtime,
+            runtime_manager::remove_legacy_runtime,
+            runtime_manager::cancel_runtime_install,
             select_video_directory,
             select_video_files,
             select_audio_files,
@@ -5942,11 +6031,7 @@ fn safe_cache_name(value: &str) -> String {
 /// Replicate Python's `get_video_cache_dir` naming logic:
 /// `{stem}_{sha1(resolve(path).casefold())[:12]}`
 fn video_cache_dir_name(path: &Path) -> String {
-    let stem = safe_cache_name(
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("video"),
-    );
+    let stem = safe_cache_name(path.file_stem().and_then(|s| s.to_str()).unwrap_or("video"));
     let identity = normalize_display_path(&path.to_string_lossy()).to_lowercase();
     let digest = {
         use sha1::{Digest, Sha1};
@@ -5961,11 +6046,7 @@ fn video_cache_dir_name(path: &Path) -> String {
 
 /// Rename the per-video cache directory and legacy embeddings file when a
 /// video is renamed, so that subsequent analysis runs can reuse the cache.
-fn migrate_video_cache(
-    cache_dir: &Path,
-    old_path: &Path,
-    new_path: &Path,
-) -> bool {
+fn migrate_video_cache(cache_dir: &Path, old_path: &Path, new_path: &Path) -> bool {
     let mut migrated = false;
 
     // 1. Rename video_cache/{old_name} → video_cache/{new_name}
@@ -6009,7 +6090,7 @@ fn migrate_video_cache(
                         Some(name) => name.to_string(),
                         None => continue,
                     };
-                    if file_name.starts_with(&format!("{old_stem}")) && file_name.ends_with(".npz") {
+                    if file_name.starts_with(&old_stem) && file_name.ends_with(".npz") {
                         let suffix = &file_name[old_stem.len()..];
                         let new_file_name = format!("{new_stem}{suffix}");
                         let new_entry_path = embeddings_dir.join(&new_file_name);
@@ -6511,6 +6592,22 @@ fn storage_record_id(seed: &str) -> String {
     format!("template-{}-{:x}", timestamp_millis(), hasher.finish())
 }
 
+fn compact_task_match_key(value: &str) -> String {
+    let value = value.trim();
+    if value.len() <= 128
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_')
+        })
+    {
+        return value.to_string();
+    }
+
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(value.as_bytes());
+    format!("v2:sha1:{:x}", hasher.finalize())
+}
+
 fn write_json_atomic<T: Serialize>(target: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {e}"))?;
@@ -6628,6 +6725,7 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
         let missing = clip_model_missing_files(&extracted_model).join(", ");
         return Err(format!("模型 zip 校验失败，缺少文件: {missing}"));
     }
+    verify_clip_model_hashes(&extracted_model)?;
 
     let models_root = root.join("models");
     fs::create_dir_all(&models_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
@@ -6660,6 +6758,38 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
         fs::remove_dir_all(&old).map_err(|e| format!("清理旧模型备份失败: {e}"))?;
     }
     Ok(())
+}
+
+fn verify_clip_model_hashes(model_dir: &Path) -> Result<(), String> {
+    for (name, expected) in CLIP_MODEL_FILE_HASHES {
+        let path = model_dir.join(name);
+        let actual = sha256_file(&path)?;
+        if actual != *expected {
+            return Err(format!(
+                "模型文件校验失败：{name} 的 SHA-256 不匹配，请重新下载"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let mut file =
+        File::open(path).map_err(|e| format!("打开模型文件失败 {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("读取模型文件失败 {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn restore_clip_model_backup(target: &Path, backup: &Path) -> Result<(), String> {
@@ -6844,6 +6974,7 @@ fn is_default_python_alias(value: &str) -> bool {
 }
 
 fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf> {
+    let mut candidates = runtime_manager::python_candidates(app);
     let mut bases = vec![root.to_path_buf()];
 
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -6856,7 +6987,6 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
         }
     }
 
-    let mut candidates = Vec::new();
     for base in bases {
         candidates.extend([
             base.join("env").join("python").join("python.exe"),
@@ -6892,16 +7022,44 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
 #[cfg(test)]
 mod tests {
     use super::{
-        estimated_windows_command_line_len, is_decord_seek_warning_line, is_h264_decoder_log_line,
-        parse_analysis_video_context, parse_analysis_video_quarantined, python_spawn_error_message,
-        update_report_entries_for_resolved_path, AnalysisVideoContext,
-        AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator, PythonLaunchDiagnostics,
-        ReportPairIdentity,
+        compact_task_match_key, estimated_windows_command_line_len, is_decord_seek_warning_line,
+        is_h264_decoder_log_line, parse_analysis_video_context, parse_analysis_video_quarantined,
+        python_spawn_error_message, sha256_file, update_report_entries_for_resolved_path,
+        AnalysisVideoContext, AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator,
+        PythonLaunchDiagnostics, ReportPairIdentity,
     };
     use serde_json::json;
     use std::fs;
     #[cfg(target_os = "windows")]
     use std::path::Path;
+
+    #[test]
+    fn calculates_model_file_sha256() {
+        let path = std::env::temp_dir().join(format!(
+            "video-similarity-sha256-{}.bin",
+            super::timestamp_millis()
+        ));
+        fs::write(&path, b"video-similarity").expect("write hash fixture");
+        let actual = sha256_file(&path).expect("hash fixture");
+        fs::remove_file(&path).expect("remove hash fixture");
+
+        assert_eq!(
+            actual,
+            "19bd855d84d42591cde6efd2332a169d4c12ea8d8dd16f84230b291078d92dee"
+        );
+    }
+
+    #[test]
+    fn task_match_key_is_compacted_before_process_launch() {
+        let compact = "v2:cyrb53:1234abcd";
+        assert_eq!(compact_task_match_key(compact), compact);
+
+        let legacy = format!(r#"{{"videoPaths":[{}]}}"#, "\"C:/video.mp4\",".repeat(5000));
+        let migrated = compact_task_match_key(&legacy);
+        assert!(migrated.starts_with("v2:sha1:"));
+        assert_eq!(migrated.len(), 48);
+        assert_eq!(migrated, compact_task_match_key(&legacy));
+    }
 
     #[cfg(target_os = "windows")]
     use super::windows_reveal_args;

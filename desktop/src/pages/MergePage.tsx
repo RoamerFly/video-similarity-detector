@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { getCurrentWebview } from '@tauri-apps/api/webview'
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,7 +9,6 @@ import {
   Download,
   Film,
   FolderOpen,
-  Gauge,
   GripVertical,
   Minus,
   Music2,
@@ -21,7 +19,6 @@ import {
   RotateCcw,
   RotateCw,
   Scissors,
-  Settings2,
   SquareDashedMousePointer,
   SkipBack,
   Trash2,
@@ -39,14 +36,72 @@ import {
   TextInput,
   Toggle,
 } from '@/components/DesignSystem'
+import { MergeExportStatus } from '@/components/merge/MergeExportStatus'
+import { MergeInspectorPanel } from '@/components/merge/MergeInspectorPanel'
+import { MergeNumberField as NumberField } from '@/components/merge/MergeNumberField'
+import { MergeTimelinePlayhead } from '@/components/merge/MergePlaybackControls'
+import { MergePreviewCanvas } from '@/components/merge/MergePreviewCanvas'
+import { PlaybackClock } from '@/components/merge/PlaybackClock'
+import { useMergeFileDrop } from '@/components/merge/useMergeFileDrop'
+import { useMergeMetadata } from '@/components/merge/useMergeMetadata'
+import {
+  clamp,
+  extension,
+  formatDuration,
+  formatEstimatedSize,
+  formatPreciseTime,
+  formatTick,
+  normalizePath,
+} from '@/components/merge/mergeFormat'
+import {
+  boundingLayoutRect,
+  cropPointFromClient,
+  cropRectForDimensions,
+  cropRectFromClip,
+  evenDimension,
+  insetLayoutRects,
+  normalizedPoint,
+  presetLayoutRects,
+  previewLayoutRects,
+  resizeCropRect,
+  resizeNormalizedRect,
+  resolveDraggedLayout,
+  rotatedDimensions,
+  transformLayoutRects,
+  type CropGeometry,
+  type CropHandle,
+  type PreviewCanvasGeometry,
+} from '@/components/merge/previewGeometry'
+import { parseSubtitleCues } from '@/components/merge/subtitleParser'
+import {
+  activeLayoutsAt,
+  buildAudioLayouts,
+  buildClipLayouts,
+  canSplitClipAt,
+  clipSourceEnd,
+  findLayoutAt,
+  normalizeTimelineZoom,
+  playbackStructureKey,
+  previousTrackLayout,
+  resolveTimelineDragStart,
+  sourceDurationForClip,
+  timelineLength,
+  timelineMinimumWidth,
+  timelinePixel,
+  timelinePixelsPerSecondForZoom,
+  timelineTimeFromClientX,
+  timelineZoomDefault,
+  timelineZoomStep,
+  timeTicks,
+  type AudioClipLayout,
+  type ClipLayout,
+} from '@/components/merge/timelineModel'
 import { Translated } from '@/i18n/Translated'
 import {
   cancelVideoMerge,
   fileName,
-  hasTauriRuntime,
   localFileSrc,
   normalizeBackendError,
-  probeVideoMetadata,
   readTextFile,
   revealInFolder,
   runVideoMerge,
@@ -54,11 +109,9 @@ import {
   selectOutputDirectory,
   selectSubtitleFiles,
   selectVideoFiles,
-  type VideoMetadata,
 } from '@/services/backend'
 import {
   useMergeStore,
-  type MergeAudioItem,
   type MergeFitMode,
   type MergeQueueItem,
   type MergeRateControl,
@@ -69,23 +122,23 @@ import {
   type MergeVideoEncoder,
 } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useShallow } from 'zustand/react/shallow'
 
-const metadataCache = new Map<string, VideoMetadata>()
-const audioExtensions = new Set(['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'wma'])
-const videoExtensions = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'])
-const timelinePixelsPerSecond = 12
-const timelineMinimumWidth = 720
-const timelineZoomDefault = 100
-const timelineZoomMinimum = -1000
-const timelineZoomMaximum = 200
-const timelineZoomStep = 1
-const timelineMinimumPixelsPerSecond = 2000 / 3600
-const timelineMaximumPixelsPerSecond = timelinePixelsPerSecond * 20
 const scrubMediaIntervalMs = 32
 const defaultPreviewSize = { width: 720, height: 260 }
 const minimumOutputDimension = 16
 const maximumOutputDimension = 16384
 const emptyTimelineResolutionLimit = { width: 3840, height: 2160 }
+type WindowWithWebkitAudioContext = Window & {
+  webkitAudioContext?: typeof AudioContext
+}
+
+function createBrowserAudioContext() {
+  const AudioContextConstructor = window.AudioContext
+    ?? (window as WindowWithWebkitAudioContext).webkitAudioContext
+  return AudioContextConstructor ? new AudioContextConstructor() : null
+}
+
 const commonResolutionOptions = [
   { label: '超清 2160p', width: 3840, height: 2160 },
   { label: '高清 1080p', width: 1920, height: 1080 },
@@ -200,22 +253,6 @@ const encodingPresets: Array<{
   },
 ]
 
-interface ClipLayout {
-  item: MergeQueueItem
-  trackId: string
-  start: number
-  duration: number
-  end: number
-}
-
-interface AudioClipLayout {
-  item: MergeAudioItem
-  trackId: string
-  start: number
-  duration: number
-  end: number
-}
-
 interface ClipContextMenuState {
   x: number
   y: number
@@ -243,42 +280,58 @@ interface TrackContextMenuState {
   time?: number
 }
 
-interface CropGeometry {
-  left: number
-  top: number
-  width: number
-  height: number
-  sourceWidth: number
-  sourceHeight: number
-}
-
-interface PreviewCanvasGeometry {
-  left: number
-  top: number
-  width: number
-  height: number
-}
-
-interface NormalizedLayoutRect {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-interface CropRect {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-type CropHandle = 'draw' | 'move' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
-
 export function MergePage() {
-  const merge = useMergeStore()
+  const merge = useMergeStore(useShallow((state) => ({
+    addAudio: state.addAudio,
+    addAudioFiles: state.addAudioFiles,
+    addAudioTrack: state.addAudioTrack,
+    addText: state.addText,
+    addTextTrack: state.addTextTrack,
+    addVideos: state.addVideos,
+    addVideoTrack: state.addVideoTrack,
+    audioItems: state.audioItems,
+    audioTracks: state.audioTracks,
+    beginHistoryTransaction: state.beginHistoryTransaction,
+    canRedo: state.canRedo,
+    canUndo: state.canUndo,
+    clearLogs: state.clearLogs,
+    duplicateVideo: state.duplicateVideo,
+    endHistoryTransaction: state.endHistoryTransaction,
+    items: state.items,
+    moveVideoTo: state.moveVideoTo,
+    redo: state.redo,
+    removeAudio: state.removeAudio,
+    removeAudioTrack: state.removeAudioTrack,
+    removeText: state.removeText,
+    removeTextTrack: state.removeTextTrack,
+    removeVideo: state.removeVideo,
+    removeVideoTrack: state.removeVideoTrack,
+    running: state.running,
+    setError: state.setError,
+    setProgress: state.setProgress,
+    setRunning: state.setRunning,
+    setSettings: state.setSettings,
+    settings: state.settings,
+    splitVideo: state.splitVideo,
+    textItems: state.textItems,
+    textTracks: state.textTracks,
+    undo: state.undo,
+    updateAudio: state.updateAudio,
+    updateAudios: state.updateAudios,
+    updateText: state.updateText,
+    updateVideo: state.updateVideo,
+    updateVideos: state.updateVideos,
+    videoTracks: state.videoTracks,
+  })))
   const projectRoot = useSettingsStore((state) => state.projectRoot)
   const pythonPath = useSettingsStore((state) => state.pythonPath)
+  const { metadata, probing } = useMergeMetadata({
+    items: merge.items,
+    projectRoot,
+    pythonPath,
+    onError: merge.setError,
+  })
+  const dropActive = useMergeFileDrop()
   const previewRef = useRef<HTMLVideoElement | null>(null)
   const previewVideoRefs = useRef(new Map<string, HTMLVideoElement>())
   const previewAudioRefs = useRef(new Map<string, HTMLAudioElement>())
@@ -300,6 +353,7 @@ export function MergePage() {
   const lastScrubMediaUpdateRef = useRef(0)
   const lastPlaybackSyncRef = useRef(0)
   const lastPlaybackUiUpdateRef = useRef(0)
+  const lastPlaybackStructureKeyRef = useRef('')
   const playheadRef = useRef(0)
   const playbackAnchorRef = useRef({ time: 0, timestamp: 0 })
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -307,9 +361,10 @@ export function MergePage() {
 
   const getOrCreateAudioNodes = useCallback((video: HTMLMediaElement) => {
     if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
+      audioContextRef.current = createBrowserAudioContext()
     }
     const ctx = audioContextRef.current
+    if (!ctx) return null
     if (audioNodesRef.current.has(video)) return audioNodesRef.current.get(video)!
     try {
       const source = ctx.createMediaElementSource(video)
@@ -319,26 +374,24 @@ export function MergePage() {
       const nodes = { source, gain }
       audioNodesRef.current.set(video, nodes)
       return nodes
-    } catch (e) {
+    } catch {
       return null
     }
   }, [])
-  const [metadata, setMetadata] = useState<Record<string, VideoMetadata>>(() => Object.fromEntries(metadataCache))
   const [audioDurations, setAudioDurations] = useState<Record<string, number>>({})
   const [selectedClipId, setSelectedClipId] = useState('')
   const [selectedAudioId, setSelectedAudioId] = useState('')
   const [selectedTextId, setSelectedTextId] = useState('')
-  const [playhead, setPlayhead] = useState(0)
+  const [playbackClock] = useState(() => new PlaybackClock())
+  const [structuralPlayhead, setStructuralPlayhead] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [timelineZoom, setTimelineZoom] = useState(timelineZoomDefault)
   const [timelineZoomEditing, setTimelineZoomEditing] = useState(false)
   const [timelineZoomDraft, setTimelineZoomDraft] = useState('100')
   const [customResolutionSelected, setCustomResolutionSelected] = useState(false)
-  const [logsExpanded, setLogsExpanded] = useState(false)
   const [draggedClipId, setDraggedClipId] = useState('')
   const [draggedAudioId, setDraggedAudioId] = useState('')
   const [playheadDragging, setPlayheadDragging] = useState(false)
-  const [dropActive, setDropActive] = useState(false)
   const [clipContextMenu, setClipContextMenu] = useState<ClipContextMenuState | null>(null)
   const [audioContextMenu, setAudioContextMenu] = useState<AudioContextMenuState | null>(null)
   const [textContextMenu, setTextContextMenu] = useState<TextContextMenuState | null>(null)
@@ -349,16 +402,6 @@ export function MergePage() {
   const [previewPanelHeight, setPreviewPanelHeight] = useState(0)
   const [cropGeometry, setCropGeometry] = useState<CropGeometry | null>(null)
   const [outputCanvasGeometry, setOutputCanvasGeometry] = useState<PreviewCanvasGeometry | null>(null)
-  const setMergeError = merge.setError
-  const videoPathKey = useMemo(
-    () => Array.from(new Set(merge.items.map((item) => normalizePath(item.path)))).sort().join('|'),
-    [merge.items],
-  )
-
-  useEffect(() => {
-    playheadRef.current = playhead
-  }, [playhead])
-
   useEffect(() => {
     if (!clipContextMenu && !audioContextMenu && !textContextMenu && !trackContextMenu) return undefined
     const close = () => {
@@ -388,53 +431,6 @@ export function MergePage() {
     }
   }, [audioContextMenu, clipContextMenu, textContextMenu, trackContextMenu])
 
-  useEffect(() => {
-    const paths = Array.from(new Set(merge.items.map((item) => item.path)))
-    const missing = paths.filter((path) => !metadataCache.has(normalizePath(path)))
-    if (missing.length === 0) return undefined
-    let alive = true
-    probeVideoMetadata(missing, undefined, projectRoot, pythonPath)
-      .then((rows) => {
-        rows.forEach((row) => metadataCache.set(normalizePath(row.path), row))
-        if (alive) setMetadata(Object.fromEntries(metadataCache))
-      })
-      .catch((error) => {
-        if (alive) setMergeError(normalizeBackendError(error))
-      })
-    return () => {
-      alive = false
-    }
-  }, [merge.items, projectRoot, pythonPath, setMergeError, videoPathKey])
-
-  useEffect(() => {
-    if (!hasTauriRuntime()) return undefined
-    let dispose = () => undefined
-    let disposed = false
-    getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === 'enter' || event.payload.type === 'over') {
-        setDropActive(true)
-        return
-      }
-      if (event.payload.type === 'leave') {
-        setDropActive(false)
-        return
-      }
-      setDropActive(false)
-      const audioPaths = event.payload.paths.filter((path) => audioExtensions.has(extension(path)))
-      const videoPaths = event.payload.paths.filter((path) => videoExtensions.has(extension(path)))
-      const store = useMergeStore.getState()
-      if (videoPaths.length > 0) store.addVideos(videoPaths.map((path) => ({ path, name: fileName(path) })))
-      if (audioPaths.length > 0) store.addAudioFiles(audioPaths)
-    }).then((unlisten) => {
-      if (disposed) unlisten()
-      else dispose = unlisten
-    }).catch(() => undefined)
-    return () => {
-      disposed = true
-      dispose()
-    }
-  }, [])
-
   const videoTrackIds = useMemo(() => merge.videoTracks.map((track) => track.id), [merge.videoTracks])
   const clipLayouts = useMemo(() => {
     return buildClipLayouts(merge.items, videoTrackIds, metadata)
@@ -443,7 +439,6 @@ export function MergePage() {
   const audioLayouts = useMemo(() => {
     return buildAudioLayouts(merge.audioItems, audioTrackIds, audioDurations, metadata)
   }, [audioDurations, audioTrackIds, merge.audioItems, metadata])
-  const probing = merge.items.some((item) => !metadata[normalizePath(item.path)])
   const videoDuration = Math.max(0, ...clipLayouts.map((layout) => layout.end))
   const audioTimelineEnd = Math.max(0, ...audioLayouts.map((layout) => layout.end))
   const textTimelineEnd = Math.max(0, ...merge.textItems.map((item) => item.startTime + item.duration))
@@ -457,8 +452,10 @@ export function MergePage() {
     : selectedAudioId || selectedTextId ? '' : clipLayouts[0]?.item.id ?? ''
   const selectedLayout = clipLayouts.find((layout) => layout.item.id === effectiveSelectedClipId) ?? null
   const selectedClip = selectedLayout?.item ?? null
-  const activeLayouts = activeLayoutsAt(clipLayouts, playhead, videoTrackIds)
-  const activeTextItems = merge.textItems.filter((item) => playhead >= item.startTime && playhead < item.startTime + item.duration)
+  const activeLayouts = activeLayoutsAt(clipLayouts, structuralPlayhead, videoTrackIds)
+  const activeTextItems = merge.textItems.filter(
+    (item) => structuralPlayhead >= item.startTime && structuralPlayhead < item.startTime + item.duration,
+  )
   const activeLayoutKey = activeLayouts.map((layout) => layout.item.id).join('|')
   const groupEditing = activeLayouts.length > 1 && groupEditingKey === activeLayoutKey
   const currentLayout = activeLayouts.find((layout) => layout.item.id === effectiveSelectedClipId)
@@ -471,9 +468,6 @@ export function MergePage() {
   const previewLayout = previewClip
     ? clipLayouts.find((layout) => layout.item.id === previewClip.id) ?? null
     : null
-  const previewLocalTime = previewLayout
-    ? clamp(playhead - previewLayout.start, 0, previewLayout.duration)
-    : 0
   const resolutionBounds = useMemo(() => {
     const dimensions = merge.items.flatMap((item) => {
       const info = metadata[normalizePath(item.path)]
@@ -643,7 +637,8 @@ export function MergePage() {
     const layouts = activeLayoutsAt(clipLayouts, next, videoTrackIds)
     const layout = layouts[0] ?? null
     playheadRef.current = next
-    setPlayhead((current) => Math.abs(current - next) >= 0.0005 ? next : current)
+    playbackClock.setTime(next)
+    setStructuralPlayhead((current) => Math.abs(current - next) >= 0.0005 ? next : current)
     if (layout) {
       setSelectedClipId((current) => layouts.some((active) => active.item.id === current) ? current : layout.item.id)
     }
@@ -686,7 +681,7 @@ export function MergePage() {
       }
     })
     lastScrubMediaUpdateRef.current = now
-  }, [clipLayouts, audioLayouts, totalDuration, videoTrackIds, audioTrackIds])
+  }, [clipLayouts, audioLayouts, totalDuration, videoTrackIds, audioTrackIds, getOrCreateAudioNodes, playbackClock])
 
   const seekGlobal = useCallback((time: number, autoPlay = false) => {
     scrubGlobal(time, true)
@@ -730,7 +725,7 @@ export function MergePage() {
 
   useEffect(() => {
     let changed = false
-    const videoUpdates: { id: string; patch: any }[] = []
+    const videoUpdates: { id: string; patch: { startTime: number } }[] = []
     
     for (const track of merge.videoTracks) {
       const trackLayouts = clipLayouts.filter((l) => l.trackId === track.id)
@@ -746,7 +741,7 @@ export function MergePage() {
       }
     }
     
-    const audioUpdates: { id: string; patch: any }[] = []
+    const audioUpdates: { id: string; patch: { startTime: number } }[] = []
     for (const track of merge.audioTracks) {
       const trackLayouts = audioLayouts.filter((l) => l.trackId === track.id)
       let currentEnd = 0
@@ -823,7 +818,7 @@ export function MergePage() {
       if (audio.readyState >= 1) sync()
       else audio.addEventListener('loadedmetadata', sync, { once: true })
     })
-  }, [activeLayoutKey, clipLayouts, audioLayouts, playing, videoTrackIds, audioTrackIds])
+  }, [activeLayoutKey, clipLayouts, audioLayouts, playing, videoTrackIds, audioTrackIds, getOrCreateAudioNodes])
 
   useEffect(() => {
     if (!playing) {
@@ -838,22 +833,34 @@ export function MergePage() {
       return undefined
     }
     playbackAnchorRef.current = { time: playheadRef.current, timestamp: performance.now() }
+    lastPlaybackStructureKeyRef.current = playbackStructureKey(
+      clipLayouts,
+      merge.textItems,
+      playheadRef.current,
+      videoTrackIds,
+    )
     const update = (timestamp: number) => {
       const next = playbackAnchorRef.current.time + (timestamp - playbackAnchorRef.current.timestamp) / 1000
       if (next >= totalDuration) {
         playheadRef.current = totalDuration
-        setPlayhead(totalDuration)
+        playbackClock.setTime(totalDuration)
+        setStructuralPlayhead(totalDuration)
         setPlaying(false)
         return
       }
       playheadRef.current = next
-      if (timestamp - lastPlaybackUiUpdateRef.current > 66) {
-        setPlayhead(next)
-        keepTimelineTimeVisible(next)
+      playbackClock.setTime(next)
+      const structureKey = playbackStructureKey(clipLayouts, merge.textItems, next, videoTrackIds)
+      if (structureKey !== lastPlaybackStructureKeyRef.current) {
+        lastPlaybackStructureKeyRef.current = structureKey
+        setStructuralPlayhead(next)
         const layouts = activeLayoutsAt(clipLayouts, next, videoTrackIds)
         if (layouts.length > 0) {
           setSelectedClipId((current) => layouts.some((active) => active.item.id === current) ? current : layouts[0].item.id)
         }
+      }
+      if (timestamp - lastPlaybackUiUpdateRef.current > 66) {
+        keepTimelineTimeVisible(next)
         lastPlaybackUiUpdateRef.current = timestamp
       }
       if (timestamp - lastPlaybackSyncRef.current > 450) {
@@ -922,7 +929,18 @@ export function MergePage() {
       if (playbackFrameRef.current !== null) window.cancelAnimationFrame(playbackFrameRef.current)
       playbackFrameRef.current = null
     }
-  }, [clipLayouts, audioLayouts, keepTimelineTimeVisible, playing, totalDuration, videoTrackIds, audioTrackIds])
+  }, [
+    clipLayouts,
+    audioLayouts,
+    keepTimelineTimeVisible,
+    merge.textItems,
+    playing,
+    playbackClock,
+    totalDuration,
+    videoTrackIds,
+    audioTrackIds,
+    getOrCreateAudioNodes,
+  ])
 
   async function chooseVideos() {
     try {
@@ -1001,9 +1019,9 @@ export function MergePage() {
     if (audioContextRef.current?.state === 'suspended') {
       void audioContextRef.current.resume()
     } else if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
+      audioContextRef.current = createBrowserAudioContext()
     }
-    const start = playhead >= totalDuration - 0.02 ? 0 : playhead
+    const start = playheadRef.current >= totalDuration - 0.02 ? 0 : playheadRef.current
     scrubGlobal(start, true)
     playbackAnchorRef.current = { time: start, timestamp: performance.now() }
     setPlaying(true)
@@ -1177,9 +1195,10 @@ export function MergePage() {
   }
 
   function splitAtPlayhead() {
-    const layout = findLayoutAt(clipLayouts, playhead)
+    const currentPlayhead = playheadRef.current
+    const layout = findLayoutAt(clipLayouts, currentPlayhead)
     if (!layout) return
-    splitClipAt(layout, playhead)
+    splitClipAt(layout, currentPlayhead)
   }
 
   function splitClipAt(layout: ClipLayout, timelineTime: number) {
@@ -2028,231 +2047,44 @@ export function MergePage() {
         }}
       >
         <GlassPanel ref={previewPanelRef} className="editor-preview-panel frame-preview-card video-preview-card" style={{ maxWidth: 'none' }}>
-          <div
-            ref={previewScreenRef}
-            className={`frame-image-box video-box editor-preview-screen ${cropEditing ? 'crop-editing' : ''}`}
-            style={{ height: previewSize.height }}
-          >
-            <div
-              ref={outputCanvasRef}
-              className="editor-output-canvas"
-              style={outputCanvasGeometry ? {
-                left: outputCanvasGeometry.left,
-                top: outputCanvasGeometry.top,
-                width: outputCanvasGeometry.width,
-                height: outputCanvasGeometry.height,
-                background: merge.settings.canvasBackground === 'white' ? '#fff' : '#000',
-              } : undefined}
-            >
-              {previewLayouts.length > 0 ? previewLayouts.map((layout, index) => {
-                const info = metadata[normalizePath(layout.item.path)]
-                const cell = previewCells[index]
-                const localCell = cell ? { left: 0, top: 0, width: cell.width, height: cell.height } : undefined
-                return (
-                  <div
-                    className={[
-                      'editor-preview-item',
-                      effectiveSelectedClipId === layout.item.id ? 'selected' : '',
-                      activeLayouts.length > 1 && !cropEditing ? 'draggable' : '',
-                    ].filter(Boolean).join(' ')}
-                    key={layout.item.id}
-                    title={activeLayouts.length > 1 ? `${layout.item.name}：拖动可调整画面位置` : layout.item.name}
-                    style={cell ? {
-                      left: cell.left,
-                      top: cell.top,
-                      width: cell.width,
-                      height: cell.height,
-                    } : undefined}
-                    onPointerDown={(event) => handlePreviewLayoutPointerDown(event, layout, index)}
-                  >
-                  <video
-                    ref={(node) => {
-                      if (node) {
-                        previewVideoRefs.current.set(layout.item.id, node)
-                        if (layout.item.id === previewClip?.id) previewRef.current = node
-                      } else {
-                        previewVideoRefs.current.delete(layout.item.id)
-                      }
-                    }}
-                    data-clip-id={layout.item.id}
-                    src={localFileSrc(layout.item.path)}
-                    crossOrigin="anonymous"
-                    style={previewExportVideoStyle(
-                      layout.item,
-                      info?.width ?? 0,
-                      info?.height ?? 0,
-                      localCell,
-                      merge.settings.fitMode,
-                      cropEditing,
-                    )}
-                    muted={layout.item.muted}
-                    preload="auto"
-                    playsInline
-                    onLoadedMetadata={() => {
-                      if (layout.item.id === previewClip?.id) updatePreviewGeometry()
-                    }}
-                  >
-                    <track kind="captions" />
-                  </video>
-                  </div>
-                )
-              }) : (
-                <div className="editor-preview-empty">
-                  <Film />
-                  <strong>将视频拖入窗口或点击“添加视频”</strong>
-                </div>
-              )}
-              {outputCanvasGeometry && activeTextItems.map((item) => (
-                <div
-                  key={item.id}
-                  className={`editor-preview-text ${selectedTextId === item.id ? 'selected' : ''}`}
-                  style={{
-                    left: item.x * outputCanvasGeometry.width,
-                    top: item.y * outputCanvasGeometry.height,
-                    fontSize: clamp(item.fontSize / Math.max(1, merge.settings.width) * outputCanvasGeometry.width, 10, 80),
-                    color: item.color,
-                    backgroundColor: item.backgroundColor,
-                  }}
-                  title="拖动调整文本位置，双击修改文本"
-                  onPointerDown={(event) => handlePreviewTextPointerDown(event, item)}
-                  onDoubleClick={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    editTextItem(item)
-                  }}
-                >
-                  {item.text}
-                </div>
-              ))}
-              {groupEditing && !cropEditing && activeGroupPixelRect && (
-                <div
-                  className="editor-group-selection"
-                  style={{
-                    left: activeGroupPixelRect.left,
-                    top: activeGroupPixelRect.top,
-                    width: activeGroupPixelRect.width,
-                    height: activeGroupPixelRect.height,
-                  }}
-                  onPointerDown={(event) => handleGroupLayoutPointerDown(event, 'move')}
-                >
-                  <span>组合画面</span>
-                  {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as CropHandle[]).map((handle) => (
-                    <button
-                      type="button"
-                      key={handle}
-                      className={`editor-group-handle ${handle}`}
-                      aria-label={`调整组合画面 ${handle}`}
-                      onPointerDown={(event) => handleGroupLayoutPointerDown(event, handle)}
-                    />
-                  ))}
-                </div>
-              )}
-            {previewClip && cropEditing && cropGeometry && (
-              <div
-                className="video-crop-layer editing"
-                style={{
-                  left: cropGeometry.left,
-                  top: cropGeometry.top,
-                  width: cropGeometry.width,
-                  height: cropGeometry.height,
-                }}
-                onPointerDown={cropEditing ? (event) => handleCropPointerDown(event, 'draw') : undefined}
-              >
-                <CropMasks rect={cropRectFromClip(previewClip, cropGeometry)} geometry={cropGeometry} />
-                <div
-                  className="video-crop-selection"
-                  style={cropSelectionStyle(cropRectFromClip(previewClip, cropGeometry), cropGeometry)}
-                  onPointerDown={(event) => handleCropPointerDown(event, 'move')}
-                >
-                  <span>导出区域</span>
-                  {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as CropHandle[]).map((handle) => (
-                    <button
-                      type="button"
-                      key={handle}
-                      className={`video-crop-handle ${handle}`}
-                      aria-label={`调整选区 ${handle}`}
-                      onPointerDown={(event) => handleCropPointerDown(event, handle)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-            </div>
-            {previewClip && cropEditing && (
-              <button
-                type="button"
-                className="video-crop-reset-button"
-                title="将裁剪框恢复到完整视频画面"
-                onClick={resetCropSelection}
-              >
-                <RotateCcw />重置裁剪框
-              </button>
-            )}
-            <div className="editor-preview-size-tools">
-              <button type="button" title="还原播放窗口默认尺寸" onClick={() => setPreviewSize(defaultPreviewSize)}>
-                <RotateCcw />还原窗口
-              </button>
-            </div>
-            <button
-              type="button"
-              className="editor-preview-resize-handle"
-              aria-label="拖动调整播放窗口尺寸"
-              title="按住鼠标左键拖动调整播放窗口尺寸"
-              onPointerDown={handlePreviewResizePointerDown}
-            />
-          </div>
-          <div className="editor-player-controls">
-            <button type="button" title="回到时间线起点" onClick={() => seekGlobal(0)}><SkipBack /></button>
-            <button className="primary" type="button" title={playing ? '暂停' : '播放'} onClick={togglePlayback}>
-              {playing ? <Pause /> : <Play />}
-            </button>
-            <button type="button" title="回到当前片段起点" disabled={!selectedLayout} onClick={() => selectedLayout && seekGlobal(selectedLayout.start)}>
-              <RotateCcw />
-            </button>
-            <button type="button" title="后退一帧" disabled={totalDuration <= 0} onClick={() => nudgePlayhead(-1)}>
-              <Minus />
-            </button>
-            <button type="button" title="前进一帧" disabled={totalDuration <= 0} onClick={() => nudgePlayhead(1)}>
-              <Plus />
-            </button>
-            <div style={{ gridColumn: '6 / span 2', display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, paddingLeft: '8px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <time title={`片段 ${formatPreciseTime(previewLocalTime)} / ${formatPreciseTime(previewLayout?.duration ?? 0)}`} style={{ flexBasis: '180px', flexShrink: 0 }}>
-                  片段 {formatPreciseTime(previewLocalTime)} / {formatPreciseTime(previewLayout?.duration ?? 0)}
-                </time>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0.01, previewLayout?.duration ?? 0.01)}
-                  step={0.001}
-                  value={Math.min(previewLocalTime, Math.max(0.01, previewLayout?.duration ?? 0.01))}
-                  disabled={!previewLayout}
-                  onChange={(event) => {
-                    if (previewLayout) {
-                      seekGlobal(previewLayout.start + Number(event.target.value))
-                    }
-                  }}
-                  title="片段播放进度"
-                  style={{ flex: 1, minWidth: 0, cursor: previewLayout ? 'pointer' : 'default' }}
-                />
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <time title={`时间线 ${formatPreciseTime(playhead)} / ${formatPreciseTime(totalDuration)}`} style={{ flexBasis: '180px', flexShrink: 0 }}>
-                  <small style={{ fontSize: '12px' }}>时间线 {formatPreciseTime(playhead)} / {formatPreciseTime(totalDuration)}</small>
-                </time>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0.01, totalDuration)}
-                  step={0.001}
-                  value={Math.min(playhead, Math.max(0.01, totalDuration))}
-                  onChange={(event) => seekGlobal(Number(event.target.value))}
-                  title="总时间线播放进度"
-                  style={{ flex: 1, minWidth: 0, cursor: 'pointer' }}
-                />
-              </div>
-            </div>
-          </div>
+          <MergePreviewCanvas
+            previewScreenRef={previewScreenRef}
+            outputCanvasRef={outputCanvasRef}
+            previewRef={previewRef}
+            previewVideoRefs={previewVideoRefs}
+            previewSize={previewSize}
+            outputCanvasGeometry={outputCanvasGeometry}
+            settings={merge.settings}
+            previewLayouts={previewLayouts}
+            previewCells={previewCells}
+            metadata={metadata}
+            effectiveSelectedClipId={effectiveSelectedClipId}
+            activeLayoutCount={activeLayouts.length}
+            previewClip={previewClip}
+            activeTextItems={activeTextItems}
+            selectedTextId={selectedTextId}
+            groupEditing={groupEditing}
+            activeGroupPixelRect={activeGroupPixelRect}
+            cropEditing={cropEditing}
+            cropGeometry={cropGeometry}
+            playbackClock={playbackClock}
+            playing={playing}
+            totalDuration={totalDuration}
+            previewStart={previewLayout?.start ?? null}
+            previewDuration={previewLayout?.duration ?? 0}
+            onPreviewLayoutPointerDown={handlePreviewLayoutPointerDown}
+            onPreviewTextPointerDown={handlePreviewTextPointerDown}
+            onEditText={editTextItem}
+            onGroupLayoutPointerDown={handleGroupLayoutPointerDown}
+            onCropPointerDown={handleCropPointerDown}
+            onResetCropSelection={resetCropSelection}
+            onResetPreviewSize={() => setPreviewSize(defaultPreviewSize)}
+            onPreviewResizePointerDown={handlePreviewResizePointerDown}
+            onPreviewMetadataLoaded={updatePreviewGeometry}
+            onSeek={seekGlobal}
+            onTogglePlayback={togglePlayback}
+            onNudge={nudgePlayhead}
+          />
           <section className="editor-advanced-settings editor-advanced-settings-below-video">
             <div className="editor-advanced-title">高级输出设置</div>
             {activeLayouts.length > 1 && (
@@ -2433,110 +2265,16 @@ export function MergePage() {
           </section>
         </GlassPanel>
 
-        <GlassPanel
-          className="editor-inspector-panel"
-          style={previewPanelHeight > 0 ? { height: previewPanelHeight, maxHeight: previewPanelHeight } : undefined}
+        <MergeInspectorPanel
+          panelHeight={previewPanelHeight}
+          selectedClip={selectedClip}
+          selectedClipMetadata={selectedClip ? metadata[normalizePath(selectedClip.path)] : undefined}
+          selectedAudio={selectedAudio}
+          selectedAudioStart={selectedAudioLayout?.start ?? 0}
+          selectedText={selectedText}
+          selectedTextInputRef={selectedTextInputRef}
+          formatTime={formatPreciseTime}
         >
-          <div className="editor-inspector-title"><Settings2 /><strong>属性与输出</strong></div>
-          {selectedClip ? (
-            <div className="editor-selected-media">
-              <span>视频片段</span>
-              <strong title={selectedClip.path}>{selectedClip.name}</strong>
-              <small style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <span>{formatPreciseTime(selectedClip.trimStart)} - {formatPreciseTime(clipSourceEnd(selectedClip, metadata[normalizePath(selectedClip.path)]))} {selectedClip.rotation ? ` · 右旋 ${selectedClip.rotation}°` : ''}</span>
-                <span style={{ color: 'rgba(255,255,255,0.6)' }}>
-                  分辨率: {metadata[normalizePath(selectedClip.path)]?.width ?? '-'}x{metadata[normalizePath(selectedClip.path)]?.height ?? '-'} · 
-                  帧率: {Math.round(metadata[normalizePath(selectedClip.path)]?.fps ?? 0) || '-'} FPS
-                </span>
-              </small>
-              <div className="editor-time-fields">
-                <NumberField label="入点" value={selectedClip.trimStart} min={0} step={0.01} onChange={(trimStart) => merge.updateVideo(selectedClip.id, { trimStart })} />
-                <NumberField label="出点" value={selectedClip.trimEnd} min={0} step={0.01} placeholder="自动" onChange={(trimEnd) => merge.updateVideo(selectedClip.id, { trimEnd })} />
-              </div>
-              <div className="editor-volume-control" style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <button
-                  type="button"
-                  className="icon-button"
-                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(238, 243, 255, 0.84)', padding: '4px' }}
-                  onClick={() => merge.updateVideo(selectedClip.id, { muted: !selectedClip.muted })}
-                  title={selectedClip.muted ? '取消静音' : '静音'}
-                >
-                  {selectedClip.muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-                </button>
-                <input
-                  type="range"
-                  min="0"
-                  max="3"
-                  step="0.05"
-                  value={selectedClip.muted ? 0 : (selectedClip.volume ?? 1)}
-                  disabled={selectedClip.muted}
-                  onChange={(e) => merge.updateVideo(selectedClip.id, { volume: parseFloat(e.target.value) })}
-                  style={{ flex: 1, accentColor: 'var(--accent-color, #3b82f6)' }}
-                />
-                <span style={{ fontSize: '12px', minWidth: '40px', textAlign: 'right' }}>
-                  {selectedClip.muted ? 0 : Math.round((selectedClip.volume ?? 1) * 100)}%
-                </span>
-                <button
-                  type="button"
-                  className="neon-button outline"
-                  style={{ padding: '2px 8px', fontSize: '12px', minWidth: '60px', transition: 'all 0.2s', position: 'relative' }}
-                  onClick={(e) => {
-                    merge.updateVideos(merge.items.map(item => ({
-                      id: item.id,
-                      patch: { volume: selectedClip.volume, muted: selectedClip.muted }
-                    })))
-                    const btn = e.currentTarget
-                    const originalText = btn.textContent
-                    btn.style.backgroundColor = 'rgba(34, 197, 94, 0.2)'
-                    btn.style.borderColor = '#22c55e'
-                    btn.style.color = '#4ade80'
-                    btn.style.transform = 'scale(0.95)'
-                    btn.textContent = '统一成功!'
-                    setTimeout(() => {
-                      btn.style.transform = 'scale(1)'
-                    }, 150)
-                    setTimeout(() => {
-                      btn.style.backgroundColor = ''
-                      btn.style.borderColor = ''
-                      btn.style.color = ''
-                      btn.textContent = originalText
-                    }, 1500)
-                  }}
-                  title="应用当前音量设置到所有视频片段"
-                >
-                  统一音量
-                </button>
-              </div>
-            </div>
-          ) : selectedAudio ? (
-            <div className="editor-selected-media audio">
-              <span>音频片段</span>
-              <strong title={selectedAudio.path}>{selectedAudio.name}</strong>
-              <div className="editor-time-fields">
-                <NumberField label="时间线位置" value={selectedAudioLayout?.start ?? 0} min={0} step={0.01} onChange={(startTime) => merge.updateAudio(selectedAudio.id, { startTime })} />
-                <NumberField label="音频入点" value={selectedAudio.trimStart} min={0} step={0.01} onChange={(trimStart) => merge.updateAudio(selectedAudio.id, { trimStart })} />
-              </div>
-            </div>
-          ) : selectedText ? (
-            <div className="editor-selected-media text">
-              <span>文本片段</span>
-              <TextInput ref={selectedTextInputRef} value={selectedText.text} onChange={(event) => merge.updateText(selectedText.id, { text: event.target.value })} />
-              <div className="editor-time-fields">
-                <NumberField label="开始时间" value={selectedText.startTime} min={0} step={0.01} onChange={(startTime) => merge.updateText(selectedText.id, { startTime })} />
-                <NumberField label="持续秒数" value={selectedText.duration} min={0.05} step={0.01} onChange={(duration) => merge.updateText(selectedText.id, { duration })} />
-              </div>
-              <div className="editor-text-fields">
-                <NumberField label="横向位置" value={selectedText.x} min={0} max={1} step={0.01} onChange={(x) => merge.updateText(selectedText.id, { x })} />
-                <NumberField label="纵向位置" value={selectedText.y} min={0} max={1} step={0.01} onChange={(y) => merge.updateText(selectedText.id, { y })} />
-                <NumberField label="字号" value={selectedText.fontSize} min={8} max={240} onChange={(fontSize) => merge.updateText(selectedText.id, { fontSize })} />
-                <label>
-                  <span>颜色</span>
-                  <TextInput value={selectedText.color} onChange={(event) => merge.updateText(selectedText.id, { color: event.target.value })} />
-                </label>
-              </div>
-            </div>
-          ) : <p className="editor-no-selection">选择时间线上的视频或音频片段后可调整属性。</p>}
-
           <div className="editor-output-settings">
             <div className="editor-output-primary-grid">
               <label>
@@ -2624,7 +2362,7 @@ export function MergePage() {
               )}
             </div>
           </div>
-        </GlassPanel>
+        </MergeInspectorPanel>
       </div>
 
       <GlassPanel className="editor-timeline-panel">
@@ -2915,20 +2653,12 @@ export function MergePage() {
                 })}
               </div>
               {totalDuration > 0 && (
-                <div
-                  className={`timeline-playhead ${playheadDragging ? 'dragging' : ''}`}
-                  style={{ left: timelinePixel(playhead, timelinePixelsPerSecondScaled) }}
-                >
-                  <button
-                    type="button"
-                    className="timeline-playhead-handle"
-                    aria-label="长按并拖动播放头"
-                    title="长按倒三角后拖动播放位置"
-                    onPointerDown={handlePlayheadHandlePointerDown}
-                  >
-                    <i />
-                  </button>
-                </div>
+                <MergeTimelinePlayhead
+                  clock={playbackClock}
+                  pixelsPerSecond={timelinePixelsPerSecondScaled}
+                  dragging={playheadDragging}
+                  onPointerDown={handlePlayheadHandlePointerDown}
+                />
               )}
             </div>
           </div>
@@ -2954,30 +2684,7 @@ export function MergePage() {
         ))}
       </GlassPanel>
 
-      <GlassPanel className="editor-export-status">
-        <div className="merge-run-head">
-          <div><Gauge /><span>导出状态</span><strong title={merge.stage}>{merge.stage}</strong></div>
-          <b>{merge.progress.toFixed(2)}%</b>
-        </div>
-        <div className="merge-progress-track"><span style={{ width: `${merge.progress}%` }} /></div>
-        {merge.error && <p className="merge-message error">{merge.error}</p>}
-        {merge.outputPaths.length > 0 && (
-          <div className="merge-output-list">
-            <p><CheckCircle2 />{merge.outputPaths.length} 个输出文件已生成</p>
-            {merge.outputPaths.map((path) => <button type="button" key={path} title={path} onClick={() => void revealInFolder(path)}>{path}</button>)}
-          </div>
-        )}
-        <button type="button" className="merge-log-toggle" onClick={() => setLogsExpanded((value) => !value)}>
-          <Clock3 />日志 {merge.logs.length} 行
-        </button>
-        {logsExpanded && (
-          <div className="merge-log-view">
-            {merge.logs.length > 0
-              ? merge.logs.map((log, index) => <div className={log.stream} key={`${log.timestamp}-${index}`}>[{log.stream}] {log.line}</div>)
-              : <span>暂无日志</span>}
-          </div>
-        )}
-      </GlassPanel>
+      <MergeExportStatus />
 
       {dropActive && <div className="editor-drop-overlay"><Upload /><strong>松开以加入视频线或音频线</strong></div>}
       {trackContextMenu && createPortal(
@@ -3258,430 +2965,6 @@ export function MergePage() {
   )
 }
 
-function NumberField({
-  label,
-  tip,
-  value,
-  min,
-  max,
-  step = 1,
-  placeholder,
-  onChange,
-}: {
-  label: string
-  tip?: string
-  value: number
-  min?: number
-  max?: number
-  step?: number
-  placeholder?: string
-  onChange: (value: number) => void
-}) {
-  return (
-    <Translated>
-    <label>
-      {tip ? <ParameterHint label={label} tip={tip} /> : <span>{label}</span>}
-      <TextInput
-        type="number"
-        value={value || ''}
-        min={min}
-        max={max}
-        step={step}
-        placeholder={placeholder}
-        onChange={(event) => onChange(clamp(numeric(event.target.value), min, max))}
-      />
-    </label>
-    </Translated>
-  )
-}
-
-function CropMasks({ rect, geometry }: { rect: CropRect; geometry: CropGeometry }) {
-  const left = rect.x / geometry.sourceWidth * 100
-  const top = rect.y / geometry.sourceHeight * 100
-  const right = (rect.x + rect.width) / geometry.sourceWidth * 100
-  const bottom = (rect.y + rect.height) / geometry.sourceHeight * 100
-  return (
-    <>
-      <i className="video-crop-mask top" style={{ height: `${top}%` }} />
-      <i className="video-crop-mask bottom" style={{ top: `${bottom}%` }} />
-      <i className="video-crop-mask left" style={{ top: `${top}%`, width: `${left}%`, height: `${bottom - top}%` }} />
-      <i className="video-crop-mask right" style={{ top: `${top}%`, left: `${right}%`, height: `${bottom - top}%` }} />
-    </>
-  )
-}
-
-function cropRectFromClip(
-  clip: Pick<MergeQueueItem, 'cropX' | 'cropY' | 'cropWidth' | 'cropHeight'>,
-  geometry: CropGeometry,
-): CropRect {
-  return cropRectForDimensions(clip, geometry.sourceWidth, geometry.sourceHeight)
-}
-
-function cropRectForDimensions(
-  clip: Pick<MergeQueueItem, 'cropX' | 'cropY' | 'cropWidth' | 'cropHeight'>,
-  sourceWidth: number,
-  sourceHeight: number,
-): CropRect {
-  const x = clamp(Math.round(clip.cropX), 0, Math.max(0, sourceWidth - 2))
-  const y = clamp(Math.round(clip.cropY), 0, Math.max(0, sourceHeight - 2))
-  return {
-    x,
-    y,
-    width: clamp(Math.round(clip.cropWidth || sourceWidth), 2, sourceWidth - x),
-    height: clamp(Math.round(clip.cropHeight || sourceHeight), 2, sourceHeight - y),
-  }
-}
-
-function previewExportVideoStyle(
-  clip: MergeQueueItem,
-  rawWidth: number,
-  rawHeight: number,
-  target: PreviewCanvasGeometry | undefined,
-  fitMode: MergeFitMode,
-  cropEditing: boolean,
-): React.CSSProperties {
-  if (!target || rawWidth <= 0 || rawHeight <= 0) return { opacity: 0 }
-  const source = rotatedDimensions(rawWidth, rawHeight, clip.rotation)
-  const crop = cropEditing
-    ? { x: 0, y: 0, width: source.width, height: source.height }
-    : clip.cropEnabled
-      ? cropRectForDimensions(clip, source.width, source.height)
-      : { x: 0, y: 0, width: source.width, height: source.height }
-  const effectiveFitMode: MergeFitMode = cropEditing ? 'contain' : fitMode
-  const canvasWidth = target.width
-  const canvasHeight = target.height
-  let scaleX = canvasWidth / crop.width
-  let scaleY = canvasHeight / crop.height
-  if (effectiveFitMode !== 'stretch') {
-    const scale = effectiveFitMode === 'cover'
-      ? Math.max(scaleX, scaleY)
-      : Math.min(scaleX, scaleY)
-    scaleX = scale
-    scaleY = scale
-  }
-  const offsetX = target.left + (canvasWidth - crop.width * scaleX) / 2
-  const offsetY = target.top + (canvasHeight - crop.height * scaleY) / 2
-  const rotation = rotationMatrix(clip.rotation, rawWidth, rawHeight)
-  const matrix = [
-    scaleX * rotation.a,
-    scaleY * rotation.b,
-    scaleX * rotation.c,
-    scaleY * rotation.d,
-    scaleX * rotation.e + offsetX - crop.x * scaleX,
-    scaleY * rotation.f + offsetY - crop.y * scaleY,
-  ]
-  return {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: rawWidth,
-    height: rawHeight,
-    maxWidth: 'none',
-    maxHeight: 'none',
-    objectFit: 'fill',
-    transform: `matrix(${matrix.join(',')})`,
-    transformOrigin: '0 0',
-  }
-}
-
-function rotationMatrix(rotation: MergeRotation, rawWidth: number, rawHeight: number) {
-  if (rotation === 90) return { a: 0, b: 1, c: -1, d: 0, e: rawHeight, f: 0 }
-  if (rotation === 180) return { a: -1, b: 0, c: 0, d: -1, e: rawWidth, f: rawHeight }
-  if (rotation === 270) return { a: 0, b: -1, c: 1, d: 0, e: 0, f: rawWidth }
-  return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }
-}
-
-function rotatedDimensions(width: number, height: number, rotation: MergeRotation) {
-  return rotation === 90 || rotation === 270
-    ? { width: height, height: width }
-    : { width, height }
-}
-
-function evenDimension(value: number) {
-  const rounded = Math.max(2, Math.round(value))
-  return rounded % 2 === 0 ? rounded : rounded - 1
-}
-
-function cropSelectionStyle(rect: CropRect, geometry: CropGeometry): React.CSSProperties {
-  return {
-    left: `${rect.x / geometry.sourceWidth * 100}%`,
-    top: `${rect.y / geometry.sourceHeight * 100}%`,
-    width: `${rect.width / geometry.sourceWidth * 100}%`,
-    height: `${rect.height / geometry.sourceHeight * 100}%`,
-  }
-}
-
-function cropPointFromClient(clientX: number, clientY: number, screenRect: DOMRect, geometry: CropGeometry) {
-  return {
-    x: clamp(Math.round((clientX - screenRect.left - geometry.left) / geometry.width * geometry.sourceWidth), 0, geometry.sourceWidth),
-    y: clamp(Math.round((clientY - screenRect.top - geometry.top) / geometry.height * geometry.sourceHeight), 0, geometry.sourceHeight),
-  }
-}
-
-function resizeCropRect(
-  start: CropRect,
-  origin: { x: number; y: number },
-  point: { x: number; y: number },
-  handle: CropHandle,
-  geometry: CropGeometry,
-): CropRect {
-  if (handle === 'draw') {
-    const x = Math.min(origin.x, point.x)
-    const y = Math.min(origin.y, point.y)
-    return {
-      x: clamp(x, 0, geometry.sourceWidth - 2),
-      y: clamp(y, 0, geometry.sourceHeight - 2),
-      width: clamp(Math.abs(point.x - origin.x), 2, geometry.sourceWidth - x),
-      height: clamp(Math.abs(point.y - origin.y), 2, geometry.sourceHeight - y),
-    }
-  }
-  if (handle === 'move') {
-    return {
-      ...start,
-      x: clamp(start.x + point.x - origin.x, 0, geometry.sourceWidth - start.width),
-      y: clamp(start.y + point.y - origin.y, 0, geometry.sourceHeight - start.height),
-    }
-  }
-
-  let left = start.x
-  let top = start.y
-  let right = start.x + start.width
-  let bottom = start.y + start.height
-  if (handle.includes('w')) left = clamp(point.x, 0, right - 2)
-  if (handle.includes('e')) right = clamp(point.x, left + 2, geometry.sourceWidth)
-  if (handle.includes('n')) top = clamp(point.y, 0, bottom - 2)
-  if (handle.includes('s')) bottom = clamp(point.y, top + 2, geometry.sourceHeight)
-  return { x: left, y: top, width: right - left, height: bottom - top }
-}
-
-function buildClipLayouts(
-  items: MergeQueueItem[],
-  trackIds: string[],
-  metadata: Record<string, VideoMetadata>,
-) {
-  const cursors = new Map(trackIds.map((trackId) => [trackId, 0]))
-  return items.map<ClipLayout>((item) => {
-    const trackId = trackIds.includes(item.trackId) ? item.trackId : trackIds[0] ?? item.trackId
-    const duration = clipDuration(item, metadata[normalizePath(item.path)])
-    const start = item.startTime === null ? cursors.get(trackId) ?? 0 : Math.max(0, item.startTime)
-    const end = start + duration
-    cursors.set(trackId, Math.max(cursors.get(trackId) ?? 0, end))
-    return { item, trackId, start, duration, end }
-  })
-}
-
-function buildAudioLayouts(
-  items: MergeAudioItem[],
-  trackIds: string[],
-  durations: Record<string, number>,
-  metadata: Record<string, VideoMetadata>,
-) {
-  const cursors = new Map(trackIds.map((trackId) => [trackId, 0]))
-  return items.map<AudioClipLayout>((item) => {
-    const trackId = trackIds.includes(item.trackId) ? item.trackId : trackIds[0] ?? item.trackId
-    const duration = audioDuration(item, durations, metadata)
-    const start = item.startTime === null ? cursors.get(trackId) ?? 0 : Math.max(0, item.startTime)
-    const end = start + duration
-    cursors.set(trackId, Math.max(cursors.get(trackId) ?? 0, end))
-    return { item, trackId, start, duration, end }
-  })
-}
-
-function activeLayoutsAt(layouts: ClipLayout[], time: number, trackIds: string[]) {
-  const trackOrder = new Map(trackIds.map((trackId, index) => [trackId, index]))
-  return layouts
-    .filter((layout) => time >= layout.start && time < layout.end)
-    .sort((left, right) => (
-      (trackOrder.get(left.trackId) ?? 0) - (trackOrder.get(right.trackId) ?? 0)
-      || left.start - right.start
-    ))
-}
-
-function resolveTimelineDragStart<T extends { item: { id: string }; trackId: string; start: number; duration: number; end: number }>(
-  requestedStart: number,
-  duration: number,
-  movingId: string,
-  targetTrackId: string,
-  layouts: T[],
-  allowCrossTrackOverlap: boolean,
-) {
-  const start = Math.max(0, requestedStart)
-  const shouldAvoidOverlap = !allowCrossTrackOverlap || layouts.some((layout) => (
-    layout.item.id === movingId && layout.trackId === targetTrackId
-  ))
-  if (!shouldAvoidOverlap) return start
-  return nearestNonOverlappingStart(start, duration, layouts.filter((layout) => (
-    layout.item.id !== movingId && layout.trackId === targetTrackId
-  )))
-}
-
-function nearestNonOverlappingStart(
-  requestedStart: number,
-  duration: number,
-  others: Array<{ start: number; end: number }>,
-) {
-  const start = Math.max(0, requestedStart)
-  if (!timeRangeOverlaps(start, start + duration, others)) return start
-  const candidates = [0]
-  others.forEach((layout) => {
-    candidates.push(layout.end, layout.start - duration)
-  })
-  return candidates
-    .filter((candidate) => candidate >= 0 && !timeRangeOverlaps(candidate, candidate + duration, others))
-    .sort((left, right) => Math.abs(left - start) - Math.abs(right - start) || left - right)[0] ?? start
-}
-
-function timeRangeOverlaps(start: number, end: number, others: Array<{ start: number; end: number }>) {
-  const epsilon = 0.0005
-  return others.some((layout) => start < layout.end - epsilon && end > layout.start + epsilon)
-}
-
-function previewLayoutRects(items: MergeQueueItem[]): NormalizedLayoutRect[] {
-  if (items.length === 0) return []
-  if (items.length === 1) return [{ x: 0, y: 0, width: 1, height: 1 }]
-  if (items.every((item) => item.layoutCustom)) {
-    return items.map((item) => normalizeLayoutRect({
-      x: item.layoutX,
-      y: item.layoutY,
-      width: item.layoutWidth,
-      height: item.layoutHeight,
-    }))
-  }
-  return presetLayoutRects(items.length, 'grid')
-}
-
-function boundingLayoutRect(rects: NormalizedLayoutRect[]): NormalizedLayoutRect {
-  if (rects.length === 0) return { x: 0, y: 0, width: 1, height: 1 }
-  const left = Math.min(...rects.map((rect) => rect.x))
-  const top = Math.min(...rects.map((rect) => rect.y))
-  const right = Math.max(...rects.map((rect) => rect.x + rect.width))
-  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height))
-  return normalizeLayoutRect({ x: left, y: top, width: right - left, height: bottom - top })
-}
-
-function normalizedPoint(clientX: number, clientY: number, rect: DOMRect) {
-  return {
-    x: clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
-    y: clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1),
-  }
-}
-
-function resizeNormalizedRect(
-  start: NormalizedLayoutRect,
-  origin: { x: number; y: number },
-  point: { x: number; y: number },
-  handle: CropHandle,
-) {
-  if (handle === 'move') {
-    return normalizeLayoutRect({
-      ...start,
-      x: start.x + point.x - origin.x,
-      y: start.y + point.y - origin.y,
-    })
-  }
-  let left = start.x
-  let top = start.y
-  let right = start.x + start.width
-  let bottom = start.y + start.height
-  if (handle.includes('w')) left = clamp(point.x, 0, right - 0.08)
-  if (handle.includes('e')) right = clamp(point.x, left + 0.08, 1)
-  if (handle.includes('n')) top = clamp(point.y, 0, bottom - 0.08)
-  if (handle.includes('s')) bottom = clamp(point.y, top + 0.08, 1)
-  return normalizeLayoutRect({ x: left, y: top, width: right - left, height: bottom - top })
-}
-
-function transformLayoutRects(
-  rects: NormalizedLayoutRect[],
-  source: NormalizedLayoutRect,
-  target: NormalizedLayoutRect,
-) {
-  return rects.map((rect) => normalizeLayoutRect({
-    x: target.x + (rect.x - source.x) / Math.max(0.001, source.width) * target.width,
-    y: target.y + (rect.y - source.y) / Math.max(0.001, source.height) * target.height,
-    width: rect.width / Math.max(0.001, source.width) * target.width,
-    height: rect.height / Math.max(0.001, source.height) * target.height,
-  }))
-}
-
-function presetLayoutRects(
-  count: number,
-  mode: 'grid' | 'horizontal' | 'vertical',
-): NormalizedLayoutRect[] {
-  if (count <= 0) return []
-  if (count === 1) return [{ x: 0, y: 0, width: 1, height: 1 }]
-  const columns = mode === 'horizontal' ? count : mode === 'vertical' ? 1 : count <= 4 ? 2 : 3
-  const rows = mode === 'vertical' ? count : mode === 'horizontal' ? 1 : Math.ceil(count / columns)
-  const width = 1 / columns
-  const height = 1 / rows
-  return Array.from({ length: count }, (_, index) => ({
-    x: index % columns * width,
-    y: Math.floor(index / columns) * height,
-    width,
-    height,
-  }))
-}
-
-function insetLayoutRects(rects: NormalizedLayoutRect[], inset: number) {
-  return rects.map((rect) => normalizeLayoutRect({
-    x: rect.x + inset,
-    y: rect.y + inset,
-    width: rect.width - inset * 2,
-    height: rect.height - inset * 2,
-  }))
-}
-
-function resolveDraggedLayout(
-  raw: NormalizedLayoutRect,
-  others: NormalizedLayoutRect[],
-  snap: boolean,
-  threshold: number,
-) {
-  let next = normalizeLayoutRect(raw)
-  if (snap) {
-    const xCandidates = [0, 1 - next.width]
-    const yCandidates = [0, 1 - next.height]
-    for (const other of others) {
-      xCandidates.push(other.x, other.x + other.width, other.x - next.width, other.x + other.width - next.width)
-      yCandidates.push(other.y, other.y + other.height, other.y - next.height, other.y + other.height - next.height)
-    }
-    next = {
-      ...next,
-      x: nearestSnap(next.x, xCandidates, threshold),
-      y: nearestSnap(next.y, yCandidates, threshold),
-    }
-    next = normalizeLayoutRect(next)
-  }
-  if (others.some((other) => layoutRectsOverlap(next, other))) return null
-  return next
-}
-
-function normalizeLayoutRect(rect: NormalizedLayoutRect): NormalizedLayoutRect {
-  const width = clamp(rect.width, 0.05, 1)
-  const height = clamp(rect.height, 0.05, 1)
-  return {
-    x: clamp(rect.x, 0, 1 - width),
-    y: clamp(rect.y, 0, 1 - height),
-    width,
-    height,
-  }
-}
-
-function nearestSnap(value: number, candidates: number[], threshold: number) {
-  return candidates.reduce((best, candidate) => (
-    Math.abs(candidate - value) <= threshold && Math.abs(candidate - value) < Math.abs(best - value)
-      ? candidate
-      : best
-  ), value)
-}
-
-function layoutRectsOverlap(left: NormalizedLayoutRect, right: NormalizedLayoutRect) {
-  const epsilon = 0.001
-  return left.x < right.x + right.width - epsilon
-    && left.x + left.width > right.x + epsilon
-    && left.y < right.y + right.height - epsilon
-    && left.y + left.height > right.y + epsilon
-}
-
 function trackIdAtPoint(clientX: number, clientY: number, kind: 'video' | 'audio' | 'text') {
   const element = document.elementFromPoint(clientX, clientY)
   const track = element?.closest<HTMLElement>(`[data-track-kind="${kind}"]`)
@@ -3692,214 +2975,4 @@ function trackKindLabel(kind: 'video' | 'audio' | 'text') {
   if (kind === 'video') return '视频线'
   if (kind === 'audio') return '音频线'
   return '文本线'
-}
-
-function previousTrackLayout(layouts: ClipLayout[], layout: ClipLayout, direction: -1 | 1) {
-  const trackLayouts = layouts
-    .filter((candidate) => candidate.trackId === layout.trackId)
-    .sort((left, right) => left.start - right.start)
-  const index = trackLayouts.findIndex((candidate) => candidate.item.id === layout.item.id)
-  return trackLayouts[index + direction] ?? null
-}
-
-function findLayoutAt(layouts: ClipLayout[], time: number) {
-  return layouts.find((layout) => time >= layout.start && time < layout.end)
-}
-
-function clipDuration(item: MergeQueueItem, info?: VideoMetadata) {
-  if (!info?.readable) return Math.max(0.1, item.trimEnd - item.trimStart || 1)
-  return Math.max(0.1, clipSourceEnd(item, info) - item.trimStart)
-}
-
-function clipSourceEnd(item: MergeQueueItem, info?: VideoMetadata) {
-  const duration = info?.readable ? info.duration : Math.max(item.trimEnd, item.trimStart + 1)
-  return item.trimEnd > item.trimStart ? Math.min(item.trimEnd, duration) : duration
-}
-
-function sourceDurationForClip(item: MergeQueueItem, info?: VideoMetadata) {
-  return info?.readable ? info.duration : Math.max(item.trimEnd, item.trimStart + 1)
-}
-
-function audioDuration(audio: MergeAudioItem, durations: Record<string, number>, metadata: Record<string, VideoMetadata>) {
-  const duration = durations[audio.id] ?? metadata[normalizePath(audio.path)]?.duration ?? 30
-  const end = audio.trimEnd > audio.trimStart ? Math.min(audio.trimEnd, duration) : duration
-  return Math.max(0.1, end - audio.trimStart)
-}
-
-function timeTicks(duration: number, width = timelineMinimumWidth) {
-  if (duration <= 0) return [0]
-  const targetTicks = clamp(Math.floor(width / 100), 1, 60)
-  const raw = duration / targetTicks
-  const units = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
-  const step = units.find((unit) => unit >= raw) ?? Math.ceil(raw / 3600) * 3600
-  const ticks = []
-  for (let value = 0; value <= duration; value += step) ticks.push(value)
-  return ticks
-}
-
-function timelinePixel(time: number, pixelsPerSecond: number) {
-  return `${Math.max(0, time * pixelsPerSecond)}px`
-}
-
-function timelineLength(duration: number, pixelsPerSecond: number) {
-  return `${Math.max(2, duration * pixelsPerSecond)}px`
-}
-
-function timelineTimeFromClientX(clientX: number, rect: DOMRect, totalDuration: number, pixelsPerSecond: number) {
-  if (rect.width <= 0 || totalDuration <= 0 || pixelsPerSecond <= 0) return 0
-  return clamp((clientX - rect.left) / pixelsPerSecond, 0, totalDuration)
-}
-
-function normalizeTimelineZoom(value: number) {
-  if (!Number.isFinite(value)) return timelineZoomDefault
-  return clamp(value, timelineZoomMinimum, timelineZoomMaximum)
-}
-
-function timelinePixelsPerSecondForZoom(zoomPercent: number) {
-  const zoom = normalizeTimelineZoom(zoomPercent)
-  if (zoom <= timelineZoomDefault) {
-    return timelineMinimumPixelsPerSecond
-      * Math.pow(timelinePixelsPerSecond / timelineMinimumPixelsPerSecond, zoom / timelineZoomDefault)
-  }
-  return timelinePixelsPerSecond
-    * Math.pow(timelineMaximumPixelsPerSecond / timelinePixelsPerSecond, (zoom - timelineZoomDefault) / timelineZoomDefault)
-}
-
-function canSplitClipAt(layout: ClipLayout, timelineTime: number, metadata: Record<string, VideoMetadata>) {
-  const sourceTime = layout.item.trimStart + clamp(timelineTime - layout.start, 0, layout.duration)
-  const sourceEnd = clipSourceEnd(layout.item, metadata[normalizePath(layout.item.path)])
-  return sourceTime > layout.item.trimStart + 0.05 && sourceTime < sourceEnd - 0.05
-}
-
-interface SubtitleCue {
-  start: number
-  end: number
-  text: string
-}
-
-function parseSubtitleCues(content: string, fileExtension: string): SubtitleCue[] {
-  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
-  const ext = fileExtension.toLowerCase()
-  if (ext === 'ass' || ext === 'ssa') return parseAssSubtitleCues(normalized)
-  return parseTimedTextSubtitleCues(normalized)
-}
-
-function parseTimedTextSubtitleCues(content: string): SubtitleCue[] {
-  return content
-    .replace(/^WEBVTT[^\n]*(?:\n|$)/i, '')
-    .split(/\n{2,}/)
-    .flatMap((block) => {
-      const lines = block.split('\n').map((line) => line.trim()).filter(Boolean)
-      const timingIndex = lines.findIndex((line) => line.includes('-->'))
-      if (timingIndex < 0) return []
-      const [rawStart, rawEnd] = lines[timingIndex].split('-->').map((part) => part.trim())
-      const start = parseSubtitleTime(rawStart)
-      const end = parseSubtitleTime(rawEnd.split(/\s+/)[0] ?? '')
-      const text = cleanSubtitleText(lines.slice(timingIndex + 1).join('\n'))
-      if (start === null || end === null || end <= start || !text) return []
-      return [{ start, end, text }]
-    })
-}
-
-function parseAssSubtitleCues(content: string): SubtitleCue[] {
-  let format = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text']
-  const cues: SubtitleCue[] = []
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim()
-    if (/^Format:/i.test(line)) {
-      format = line.replace(/^Format:/i, '').split(',').map((part) => part.trim().toLowerCase())
-      continue
-    }
-    if (!/^Dialogue:/i.test(line)) continue
-    const fields = splitAssDialogueFields(line.replace(/^Dialogue:/i, '').trim(), format.length)
-    const startIndex = format.indexOf('start')
-    const endIndex = format.indexOf('end')
-    const textIndex = format.indexOf('text')
-    const start = parseSubtitleTime(fields[startIndex] ?? '')
-    const end = parseSubtitleTime(fields[endIndex] ?? '')
-    const text = cleanSubtitleText((textIndex >= 0 ? fields.slice(textIndex).join(',') : fields.at(-1) ?? '')
-      .replace(/\\[Nn]/g, '\n')
-      .replace(/\{[^}]*}/g, ''))
-    if (start === null || end === null || end <= start || !text) continue
-    cues.push({ start, end, text })
-  }
-  return cues
-}
-
-function splitAssDialogueFields(value: string, fieldCount: number) {
-  if (fieldCount <= 1) return [value]
-  const fields = value.split(',')
-  if (fields.length <= fieldCount) return fields.map((field) => field.trim())
-  return [
-    ...fields.slice(0, fieldCount - 1).map((field) => field.trim()),
-    fields.slice(fieldCount - 1).join(',').trim(),
-  ]
-}
-
-function parseSubtitleTime(value: string) {
-  const match = value.trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[,.](\d{1,3}))?/)
-  if (!match) return null
-  const hours = Number(match[1] ?? 0)
-  const minutes = Number(match[2] ?? 0)
-  const seconds = Number(match[3] ?? 0)
-  const fraction = match[4] ?? ''
-  const milliseconds = fraction ? Number(fraction.padEnd(3, '0').slice(0, 3)) : 0
-  return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
-}
-
-function cleanSubtitleText(value: string) {
-  return value
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim()
-}
-
-function extension(path: string) {
-  return path.split('.').pop()?.toLowerCase() ?? ''
-}
-
-function numeric(value: string) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
-function clamp(value: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function normalizePath(path: string) {
-  return path.replaceAll('\\', '/').toLowerCase()
-}
-
-function formatDuration(seconds: number) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return '00:00:00'
-  const total = Math.floor(seconds)
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const secs = total % 60
-  return [hours, minutes, secs].map((value) => String(value).padStart(2, '0')).join(':')
-}
-
-function formatPreciseTime(seconds: number) {
-  const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0)
-  const whole = Math.floor(safe)
-  const milliseconds = Math.floor((safe - whole) * 1000)
-  return `${formatDuration(whole)}.${String(milliseconds).padStart(3, '0')}`
-}
-
-function formatEstimatedSize(bytes: number) {
-  const safe = Math.max(0, Number.isFinite(bytes) ? bytes : 0)
-  if (safe >= 1_000_000_000) return `${(safe / 1_000_000_000).toFixed(2)} GB`
-  return `${Math.round(safe / 1_000_000)} MB`
-}
-
-function formatTick(seconds: number) {
-  return seconds >= 3600 ? formatDuration(seconds) : formatDuration(seconds).slice(3)
 }

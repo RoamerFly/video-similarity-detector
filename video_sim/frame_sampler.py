@@ -247,6 +247,7 @@ class DynamicFrameSampler:
         self.frame_step = max(1, int(frame_step))
         self.cache_dir = Path(cache_dir)
         self.preprocess_config = preprocess_config or PreprocessConfig()
+        self.source_duration_sec = 0.0
 
     def _get_thumbnail_dir(self, video_path: Union[str, Path]) -> Path:
         """Get the thumbnail directory for a video."""
@@ -316,6 +317,7 @@ class DynamicFrameSampler:
             List of RetainedFrame objects with metadata for each retained frame
         """
         video_path = Path(video_path)
+        self.source_duration_sec = 0.0
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
@@ -357,6 +359,7 @@ class DynamicFrameSampler:
         fps = float(vr.get_avg_fps() or 0)
         if fps <= 0:
             fps = 30.0
+        self.source_duration_sec = total_frames / fps
 
         max_gap_frames = max(1, int(self.max_gap_sec * fps))
         notify_interval = max(1, int(fps * 2))
@@ -436,6 +439,7 @@ class DynamicFrameSampler:
             fps = 30.0  # Default fallback
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self.source_duration_sec = total_frames / fps if total_frames > 0 else 0.0
         max_gap_frames = max(1, int(self.max_gap_sec * fps))
         notify_interval = max(1, int(fps * 2))
         retained_frames: List[RetainedFrame] = []

@@ -845,6 +845,11 @@ function VideoPreview({
     error: string
     loading: boolean
   } | null>(null)
+  const [mediaDimensions, setMediaDimensions] = useState({
+    source: '',
+    width: 0,
+    height: 0,
+  })
   const status = statusResult?.path === path ? statusResult.status : null
   const statusError = statusResult?.path === path ? statusResult.error : ''
   const normalizedPath = status?.normalizedPath || path
@@ -865,6 +870,9 @@ function VideoPreview({
       && !comparisonDataUrl
       && !comparisonError
       && Number.isFinite(timestamp ?? Number.NaN)
+  const resolution = mediaDimensions.source === src && mediaDimensions.width > 0
+    ? `${mediaDimensions.width}x${mediaDimensions.height}`
+    : '-'
 
   useEffect(() => {
     let alive = true
@@ -1001,6 +1009,13 @@ function VideoPreview({
             playsInline
             onPointerDown={onPlaybackFocus}
             onFocus={onPlaybackFocus}
+            onLoadedMetadata={(event) => {
+              setMediaDimensions({
+                source: src,
+                width: event.currentTarget.videoWidth,
+                height: event.currentTarget.videoHeight,
+              })
+            }}
             onCanPlay={() => {
               setMediaFailure((current) => current?.path === normalizedPath ? null : current)
               onPlaybackReady()
@@ -1038,7 +1053,7 @@ function VideoPreview({
         </div>
         <div>
           <dt>分辨率(Resolution)</dt>
-          <dd>{videoRef.current?.videoWidth ? `${videoRef.current.videoWidth}x${videoRef.current.videoHeight}` : '-'}</dd>
+          <dd>{resolution}</dd>
         </div>
         <div>
           <dt>帧率(FPS)</dt>

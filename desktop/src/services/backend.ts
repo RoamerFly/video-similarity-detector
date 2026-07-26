@@ -47,6 +47,22 @@ export interface ClipModelStatus {
   missingFiles: string[]
 }
 
+export interface RuntimeStatus {
+  ready: boolean
+  managed: boolean
+  legacyFallback: boolean
+  legacyMigrationAvailable: boolean
+  legacyCleanupAvailable: boolean
+  legacyRuntimeDir: string
+  expectedVersion: string
+  installedVersion?: string
+  flavor: string
+  runtimeDir: string
+  pythonPath: string
+  assetName: string
+  message: string
+}
+
 export interface VideoFile {
   path: string
   name: string
@@ -228,6 +244,7 @@ export interface AnalysisTaskRecord {
   videoCount: number
   totalPairs: number
   completedPairs: number
+  failedPairs: number
   progress: number
   stage: string
   matchKey: string
@@ -481,6 +498,46 @@ export async function openReleasePage(url: string) {
   return invoke<void>('open_release_page', { url })
 }
 
+export async function getRuntimeStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      ready: true,
+      managed: false,
+      legacyFallback: false,
+      legacyMigrationAvailable: false,
+      legacyCleanupAvailable: false,
+      legacyRuntimeDir: '',
+      expectedVersion: '1',
+      flavor: 'cpu',
+      runtimeDir: '',
+      pythonPath: 'python',
+      assetName: '',
+      message: '浏览器预览模式使用模拟运行环境。',
+    } satisfies RuntimeStatus
+  }
+  return invoke<RuntimeStatus>('get_runtime_status')
+}
+
+export async function installRuntime(proxyUrl?: string) {
+  if (!hasTauriRuntime()) throw new Error('AI 运行环境安装需要在桌面应用中执行。')
+  return invoke<RuntimeStatus>('install_runtime', { proxyUrl: proxyUrl?.trim() || null })
+}
+
+export async function migrateLegacyRuntime() {
+  if (!hasTauriRuntime()) throw new Error('旧版运行环境迁移需要在桌面应用中执行。')
+  return invoke<RuntimeStatus>('migrate_legacy_runtime')
+}
+
+export async function removeLegacyRuntime() {
+  if (!hasTauriRuntime()) throw new Error('旧版运行环境清理需要在桌面应用中执行。')
+  return invoke<RuntimeStatus>('remove_legacy_runtime')
+}
+
+export async function cancelRuntimeInstall() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('cancel_runtime_install')
+}
+
 export async function getClipModelStatus() {
   if (!hasTauriRuntime()) {
     return {
@@ -606,6 +663,7 @@ export async function createAnalysisTask(
       videoCount: 0,
       totalPairs: 0,
       completedPairs: 0,
+      failedPairs: 0,
       progress: 0,
       stage: '等待启动',
       matchKey: taskMatchKey,
@@ -642,6 +700,7 @@ export async function updateAnalysisTask(
     progress?: number
     totalPairs?: number
     completedPairs?: number
+    failedPairs?: number
     videos?: VideoFile[]
     reportJson?: string
     reportCsv?: string
@@ -755,7 +814,7 @@ export function buildAnalysisTaskMatchKey(config: RunBatchCompareConfig) {
     videoPaths: (config.videoPaths || []).map(normalizeTaskPath),
   })
   
-  return cyrb53(jsonString).toString(16)
+  return `v2:cyrb53:${cyrb53(jsonString).toString(16)}`
 }
 
 export function analysisTaskMatchesVideos(task: AnalysisTaskRecord, videos: VideoFile[]) {
@@ -1108,6 +1167,19 @@ export async function listenClipModelInstallProgress(
   if (!hasTauriRuntime()) return () => undefined
   const unlisten = await listen<UpdateDownloadProgress>(
     'clip-model-install-progress',
+    (event) => handler(event.payload),
+  )
+  return () => {
+    unlisten()
+  }
+}
+
+export async function listenRuntimeInstallProgress(
+  handler: (payload: UpdateDownloadProgress) => void,
+) {
+  if (!hasTauriRuntime()) return () => undefined
+  const unlisten = await listen<UpdateDownloadProgress>(
+    'runtime-install-progress',
     (event) => handler(event.payload),
   )
   return () => {

@@ -9,7 +9,6 @@ on:
       tag_name:
         description: "Release tag, for example v1.0.0"
         required: true
-        default: "v1.0.0"
         type: string
       release_name:
         description: "Optional release title"
@@ -43,30 +42,43 @@ env:
   EXECUTABLE_NAME: video-similarity-desktop
   NODE_VERSION: "22"
   PYTHON_VERSION: "3.10"
+  CLIP_MODEL_REVISION: "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
   DOWNLOAD_GUIDE: |
     ## Download Guide
 
     - Windows CPU installer, recommended for most users: `Video_Similarity-v*-windows-x64-cpu-installer.exe`
-    - Windows GPU installer, for NVIDIA/CUDA users: `Video_Similarity-v*-windows-x64-gpu-installer.exe`
+    - Windows GPU installer, for NVIDIA Turing-or-newer GPUs (compute capability 7.5+) with R580+ drivers: `Video_Similarity-v*-windows-x64-gpu-installer.exe`
     - Windows portable package: matching `windows-x64-*-portable.zip`; unzip it and run the exe inside
     - macOS Apple Silicon / M-series: `Video_Similarity-v*-macos-arm64-installer.dmg`
     - macOS Intel: `Video_Similarity-v*-macos-x64-installer.dmg`
     - Linux Debian/Ubuntu: `Video_Similarity-v*-linux-x64-installer.deb`
     - Linux Fedora/openSUSE/RHEL: `Video_Similarity-v*-linux-x64-installer.rpm`
     - Linux portable package: `Video_Similarity-v*-linux-x64-portable.tar.gz`
-    - Offline CLIP model: `clip-vit-base-patch32.zip`; unzip it into the app-local `models/` directory
+    Application installers and portable packages are lightweight and no longer contain the large Python/FFmpeg runtime. On first launch, the app automatically downloads the matching runtime once; the CPU runtime is generally a few hundred MB, while the Windows CUDA runtime is close to 2 GiB. The first AI analysis can also download the separate CLIP model (about 600 MB).
 
-    `.sig` and `latest.json` / `windows.json` / `darwin.json` / `linux.json` are mainly for automatic updates and signature verification. Most users do not need to download them manually.
+    Later UI, editor, button, style, Rust, or Python business-logic updates only download the tens-of-MB application update. The installed runtime and model are reused unless their own versions change. If a v1.0.x `env` still exists beside the executable, migrate it from Settings to avoid downloading it again.
+
+    Runtime assets are single resumable ZIP files named `Video_Similarity-runtime-v*-windows-x64-{cpu|gpu}.zip`, `Video_Similarity-runtime-v*-macos-{arm64|x64}.zip`, and `Video_Similarity-runtime-v*-linux-x64.zip`. The offline model asset is `clip-vit-base-patch32.zip`.
+
+    `*-updater.exe`, `.sig`, runtime `.sha256`, and `latest.json` / `windows.json` / `darwin.json` / `linux.json` are mainly for automatic installation, updates, and signature/checksum verification. Most users do not need to download them manually.
 jobs:
+  quality:
+    name: Quality checks
+    uses: ./.github/workflows/ci.yml
+
   linux:
     name: Build Linux x64
     runs-on: ubuntu-22.04
+    needs: quality
     timeout-minutes: 120
     env:
       TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -96,10 +108,11 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
-            rpm
+            rpm \
+            zip
 
-      - name: Set release version
-        run: python scripts/set_release_version.py "$TAG_NAME"
+      - name: Verify committed version matches tag
+        run: python scripts/set_release_version.py "$TAG_NAME" --check
 
       - name: Prepare standalone FFmpeg runtime
         run: |
@@ -152,7 +165,36 @@ jobs:
           dist_dir="$PWD/desktop/dist_linux"
           mkdir -p release-assets
 
-          tar -C "$dist_dir" -czf "release-assets/${base}-portable.tar.gz" .
+          runtime_version="$(tr -d '[:space:]' < desktop/runtime-version.txt)"
+          test -n "$runtime_version"
+          runtime_base="${APP_NAME}-runtime-v${runtime_version}-linux-x64"
+          runtime_root="$(mktemp -d)"
+          mkdir -p "$runtime_root/env"
+          cp -a "$dist_dir/env/." "$runtime_root/env/"
+          (
+            cd "$runtime_root"
+            zip -r -9 "$GITHUB_WORKSPACE/release-assets/${runtime_base}.zip" env
+          )
+          (
+            cd release-assets
+            sha256sum "${runtime_base}.zip" > "${runtime_base}.zip.sha256"
+          )
+
+          light_dist="$(mktemp -d)"
+          cp -a "$dist_dir/." "$light_dist/"
+          rm -rf \
+            "$light_dist/env" \
+            "$light_dist/installer" \
+            "$light_dist/models" \
+            "$light_dist/data"
+          find "$light_dist" -maxdepth 1 -type f \
+            \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -delete
+          test ! -e "$light_dist/env"
+          test -x "$light_dist/video-similarity-desktop"
+          test -s "$light_dist/runtime-version.txt"
+          test -s "$light_dist/BUILD_FLAVOR.txt"
+
+          tar -C "$light_dist" -czf "release-assets/${base}-portable.tar.gz" .
 
           package_root="$(mktemp -d)"
           mkdir -p \
@@ -161,7 +203,7 @@ jobs:
             "$package_root/usr/bin" \
             "$package_root/usr/share/applications" \
             "$package_root/usr/share/icons/hicolor/512x512/apps"
-          cp -a "$dist_dir/." "$package_root/opt/${APP_NAME}/"
+          cp -a "$light_dist/." "$package_root/opt/${APP_NAME}/"
           install -m 644 desktop/icon.png \
             "$package_root/usr/share/icons/hicolor/512x512/apps/video-similarity.png"
           cat > "$package_root/usr/bin/video-similarity" <<'SH'
@@ -251,6 +293,7 @@ jobs:
   windows:
     name: Build Windows x64 (${{ matrix.flavor }})
     runs-on: windows-latest
+    needs: quality
     timeout-minutes: 120
     env:
       TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
@@ -267,6 +310,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -283,9 +329,9 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set release version
+      - name: Verify committed version matches tag
         shell: pwsh
-        run: python scripts/set_release_version.py $env:TAG_NAME
+        run: python scripts/set_release_version.py $env:TAG_NAME --check
 
       - name: Prepare standalone FFmpeg runtime
         shell: pwsh
@@ -374,13 +420,36 @@ jobs:
           $dist = "desktop\${{ matrix.dist_dir }}"
           New-Item -ItemType Directory -Force "release-assets" | Out-Null
 
+          $runtimeVersion = (Get-Content -Raw "desktop\runtime-version.txt").Trim()
+          if (-not $runtimeVersion) {
+            throw "desktop/runtime-version.txt is empty."
+          }
+          $runtimeBase = "${env:APP_NAME}-runtime-v${runtimeVersion}-windows-x64-${{ matrix.flavor }}"
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP $runtimeBase
+          New-Item -ItemType Directory -Force $runtimeRoot | Out-Null
+          Copy-Item (Join-Path $dist "env") (Join-Path $runtimeRoot "env") -Recurse
+          $runtimeZip = "release-assets\$runtimeBase.zip"
+          & 7z a -tzip -mx=7 $runtimeZip (Join-Path $runtimeRoot "*")
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $runtimeZip)) {
+            throw "Standalone Windows runtime ZIP was not generated."
+          }
+          $runtimeHash = (Get-FileHash -LiteralPath $runtimeZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $runtimeSize = (Get-Item -LiteralPath $runtimeZip).Length
+          if ($runtimeSize -ge 2GB) {
+            throw "Windows runtime exceeds GitHub's 2 GiB single-file limit: $runtimeSize bytes"
+          }
+          "$runtimeHash  $runtimeBase.zip" |
+            Set-Content -LiteralPath "$runtimeZip.sha256" -Encoding ASCII
+
           $portableRoot = Join-Path $env:RUNNER_TEMP "video-similarity-portable"
           Copy-Item $dist $portableRoot -Recurse
-          Remove-Item (Join-Path $portableRoot "installer") -Recurse -Force -ErrorAction SilentlyContinue
+          foreach ($directory in @("env", "installer", "models", "data")) {
+            Remove-Item (Join-Path $portableRoot $directory) -Recurse -Force -ErrorAction SilentlyContinue
+          }
           $portableZip = "release-assets\$base-portable.zip"
           & 7z a -tzip -mx=7 $portableZip (Join-Path $portableRoot "*")
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $portableZip)) {
-            throw "Portable ZIP was not generated."
+            throw "Lightweight portable ZIP was not generated."
           }
 
           $installerOutput = "release-assets\$base-installer.exe"
@@ -404,9 +473,32 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or !(Test-Path "$installerOutput.sig")) {
             throw "Interactive Windows installer signature was not generated."
           }
+
+          $updaterRoot = Join-Path $env:RUNNER_TEMP "video-similarity-updater"
+          Copy-Item $portableRoot $updaterRoot -Recurse
+          $updaterZip = Join-Path $env:RUNNER_TEMP "$base-updater.zip"
+          & 7z a -tzip -mx=7 $updaterZip (Join-Path $updaterRoot "*")
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $updaterZip)) {
+            throw "Lightweight updater ZIP was not generated."
+          }
           $updaterOutput = "release-assets\$base-updater.exe"
-          Copy-Item -LiteralPath $installerOutput -Destination $updaterOutput -Force
-          Copy-Item -LiteralPath "$installerOutput.sig" -Destination "$updaterOutput.sig" -Force
+          & ".\scripts\build-windows-self-extractor.ps1" `
+            -PayloadZip $updaterZip `
+            -OutputExe $updaterOutput `
+            -DisplayName $displayName `
+            -InstallFolderName $installFolder `
+            -PreserveRuntimeOnUpdate
+          if (!(Test-Path $updaterOutput)) {
+            throw "Lightweight Windows updater was not generated."
+          }
+          & ".\desktop\node_modules\.bin\tauri.cmd" signer sign $passwordArg $updaterOutput
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path "$updaterOutput.sig")) {
+            throw "Lightweight Windows updater signature was not generated."
+          }
+          $updaterEntries = & 7z l -ba $updaterZip
+          if ($updaterEntries | Select-String "(^|[\\/\s])env[\\/]") {
+            throw "Lightweight updater unexpectedly contains the Python runtime."
+          }
           $uninstallerEntry = & 7z l -ba $portableZip | Select-String "uninstall\.exe$"
           if ($LASTEXITCODE -ne 0 -or $null -eq $uninstallerEntry) {
             throw "uninstall.exe was not added to the Windows package."
@@ -425,6 +517,7 @@ jobs:
   macos:
     name: Build macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    needs: quality
     timeout-minutes: 120
     env:
       TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
@@ -439,6 +532,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -455,8 +551,8 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set release version
-        run: python scripts/set_release_version.py "$TAG_NAME"
+      - name: Verify committed version matches tag
+        run: python scripts/set_release_version.py "$TAG_NAME" --check
 
       - name: Prepare standalone FFmpeg runtime
         run: |
@@ -506,12 +602,42 @@ jobs:
           app_dir="$RUNNER_TEMP/${DISPLAY_NAME}.app"
           dmg_root="$RUNNER_TEMP/dmg-root"
           iconset="$RUNNER_TEMP/AppIcon.iconset"
+          dist_dir="$PWD/desktop/dist_macos"
           mkdir -p \
             release-assets \
             "$app_dir/Contents/MacOS" \
             "$app_dir/Contents/Resources" \
             "$iconset"
-          cp -a desktop/dist_macos/. "$app_dir/Contents/MacOS/"
+
+          runtime_version="$(tr -d '[:space:]' < desktop/runtime-version.txt)"
+          test -n "$runtime_version"
+          runtime_base="${APP_NAME}-runtime-v${runtime_version}-macos-${{ matrix.arch }}"
+          runtime_root="$(mktemp -d)"
+          mkdir -p "$runtime_root/env"
+          cp -a "$dist_dir/env/." "$runtime_root/env/"
+          (
+            cd "$runtime_root"
+            zip -r -9 "$GITHUB_WORKSPACE/release-assets/${runtime_base}.zip" env
+          )
+          (
+            cd release-assets
+            shasum -a 256 "${runtime_base}.zip" > "${runtime_base}.zip.sha256"
+          )
+
+          light_dist="$(mktemp -d)"
+          cp -a "$dist_dir/." "$light_dist/"
+          rm -rf \
+            "$light_dist/env" \
+            "$light_dist/installer" \
+            "$light_dist/models" \
+            "$light_dist/data"
+          find "$light_dist" -maxdepth 1 -type f \
+            \( -name "*.dmg" -o -name "*.app.tar.gz" \) -delete
+          test ! -e "$light_dist/env"
+          test -x "$light_dist/video-similarity-desktop"
+          test -s "$light_dist/runtime-version.txt"
+          test -s "$light_dist/BUILD_FLAVOR.txt"
+          cp -a "$light_dist/." "$app_dir/Contents/MacOS/"
 
           for size in 16 32 128 256 512; do
             sips -z "$size" "$size" desktop/icon.png \
@@ -597,6 +723,7 @@ jobs:
       - name: Checkout release metadata
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -691,7 +818,7 @@ jobs:
           set -euo pipefail
           model_dir="$RUNNER_TEMP/clip-model/clip-vit-base-patch32"
           mkdir -p "$model_dir" model-assets
-          base_url="https://huggingface.co/openai/clip-vit-base-patch32/resolve/main"
+          base_url="https://huggingface.co/openai/clip-vit-base-patch32/resolve/${CLIP_MODEL_REVISION}"
           files=(
             "config.json"
             "preprocessor_config.json"
@@ -707,6 +834,12 @@ jobs:
             }
           done
           (
+            cd "$model_dir"
+            echo "b575ef3c36f2a057fa19e221650105052d61cc9c1a972ec15019c6261ec98770  config.json" | sha256sum --check -
+            echo "910e70b3956ac9879ebc90b22fb3bc8a75b6a0677814500101a4c072bd7857bd  preprocessor_config.json" | sha256sum --check -
+            echo "a63082132ba4f97a80bea76823f544493bffa8082296d62d71581a4feff1576f  pytorch_model.bin" | sha256sum --check -
+          )
+          (
             cd "$RUNNER_TEMP/clip-model"
             zip -0 -r "$GITHUB_WORKSPACE/model-assets/clip-vit-base-patch32.zip" \
               clip-vit-base-patch32
@@ -720,6 +853,8 @@ jobs:
           TAG_NAME: ${{ steps.meta.outputs.tag_name }}
         run: |
           set -euo pipefail
+          runtime_version="$(tr -d '[:space:]' < desktop/runtime-version.txt)"
+          test -n "$runtime_version"
           expected=(
             "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb"
             "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb.sig"
@@ -741,6 +876,16 @@ jobs:
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-portable.zip"
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-updater.exe"
             "${APP_NAME}-${TAG_NAME}-windows-x64-gpu-updater.exe.sig"
+            "${APP_NAME}-runtime-v${runtime_version}-windows-x64-cpu.zip"
+            "${APP_NAME}-runtime-v${runtime_version}-windows-x64-cpu.zip.sha256"
+            "${APP_NAME}-runtime-v${runtime_version}-windows-x64-gpu.zip"
+            "${APP_NAME}-runtime-v${runtime_version}-windows-x64-gpu.zip.sha256"
+            "${APP_NAME}-runtime-v${runtime_version}-macos-arm64.zip"
+            "${APP_NAME}-runtime-v${runtime_version}-macos-arm64.zip.sha256"
+            "${APP_NAME}-runtime-v${runtime_version}-macos-x64.zip"
+            "${APP_NAME}-runtime-v${runtime_version}-macos-x64.zip.sha256"
+            "${APP_NAME}-runtime-v${runtime_version}-linux-x64.zip"
+            "${APP_NAME}-runtime-v${runtime_version}-linux-x64.zip.sha256"
           )
           test -f "model-assets/clip-vit-base-patch32.zip" || {
             echo "Missing model asset: clip-vit-base-patch32.zip" >&2
@@ -752,6 +897,12 @@ jobs:
               exit 1
             }
           done
+          gpu_runtime="release-assets/${APP_NAME}-runtime-v${runtime_version}-windows-x64-gpu.zip"
+          gpu_runtime_size="$(stat -c %s "$gpu_runtime")"
+          if [ "$gpu_runtime_size" -ge 2147483648 ]; then
+            echo "Windows GPU runtime exceeds GitHub's 2 GiB limit: $gpu_runtime_size bytes" >&2
+            exit 1
+          fi
           ls -lh model-assets
           ls -lh release-assets
 

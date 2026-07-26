@@ -289,7 +289,7 @@ export function AnalyzePage() {
       })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [videos])
+  }, [setSelectedVideoPaths, videos])
 
   const refreshHistoryTasks = useCallback(async (showLoading = false) => {
     if (!settings.cacheDir || historyRefreshInFlight.current) return
@@ -385,7 +385,6 @@ export function AnalyzePage() {
     } else if (!scanActuallyInProgress && store.isScanning) {
       store.setIsScanning(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -838,7 +837,10 @@ export function AnalyzePage() {
       const paths = await runBatchCompare({
         ...taskConfig,
         taskId: task.id,
-        taskMatchKey: task.matchKey || buildAnalysisTaskMatchKey(taskConfig),
+        // Always rebuild the compact key from the task config. Tasks created
+        // before v1.0.14 may contain the full JSON config in matchKey, which
+        // can exceed the Windows command-line limit when the task is resumed.
+        taskMatchKey: buildAnalysisTaskMatchKey(taskConfig),
         executionStage: options.executionStage,
         redoStage: options.redoStage,
       })
@@ -1300,7 +1302,10 @@ export function AnalyzePage() {
                     </div>
                     <div className="analysis-history-meta">
                       <small>{formatDateTime(task.updatedAt)}</small>
-                      <small>{task.completedPairs}/{task.totalPairs} 对</small>
+                      <small>
+                        {task.completedPairs}/{task.totalPairs} 对
+                        {task.failedPairs ? ` · 失败 ${task.failedPairs}` : ''}
+                      </small>
                       <small title={task.id}>{task.id}</small>
                     </div>
                     <p className="analysis-history-stage" title={task.stage || task.videoDir}>{task.stage || task.videoDir}</p>
@@ -2353,7 +2358,9 @@ function TaskDetailDialog({
   const videoRows = task.videos ?? []
   const completedPairs = Math.max(0, task.completedPairs)
   const totalPairs = Math.max(0, task.totalPairs)
-  const videoProgressLabel = totalPairs > 0 ? `${completedPairs}/${totalPairs} 对` : '尚未开始'
+  const videoProgressLabel = totalPairs > 0
+    ? `${completedPairs}/${totalPairs} 对${task.failedPairs ? `（失败 ${task.failedPairs} 对）` : ''}`
+    : '尚未开始'
   const reportRows = buildTaskReportRows(task)
   const configSections = buildTaskConfigSections(task.config)
   const taskCachePath = buildTaskCachePath(task)

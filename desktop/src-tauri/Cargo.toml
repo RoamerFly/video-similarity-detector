@@ -1,6 +1,6 @@
 [package]
 name = "video-similarity-desktop"
-version = "1.0.0"
+version = "1.1.0"
 description = "Video Similarity Analysis Desktop Application"
 authors = ["developer"]
 license = "MIT"
@@ -16,14 +16,13 @@ csv = "1"
 base64 = "0.22"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls"] }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
-tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tokio = { version = "1", features = ["time", "macros"] }
 zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 sha1 = "0.10"
+sha2 = "0.10"
 
 [features]
 # this feature is used for production builds or when `devPath` points to the filesystem

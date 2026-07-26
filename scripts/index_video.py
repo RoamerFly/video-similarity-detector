@@ -162,6 +162,7 @@ def main():
             skip_threshold=args.skip_threshold,
             max_gap_sec=args.max_gap_sec,
             frame_step=args.frame_step,
+            source_duration_sec=sampler.source_duration_sec,
         )
         print(f"  Saved cache to: {cache_path}")
 

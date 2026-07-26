@@ -64,8 +64,10 @@ RELEASE_DIR="$DESKTOP_DIR/src-tauri/target/release"
 APP_BINARY="$RELEASE_DIR/video-similarity-desktop"
 REQUIREMENTS="$REPO_ROOT/requirements.txt"
 DEFAULT_RUNTIME_REQUIREMENTS="$DESKTOP_DIR/requirements-runtime.txt"
+RUNTIME_VERSION_FILE="$DESKTOP_DIR/runtime-version.txt"
 RUNTIME_REQUIREMENTS="${RUNTIME_REQUIREMENTS:-$DEFAULT_RUNTIME_REQUIREMENTS}"
 [[ -f "$RUNTIME_REQUIREMENTS" ]] || RUNTIME_REQUIREMENTS="$REQUIREMENTS"
+[[ -s "$RUNTIME_VERSION_FILE" ]] || { echo "[ERROR] Missing runtime version file: $RUNTIME_VERSION_FILE" >&2; exit 1; }
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "[ERROR] Linux builds must be run on Linux." >&2
@@ -251,6 +253,8 @@ copy_runtime_tree() {
   prune_portable_sources "$DIST_DIR"
   cp "$REQUIREMENTS" "$DIST_DIR/requirements.txt"
   cp "$RUNTIME_REQUIREMENTS" "$DIST_DIR/requirements-runtime.txt"
+  cp "$RUNTIME_VERSION_FILE" "$DIST_DIR/runtime-version.txt"
+  printf 'cpu\n' > "$DIST_DIR/BUILD_FLAVOR.txt"
   cp -R "$ENV_DIR" "$DIST_DIR/env"
   chmod +x "$DIST_DIR/env/ffmpeg" "$DIST_DIR/env/ffprobe"
 }
@@ -273,8 +277,6 @@ export USE_TF=0
 export TRANSFORMERS_NO_TF=1
 export TF_CPP_MIN_LOG_LEVEL=2
 export PYTHONNOUSERSITE=1
-export VIDEO_SIM_FFMPEG="$PWD/env/ffmpeg"
-export PATH="$PWD/env:$PATH"
 ./video-similarity-desktop
 EOF
   chmod +x "$DIST_DIR/run-video-similarity.sh"
@@ -286,15 +288,15 @@ Video Similarity - Linux portable package
 
 Output structure:
 - video-similarity-desktop: executable app.
-- env/python/: bundled runtime and dependencies.
-- env/ffmpeg and env/ffprobe: bundled standalone media tools.
-- data/: analysis data, cache and reports.
 - scripts/ and video_sim/: analysis engine copied next to the executable.
+- runtime-version.txt and BUILD_FLAVOR.txt: runtime compatibility markers.
 
 Run:
   ./run-video-similarity.sh
 
-Keep the in-app Python path as "python" to use env/python automatically.
+The release package keeps the app lightweight. On first launch, install the
+versioned runtime into the app-local data directory when prompted. Future app
+updates reuse that runtime instead of downloading it again.
 EOF
 }
 

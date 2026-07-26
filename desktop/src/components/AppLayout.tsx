@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { FolderOpen, GitBranch } from 'lucide-react'
 import { NeonButton } from '@/components/DesignSystem'
+import { RuntimeSetupDialog } from '@/components/RuntimeSetupDialog'
 import { Sidebar } from '@/components/Sidebar'
 import { WindowControls } from '@/components/WindowControls'
 import { translateMultiline } from '@/i18n/messages'
@@ -248,6 +249,8 @@ export function AppLayout() {
       <main className="app-main">
         <Outlet />
       </main>
+
+      <RuntimeSetupDialog />
 
       {closeDialogOpen && createPortal(
         <CloseChoiceDialog
