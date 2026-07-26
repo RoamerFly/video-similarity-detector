@@ -1259,13 +1259,11 @@ async fn download_and_install_update(
     updater_builder = apply_updater_proxy(updater_builder, proxy_url.as_deref())?;
     #[cfg(target_os = "windows")]
     {
-        updater_builder = updater_builder
-            .installer_arg("--update")
-            .installer_arg("--auto-start")
-            .installer_arg("--target")
-            .installer_arg(path_to_string(&install_root))
-            .installer_arg("--wait-pid")
-            .installer_arg(std::process::id().to_string());
+        // The updater plugin already supplies the standard NSIS /P, /R and
+        // /UPDATE switches. Keep /D last so NSIS installs over the current
+        // custom location and writes its standard registry metadata.
+        updater_builder =
+            updater_builder.installer_arg(windows_nsis_install_dir_arg(&install_root));
     }
     let updater = updater_builder
         .build()
@@ -1587,11 +1585,19 @@ fn detect_build_flavor(root: &Path) -> String {
             return value;
         }
     }
+    if let Some(value @ ("cpu" | "gpu")) = option_env!("VIDEO_SIM_BUILD_FLAVOR") {
+        return value.to_string();
+    }
     if root.to_string_lossy().to_ascii_lowercase().contains("gpu") {
         "gpu".to_string()
     } else {
         "cpu".to_string()
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_nsis_install_dir_arg(install_root: &Path) -> String {
+    format!("/D={}", path_to_string(install_root))
 }
 
 fn detect_install_type(root: &Path) -> String {
@@ -7062,7 +7068,7 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    use super::windows_reveal_args;
+    use super::{windows_nsis_install_dir_arg, windows_reveal_args};
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -7073,6 +7079,17 @@ mod tests {
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "/select,");
         assert_eq!(args[1], path.as_os_str());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_updater_uses_standard_nsis_install_directory_argument() {
+        let path = Path::new(r"D:\自定义目录\Video Similarity");
+
+        assert_eq!(
+            windows_nsis_install_dir_arg(path),
+            r"/D=D:\自定义目录\Video Similarity"
+        );
     }
 
     #[test]

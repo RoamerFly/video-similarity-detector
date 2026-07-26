@@ -18,3 +18,7 @@ faiss_video_index.bin
 
 # Tauri updater signing key (private key — DO NOT COMMIT)
 /desktop/.tauri/updater-key.private
+
+# Temporary Tauri resource/config directories created by Windows packaging
+/desktop/src-tauri/.bundle-resources-*
+/desktop/src-tauri/.video-similarity-tauri-build-*

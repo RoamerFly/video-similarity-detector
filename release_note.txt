@@ -20,6 +20,7 @@
 - 修复 macOS/Linux 运行环境安装后部分程序可能无法执行的问题。
 - 修复 Intel Mac 运行环境安装失败的问题。
 - 修复 Windows GPU 版启动时长时间显示白页、界面卡顿以及黑色命令窗口闪现的问题。
+- 修复 Windows 安装包被 Microsoft Defender 错误识别为威胁的问题，改用标准 Windows 安装流程。
 
 ## 下载建议
 

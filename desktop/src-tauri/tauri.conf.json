@@ -53,7 +53,12 @@
     "createUpdaterArtifacts": false,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
-    "resources": ["../../scripts", "../../video_sim", "../../requirements.txt", "../runtime-version.txt"],
+    "resources": {},
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    },
     "copyright": "",
     "category": "DeveloperTool",
     "shortDescription": "Video similarity analysis desktop app",

@@ -716,25 +716,48 @@ function Install-RequirementLines(
     }
 }
 
-function New-TauriBuildOverride([string]$EnvName) {
-    $overridePath = Join-Path $env:TEMP ("video-similarity-tauri-build-{0}-{1}.json" -f $PID, [Guid]::NewGuid().ToString("N"))
+function New-TauriBuildOverride([string]$BundleResourcesDir) {
+    $tauriDir = Join-Path $desktopDir "src-tauri"
+    $overridePath = Join-Path $tauriDir (
+        ".video-similarity-tauri-build-{0}-{1}.json" -f $PID, [Guid]::NewGuid().ToString("N")
+    )
+    $resourceRoot = "./" + [System.IO.Path]::GetFileName($BundleResourcesDir)
+    $resourceMap = [ordered]@{}
+    $resourceMap["$resourceRoot/scripts"] = "scripts/"
+    $resourceMap["$resourceRoot/video_sim"] = "video_sim/"
+    $resourceMap["$resourceRoot/requirements.txt"] = "requirements.txt"
+    $resourceMap["$resourceRoot/requirements-runtime.txt"] = "requirements-runtime.txt"
+    $resourceMap["$resourceRoot/runtime-version.txt"] = "runtime-version.txt"
+    $resourceMap["$resourceRoot/BUILD_FLAVOR.txt"] = "BUILD_FLAVOR.txt"
     $override = @{
         build = @{ beforeBuildCommand = "" }
-        bundle = @{
-            resources = @(
-                "../../scripts",
-                "../../video_sim",
-                "../../requirements.txt",
-                "../runtime-version.txt"
-            )
-        }
+        bundle = @{ resources = $resourceMap }
     } | ConvertTo-Json -Depth 5
     Set-Content -LiteralPath $overridePath -Value $override -Encoding ASCII
     return $overridePath
 }
 
 function Invoke-TauriBuildWithOverride([string]$EnvName, [bool]$NoBundle, [string]$ErrorMessage) {
-    $overridePath = New-TauriBuildOverride $EnvName
+    $tauriDir = Join-Path $desktopDir "src-tauri"
+    $bundleResourcesDir = Join-Path $tauriDir (
+        ".bundle-resources-{0}-{1}" -f $PID, [Guid]::NewGuid().ToString("N")
+    )
+    Assert-ChildPath $tauriDir $bundleResourcesDir
+    New-Item -ItemType Directory -Path $bundleResourcesDir -Force | Out-Null
+    Copy-Directory (Join-Path $repoRoot "scripts") (Join-Path $bundleResourcesDir "scripts")
+    Copy-Directory (Join-Path $repoRoot "video_sim") (Join-Path $bundleResourcesDir "video_sim")
+    Remove-PortableSourceWaste $bundleResourcesDir
+    Copy-Item -LiteralPath $requirements `
+        -Destination (Join-Path $bundleResourcesDir "requirements.txt") -Force
+    Copy-Item -LiteralPath $runtimeRequirements `
+        -Destination (Join-Path $bundleResourcesDir "requirements-runtime.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $desktopDir "runtime-version.txt") `
+        -Destination (Join-Path $bundleResourcesDir "runtime-version.txt") -Force
+    $previousBuildFlavor = $env:VIDEO_SIM_BUILD_FLAVOR
+    $env:VIDEO_SIM_BUILD_FLAVOR = if ($GpuBuild) { "gpu" } else { "cpu" }
+    Set-Content -LiteralPath (Join-Path $bundleResourcesDir "BUILD_FLAVOR.txt") `
+        -Value $env:VIDEO_SIM_BUILD_FLAVOR -Encoding ASCII
+    $overridePath = New-TauriBuildOverride $bundleResourcesDir
     try {
         if ($NoBundle) {
             Invoke-Checked { npx tauri build --ci --no-bundle --features custom-protocol --config $overridePath } $ErrorMessage
@@ -742,7 +765,13 @@ function Invoke-TauriBuildWithOverride([string]$EnvName, [bool]$NoBundle, [strin
             Invoke-Checked { npx tauri build --ci --features custom-protocol --config $overridePath } $ErrorMessage
         }
     } finally {
+        if ($null -eq $previousBuildFlavor) {
+            Remove-Item Env:VIDEO_SIM_BUILD_FLAVOR -ErrorAction SilentlyContinue
+        } else {
+            $env:VIDEO_SIM_BUILD_FLAVOR = $previousBuildFlavor
+        }
         Remove-Item -LiteralPath $overridePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $bundleResourcesDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

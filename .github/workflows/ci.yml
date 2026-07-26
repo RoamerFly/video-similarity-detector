@@ -86,48 +86,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Smoke test Windows updater packager
+      - name: Verify standard Windows installer integration
         shell: powershell
         working-directory: ${{ github.workspace }}
         run: |
-          $smokeRoot = Join-Path $env:RUNNER_TEMP "windows-updater-packager-smoke"
-          $payloadRoot = Join-Path $smokeRoot "payload"
-          $payloadZip = Join-Path $smokeRoot "payload.zip"
-          $updaterExe = Join-Path $smokeRoot "updater.exe"
-          $installRoot = Join-Path $smokeRoot "installed"
-          New-Item -ItemType Directory -Force $payloadRoot | Out-Null
-          foreach ($directory in @("scripts", "video_sim")) {
-            New-Item -ItemType Directory -Force (Join-Path $payloadRoot $directory) | Out-Null
+          $config = Get-Content -Raw "desktop\src-tauri\tauri.conf.json" |
+            ConvertFrom-Json
+          if ($config.bundle.targets -notcontains "nsis") {
+            throw "Windows release must use the standard Tauri NSIS installer."
           }
-          Copy-Item -LiteralPath "$env:WINDIR\System32\where.exe" `
-            -Destination (Join-Path $payloadRoot "video-similarity-desktop.exe")
-          Set-Content -LiteralPath (Join-Path $payloadRoot "scripts\new.txt") -Value "new" -Encoding ASCII
-          Set-Content -LiteralPath (Join-Path $payloadRoot "video_sim\new.txt") -Value "new" -Encoding ASCII
-          Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
-          & ".\scripts\build-windows-self-extractor.ps1" `
-            -PayloadZip $payloadZip `
-            -OutputExe $updaterExe `
-            -DisplayName "Video Similarity" `
-            -InstallFolderName "Video Similarity"
-          if (!(Test-Path -LiteralPath $updaterExe -PathType Leaf)) {
-            throw "Windows updater packager smoke test did not create updater.exe."
+          if (Test-Path -LiteralPath "scripts\build-windows-self-extractor.ps1") {
+            throw "The heuristic-prone custom self-extractor must not be restored."
           }
-          foreach ($directory in @("env", "models", "data")) {
-            New-Item -ItemType Directory -Force (Join-Path $installRoot $directory) | Out-Null
-            Set-Content -LiteralPath (Join-Path $installRoot "$directory\preserved.txt") `
-              -Value "preserved" -Encoding ASCII
+          $releaseWorkflow = Get-Content -Raw ".github\workflows\release.yml"
+          if ($releaseWorkflow -notmatch '(?m)^\s+-BuildInstaller\s+`') {
+            throw "Windows release does not enable the standard NSIS build."
           }
-          $process = Start-Process -FilePath $updaterExe -ArgumentList @(
-            "--target", "`"$installRoot`"", "--update", "--auto-start", "--auto-close",
-            "--no-launch", "--no-shortcuts"
-          ) -Wait -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "Windows updater preservation smoke test failed with exit code $($process.ExitCode)."
+          if ($releaseWorkflow -match 'build-windows-self-extractor') {
+            throw "Windows release still references the custom self-extractor."
           }
-          foreach ($directory in @("env", "models", "data")) {
-            if (!(Test-Path -LiteralPath (Join-Path $installRoot "$directory\preserved.txt"))) {
-              throw "Windows updater removed the preserved $directory directory."
-            }
+          $updaterSource = Get-Content -Raw "desktop\src-tauri\src\main.rs"
+          if ($updaterSource -match '\.installer_arg\("--update"\)') {
+            throw "Updater still passes custom self-extractor arguments."
+          }
+          if ($updaterSource -notmatch 'windows_nsis_install_dir_arg') {
+            throw "Updater does not preserve the selected NSIS install directory."
           }
 
       - name: Set up Rust

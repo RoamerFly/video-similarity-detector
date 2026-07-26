@@ -380,12 +380,14 @@ jobs:
             .\build-windows.ps1 `
               -SkipNpmAudit `
               -CleanPythonEnv `
+              -BuildInstaller `
               -GpuBuild `
               -Python python
           } else {
             .\build-windows.ps1 `
               -SkipNpmAudit `
               -CleanPythonEnv `
+              -BuildInstaller `
               -Python python
           }
           if ($LASTEXITCODE -ne 0) {
@@ -460,55 +462,33 @@ jobs:
           }
 
           $installerOutput = "release-assets\$base-installer.exe"
-          $displayName = if ("${{ matrix.flavor }}" -eq "gpu") {
-            "Video Similarity GPU"
-          } else {
-            "Video Similarity"
+          $standardInstallers = @(
+            Get-ChildItem -LiteralPath (Join-Path $dist "installer") `
+              -Filter "*-setup.exe" -File -Recurse
+          )
+          if ($standardInstallers.Count -ne 1) {
+            throw "Expected exactly one standard Tauri NSIS installer, found $($standardInstallers.Count)."
           }
-          $installFolder = $displayName
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File ".\scripts\build-windows-self-extractor.ps1" `
-            -PayloadZip $portableZip `
-            -OutputExe $installerOutput `
-            -DisplayName $displayName `
-            -InstallFolderName $installFolder
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $installerOutput)) {
-            throw "Interactive Windows installer was not generated."
+          Copy-Item -LiteralPath $standardInstallers[0].FullName `
+            -Destination $installerOutput -Force
+          $installerVersion = (Get-Item -LiteralPath $installerOutput).VersionInfo
+          if ($installerVersion.ProductName -ne "Video Similarity") {
+            throw "Unexpected Windows installer product: $($installerVersion.ProductName)"
           }
           $passwordArg = "--password=$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           & ".\desktop\node_modules\.bin\tauri.cmd" signer sign $passwordArg $installerOutput
           if ($LASTEXITCODE -ne 0 -or !(Test-Path "$installerOutput.sig")) {
-            throw "Interactive Windows installer signature was not generated."
+            throw "Standard Windows installer updater signature was not generated."
           }
 
-          $updaterRoot = Join-Path $env:RUNNER_TEMP "video-similarity-updater"
-          Copy-Item $portableRoot $updaterRoot -Recurse
-          $updaterZip = Join-Path $env:RUNNER_TEMP "$base-updater.zip"
-          & 7z a -tzip -mx=7 $updaterZip (Join-Path $updaterRoot "*")
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $updaterZip)) {
-            throw "Lightweight updater ZIP was not generated."
-          }
           $updaterOutput = "release-assets\$base-updater.exe"
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File ".\scripts\build-windows-self-extractor.ps1" `
-            -PayloadZip $updaterZip `
-            -OutputExe $updaterOutput `
-            -DisplayName $displayName `
-            -InstallFolderName $installFolder
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $updaterOutput)) {
-            throw "Lightweight Windows updater was not generated."
-          }
+          Copy-Item -LiteralPath $installerOutput -Destination $updaterOutput -Force
           & ".\desktop\node_modules\.bin\tauri.cmd" signer sign $passwordArg $updaterOutput
           if ($LASTEXITCODE -ne 0 -or !(Test-Path "$updaterOutput.sig")) {
-            throw "Lightweight Windows updater signature was not generated."
+            throw "Standard Windows updater signature was not generated."
           }
-          $updaterEntries = & 7z l -ba $updaterZip
-          if ($updaterEntries | Select-String "(^|[\\/\s])env[\\/]") {
-            throw "Lightweight updater unexpectedly contains the Python runtime."
-          }
-          $uninstallerEntry = & 7z l -ba $portableZip | Select-String "uninstall\.exe$"
-          if ($LASTEXITCODE -ne 0 -or $null -eq $uninstallerEntry) {
-            throw "uninstall.exe was not added to the Windows package."
+          if ((Get-Item -LiteralPath $installerOutput).Length -ge 100MB) {
+            throw "Standard Windows installer unexpectedly contains the AI runtime."
           }
           Get-ChildItem release-assets | Select-Object Name, Length
 
