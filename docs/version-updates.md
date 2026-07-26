@@ -1,41 +1,28 @@
 ## 新版本内容
 
-本版本重点完善大批量视频场景稳定性、操作体验和后台处理兼容性。
+本版本重点完善了视频合并页面的播放体验、结果展示逻辑以及针对海量视频分析时的底层稳定性。
 
 ### 新增与优化
 
-- 引入视频元数据本地哈希持久化缓存机制（.agents/video_cache），针对已扫描过的视频再次扫描实现毫秒级“秒读”，极大提升大文件夹读取速度。
-- 重构元数据探测底层为 Stdout 管道流式传输，废除死等的批处理读取，并在界面上实时呈现逐一递增进度以及正在解析的具体视频名称。
-- 视频列表右键菜单新增“重命名”选项，支持单个或批量重命名视频文件。
-- 支持扫描状态跨页面持久化，扫描视频后切换页面再切回，扫描结果和多选状态不再丢失。
-- 视频元数据探测引入分批处理机制，自动拆分多批探测，单批失败不影响其他批次，增强大批量视频场景健壮性。
-- 在设置页面新增“每批个数”自定义分批扫描设置。
-- 增加对 metadata-progress 事件的监听处理，扫描时实时呈现当前处理批次信息。
-- 视频合并编码增强，播放器交互体验优化，并在扫描时增加参数过滤提示信息。
-- 更新 v1.0.13 发布说明与相关文档。
+- 优化合并视频页面：新增双进度条展示，下方长进度条代表全局总进度，右侧短进度条精准显示当前单片段进度。
+- 完善多片段音频的联动逻辑：播放至下一片段时右侧音量状态可实时、准确跟随切换。
+- 增强“统一音量”功能：增加“统一成功”的操作提示，并稍微加强了按钮按下的视觉反馈动画。
+- 优化结果总览页面逻辑：明确“删除与该视频相关记录”操作为仅删除相对比的记录条数，不再错误影响整个报告文件。
 
 ### 修复的问题
 
-- 修复 Windows 下视频数量多时“文件名或扩展名太长 (os error 206)”导致无法读取视频信息的问题。
-- 修复大型任务把完整配置和大量视频路径直接写入 Python 启动命令导致 Windows 报错的问题（改为使用独立临时 JSON 文件传递路径）。
-- 修复页面切换后扫描进度和多选状态丢失的问题。
-- 修复读取自定义 metadataBatchSize 时 Rust 后端解析报错的问题。
-- 修复编码预设说明文本显示错误的问题。
+- 修复了分析阶段，开始分析海量视频时，因进程参数过大导致的 Windows 命令行长度超限报错问题。
+- 解决了音频在特定情况下的播放与同步问题。
+- 修复因 TypeScript 缺失属性导致的前端构建失败，以及 GPU Windows Packager 构建时的进程占用问题，提升整体编译打包稳定性。
 
 ## 下载建议
 
-（*注：以下文件名中的 `vX.X.X` 代表当前发版版本号*）
+- Windows 安装版（推荐大多数用户）：下载 `Video_Similarity-v1.0.14-windows-x64-installer.exe`
+- Windows 便携版（免安装）：下载 `Video_Similarity-v1.0.14-windows-x64-portable.zip`，解压后运行里面的 `Video Similarity.exe`
+- macOS Apple Silicon / M 系列：下载 `Video_Similarity-v1.0.14-macos-arm64-installer.dmg`
+- macOS Intel：下载 `Video_Similarity-v1.0.14-macos-x64-installer.dmg`
+- Linux Debian/Ubuntu：下载 `Video_Similarity-v1.0.14-linux-x64-installer.deb`
+- Linux Fedora/openSUSE/RHEL：下载 `Video_Similarity-v1.0.14-linux-x64-installer.rpm`
+- Linux 通用便携：下载 `Video_Similarity-v1.0.14-linux-x64-portable.tar.gz`
 
-- **Windows 用户**：
-  - **大多数用户（CPU 安装版）**：下载 `Video_Similarity-vX.X.X-windows-x64-cpu-installer.exe`
-  - **NVIDIA 显卡用户（需要 CUDA 加速）**：下载 `Video_Similarity-vX.X.X-windows-x64-gpu-installer.exe`
-  - **免安装便携版**：分别对应下载后缀为 `-portable.zip` 的压缩包，解压后直接运行。
-
-- **macOS 用户**：
-  - **Apple Silicon (M系列芯片)**：下载 `Video_Similarity-vX.X.X-macos-aarch64-installer.dmg`
-  - **Intel 芯片**：下载 `Video_Similarity-vX.X.X-macos-x64-installer.dmg`
-
-- **Linux 用户**：
-  - 提供 Debian/Ubuntu 适用的 `.deb`，以及 `.rpm` 或 `.tar.gz` 便携版格式供下载。
-
-*注：`.sig` 和 `latest.json` 等后缀文件主要用于应用内自动更新与安全签名校验，普通用户手动下载安装时无需理会。*
+`.sig` 和 `latest.json` 主要用于自动更新与签名校验，普通安装通常不需要手动下载。
