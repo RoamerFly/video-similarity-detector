@@ -483,13 +483,14 @@ jobs:
             throw "Lightweight updater ZIP was not generated."
           }
           $updaterOutput = "release-assets\$base-updater.exe"
-          & ".\scripts\build-windows-self-extractor.ps1" `
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File ".\scripts\build-windows-self-extractor.ps1" `
             -PayloadZip $updaterZip `
             -OutputExe $updaterOutput `
             -DisplayName $displayName `
             -InstallFolderName $installFolder `
             -PreserveRuntimeOnUpdate
-          if (!(Test-Path $updaterOutput)) {
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $updaterOutput)) {
             throw "Lightweight Windows updater was not generated."
           }
           & ".\desktop\node_modules\.bin\tauri.cmd" signer sign $passwordArg $updaterOutput
@@ -910,36 +911,15 @@ jobs:
       - name: Generate release body
         shell: bash
         env:
-          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
           RELEASE_NOTES: ${{ steps.meta.outputs.release_notes }}
         run: |
           set -euo pipefail
-          git fetch --force --tags
-          range_end="$TAG_NAME"
-          if ! git rev-parse -q --verify "${TAG_NAME}^{commit}" >/dev/null; then
-            range_end="HEAD"
-          fi
-          previous_tag="$(
-            git tag --sort=-version:refname |
-              awk -v current="$TAG_NAME" '$0 != current { print; exit }'
-          )"
           {
             printf '%s\n' "$RELEASE_NOTES"
-            echo
-            if [ -n "$previous_tag" ] && git rev-parse -q --verify "${previous_tag}^{commit}" >/dev/null; then
-              echo "## Commits since ${previous_tag}"
-              log_output="$(git log --pretty=format:'- %s (%h)' --no-merges "${previous_tag}..${range_end}" || true)"
-              if [ -n "$log_output" ]; then
-                echo "$log_output"
-              else
-                echo "- This release refreshes build artifacts and release assets."
-              fi
-            else
-              echo "## Changes since the previous release"
-              echo "- This release refreshes build artifacts and release assets."
+            if ! grep -q '^## 下载建议$' <<< "$RELEASE_NOTES"; then
+              echo
+              printf '%s\n' "$DOWNLOAD_GUIDE"
             fi
-            echo
-            printf '%s\n' "$DOWNLOAD_GUIDE"
           } > release_body.md
           printf '%s\n' "$RELEASE_NOTES" > release_notes.md
           cat release_body.md

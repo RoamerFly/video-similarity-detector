@@ -86,6 +86,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Smoke test Windows updater packager
+        shell: powershell
+        working-directory: ${{ github.workspace }}
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "windows-updater-packager-smoke"
+          $payloadRoot = Join-Path $smokeRoot "payload"
+          $payloadZip = Join-Path $smokeRoot "payload.zip"
+          $updaterExe = Join-Path $smokeRoot "updater.exe"
+          New-Item -ItemType Directory -Force $payloadRoot | Out-Null
+          Set-Content -LiteralPath (Join-Path $payloadRoot "smoke.txt") -Value "ok" -Encoding ASCII
+          Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
+          & ".\scripts\build-windows-self-extractor.ps1" `
+            -PayloadZip $payloadZip `
+            -OutputExe $updaterExe `
+            -DisplayName "Video Similarity" `
+            -InstallFolderName "Video Similarity" `
+            -PreserveRuntimeOnUpdate
+          if (!(Test-Path -LiteralPath $updaterExe -PathType Leaf)) {
+            throw "Windows updater packager smoke test did not create updater.exe."
+          }
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
