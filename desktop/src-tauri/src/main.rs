@@ -5690,6 +5690,11 @@ where
     thread::spawn(move || {
         let reader = BufReader::new(stream);
         let mut decoder_warnings = DecoderWarningAccumulator::default();
+        // 比较阶段会逐帧回报进度，若每帧都下发一次 analysis-progress 事件，
+        // 前端会高频整页重渲染，导致任务执行期间界面卡顿、无法切换页面。
+        // 这里按时间节流（100ms），并始终放行明显跳变与最终进度。
+        let mut last_progress_emit_ms: u64 = 0;
+        let mut last_emitted_progress_centi: u64 = 0;
         for line in reader.lines().map_while(Result::ok) {
             last_activity.store(timestamp_millis_u64(), Ordering::Relaxed);
             let cleaned_line = strip_ansi_sequences(&line);
@@ -5716,14 +5721,24 @@ where
                 } else {
                     parsed.progress.max(previous_progress).min(99.99)
                 };
-                current_progress.store(progress_to_centi(progress), Ordering::Relaxed);
-                emit_progress_detail(
-                    &app,
-                    &parsed.stage,
-                    progress,
-                    parsed.sub_stage.as_deref(),
-                    parsed.sub_progress,
-                );
+                let progress_centi = progress_to_centi(progress);
+                current_progress.store(progress_centi, Ordering::Relaxed);
+
+                let now_ms = timestamp_millis_u64();
+                let is_final = progress >= 99.99;
+                let jumped = progress_centi.saturating_sub(last_emitted_progress_centi) >= 100;
+                let due = now_ms.saturating_sub(last_progress_emit_ms) >= 100;
+                if is_final || jumped || due {
+                    emit_progress_detail(
+                        &app,
+                        &parsed.stage,
+                        progress,
+                        parsed.sub_stage.as_deref(),
+                        parsed.sub_progress,
+                    );
+                    last_progress_emit_ms = now_ms;
+                    last_emitted_progress_centi = progress_centi;
+                }
                 continue;
             }
             if should_hide_analysis_log_line(&cleaned_line) {
