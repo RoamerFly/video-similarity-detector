@@ -1,43 +1,24 @@
-## v1.2.0 新版本内容
+## v1.2.1 新版本内容
 
-本版本重构了视频合并编辑器，统一了所有页面的界面布局，并对后端候选筛选、嵌入与分段算法做了大幅性能与内存优化。
-
-### 新增与优化
-
-- 重构视频合并编辑器：将合并页面拆分为时间轴、预览、交互、草稿等职责清晰的模块，并新增时间轴虚拟化渲染与自适应宽度，超长时间轴下滚动更流畅。
-- 新增「高级设置」对话框：视频编码器、码率控制、恒定质量、编码速度、音频码率、两遍编码、画面适配与空余区域等选项集中管理。
-- 预览画布按输出宽高比自适应缩放；播放时自动校正音画漂移；快速拖动时间轴时合并寻址请求，交互更跟手。
-- 拖动、裁剪与布局调整改为独立草稿实时预览，松手后才提交；空轨道自动隐藏，界面更简洁。
-- 所有页面统一为紧凑页头，logo 与标题缩小、去除冗余副标题，切换页面时共享元素位置保持一致、不再跳动。
-- 修复多处文字重叠与超限：长路径、表格与日志文本自动截断或换行，不再撑破布局。
-- 候选视频筛选重写：采用多尺度草图与辅助签名索引，短片段与多次复用片段的召回更准，同时大幅降低内存占用。
-- 嵌入改为流式管线，按批处理帧数据；新增可选半精度 CUDA 推理（环境变量开启），显存不足时自动降级。
-- 精比较阶段引入资源池按需加载，不再一次性把所有视频的索引驻留内存；FAISS 按比较 worker 数分配线程，避免线程竞争。
-- 分段聚合改为方向感知的双向融合，并加入时间斜率一致性校验，识别结果更准确。
-- 分析报告新增分阶段耗时与内存峰值等运行指标。
+本版本为维护更新，修复了任务执行期间界面卡顿、无法切换页面，以及部分页面底部内容被截断、无法滚动查看的问题。
 
 ### 修复的问题
 
-- 修复时间上相隔很远但偏移相同的重复片段被错误合并的问题。
-- 修复稀疏动态采样下覆盖率统计失真的问题，改为基于真实时间线的时长覆盖。
-- 修复解码器回调失败时的 fallback 逻辑，避免重复或丢失帧。
-- 修复候选筛选多线程下的排序抖动，保证结果稳定可复现。
-
-### 兼容性说明
-
-- 帧特征缓存格式升级，旧版缓存会在首次分析时自动失效并重新生成，属预期行为。
-- 报告 JSON 新增 metrics 字段，对旧版本为增量变更，不影响既有字段。
+- 修复任务执行期间界面卡顿、无法切换页面的问题：比较阶段逐帧回报进度导致前端高频整页重渲染，现已按时间节流回报进度，并始终放行明显跳变与最终进度。
+- 修复结果总览页「比较结果」子页面底部被截断的问题：分页按钮与结果表格现可正常滚动查看。
+- 修复相似帧对比页与相同文件对比页底部被截断、无法滚动查看更多内容的问题。
+- 修复「新建任务」每次都重新扫描整个视频目录的问题：视频目录未变化时直接复用已有扫描结果。
 
 ## 下载建议
 
 普通用户只需要下载一个与系统对应的应用包：
 
-- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.2.0-windows-x64-cpu-installer.exe`
-- Windows GPU 安装版：`Video_Similarity-v1.2.0-windows-x64-gpu-installer.exe`
-- macOS M 系列：`Video_Similarity-v1.2.0-macos-arm64-installer.dmg`
-- macOS Intel：`Video_Similarity-v1.2.0-macos-x64-installer.dmg`
-- Linux Debian/Ubuntu：`Video_Similarity-v1.2.0-linux-x64-installer.deb`
-- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.2.0-linux-x64-installer.rpm`
+- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.2.1-windows-x64-cpu-installer.exe`
+- Windows GPU 安装版：`Video_Similarity-v1.2.1-windows-x64-gpu-installer.exe`
+- macOS M 系列：`Video_Similarity-v1.2.1-macos-arm64-installer.dmg`
+- macOS Intel：`Video_Similarity-v1.2.1-macos-x64-installer.dmg`
+- Linux Debian/Ubuntu：`Video_Similarity-v1.2.1-linux-x64-installer.deb`
+- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.2.1-linux-x64-installer.rpm`
 
 不想安装时，可以选择同平台文件名中带 `portable` 的便携包，解压后直接运行。
 
