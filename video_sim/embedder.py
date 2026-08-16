@@ -8,7 +8,7 @@ Supports both:
 - Frame-level embedding (one embedding per frame)
 """
 
-from contextlib import redirect_stderr
+from contextlib import ExitStack, nullcontext, redirect_stderr
 from dataclasses import dataclass
 import hashlib
 import io
@@ -16,7 +16,10 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+import queue
+import threading
+import time
+from typing import Callable, Dict, Iterable, List, Optional, Union
 import warnings
 
 import numpy as np
@@ -31,13 +34,71 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 from video_sim.preprocess import PreprocessConfig, preprocess_frame_for_clip
+from video_sim.metrics import RecognitionMetrics
 from video_sim.model_locator import (
     DEFAULT_EMBEDDING_MODEL,
     embedding_model_fingerprint,
     resolve_embedding_model_source,
 )
 
-FRAME_CACHE_SCHEMA_VERSION = 3
+FRAME_CACHE_SCHEMA_VERSION = 4
+
+
+def _nested_context(*contexts):
+    stack = ExitStack()
+    for context in contexts:
+        stack.enter_context(context)
+    return stack
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalise_autocast_dtype(value: Optional[str]) -> str:
+    name = (value or os.environ.get("VIDEO_SIM_CLIP_AUTOCAST_DTYPE", "float16")).strip().lower()
+    if name in {"bf16", "bfloat16"}:
+        return "bfloat16"
+    return "float16"
+
+
+def embedding_runtime_fingerprint(
+    device: Optional[str] = None,
+    autocast_enabled: Optional[bool] = None,
+    autocast_dtype: Optional[str] = None,
+) -> str:
+    """Return the inference runtime identity used in cache validation.
+
+    Autocast is opt-in (``VIDEO_SIM_CLIP_AUTOCAST=1``) to preserve the
+    existing FP32 accuracy contract by default.  Only the numerical
+    precision mode is part of this identity.  Device and PyTorch patch
+    versions do not change cache semantics, so compatible FP32 caches can be
+    reused between CPU and GPU and across torch upgrades.  Model weights and
+    preprocessing configuration have their own cache fingerprints.
+    """
+
+    resolved_device = str(device or ("cuda" if torch.cuda.is_available() else "cpu")).lower()
+    requested = _env_flag("VIDEO_SIM_CLIP_AUTOCAST", False) if autocast_enabled is None else bool(autocast_enabled)
+    enabled = requested and resolved_device.startswith("cuda") and torch.cuda.is_available()
+    dtype = _normalise_autocast_dtype(autocast_dtype)
+    if enabled and dtype == "bfloat16":
+        try:
+            if not torch.cuda.is_bf16_supported():
+                dtype = "float16"
+        except Exception:
+            dtype = "float16"
+    if not enabled:
+        dtype = "float32"
+    precision = dtype if enabled else "float32"
+    precision_name = {
+        "float16": "fp16",
+        "bfloat16": "bf16",
+        "float32": "fp32",
+    }[precision]
+    return f"precision={precision_name}"
 
 
 def frames_to_pil(frames: np.ndarray) -> List[Image.Image]:
@@ -81,6 +142,9 @@ class VideoEmbedder:
         device: Optional[str] = None,
         num_frames: int = 16,
         preprocess_config: Optional[PreprocessConfig] = None,
+        autocast_enabled: Optional[bool] = None,
+        autocast_dtype: Optional[str] = None,
+        metrics: Optional[RecognitionMetrics] = None,
     ):
         """
         Initialize the video embedder.
@@ -93,7 +157,73 @@ class VideoEmbedder:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.num_frames = num_frames
         self.preprocess_config = preprocess_config or PreprocessConfig()
+        requested_autocast = _env_flag("VIDEO_SIM_CLIP_AUTOCAST", False) if autocast_enabled is None else bool(autocast_enabled)
+        self.autocast_enabled = bool(
+            requested_autocast
+            and str(self.device).lower().startswith("cuda")
+            and torch.cuda.is_available()
+        )
+        self.autocast_dtype_name = _normalise_autocast_dtype(autocast_dtype)
+        if self.autocast_enabled and self.autocast_dtype_name == "bfloat16":
+            try:
+                if not torch.cuda.is_bf16_supported():
+                    self.autocast_dtype_name = "float16"
+            except Exception:
+                self.autocast_dtype_name = "float16"
+        self.autocast_dtype = (
+            torch.bfloat16 if self.autocast_dtype_name == "bfloat16" else torch.float16
+        )
+        self.metrics = metrics
+        self.last_batch_sizes: List[int] = []
         self._load_models()
+
+    def embedding_runtime_fingerprint(self) -> str:
+        """Return this embedder's cache/runtime identity."""
+
+        return embedding_runtime_fingerprint(
+            device=self.device,
+            autocast_enabled=self.autocast_enabled,
+            autocast_dtype=self.autocast_dtype_name,
+        )
+
+    def _inference_context(self):
+        """Use inference mode and opt-in CUDA autocast for model execution."""
+
+        if self.autocast_enabled:
+            return _nested_context(torch.inference_mode(), torch.autocast(
+                device_type="cuda",
+                dtype=self.autocast_dtype,
+            ))
+        return torch.inference_mode()
+
+    def _prepare_images(
+        self,
+        frames: np.ndarray,
+        *,
+        frames_are_preprocessed: bool = False,
+    ) -> List[Image.Image]:
+        """Convert raw or prepared RGB frames to PIL exactly once."""
+
+        array = np.asarray(frames, dtype="uint8")
+        if array.ndim != 4 or array.shape[-1] != 3:
+            raise ValueError("Expected frames with shape (N, H, W, 3)")
+        if frames_are_preprocessed:
+            return frames_to_pil(array)
+        return [
+            Image.fromarray(preprocess_frame_for_clip(frame, self.preprocess_config))
+            for frame in array
+        ]
+
+    @staticmethod
+    def _is_cuda_oom(error: BaseException, device: str) -> bool:
+        if not str(device).lower().startswith("cuda"):
+            return False
+        if "out of memory" in str(error).lower():
+            return True
+        try:
+            return isinstance(error, torch.cuda.OutOfMemoryError)
+        except AttributeError:
+            return False
 
     def _load_models(self) -> None:
         """Load CLIP model."""
@@ -153,19 +283,18 @@ class VideoEmbedder:
         Returns:
             1D numpy array of shape (512,) with dtype float32, L2 normalized
         """
-        frames = frames.astype("uint8")
+        frames = np.asarray(frames, dtype="uint8")
 
         if len(frames) == 0:
             raise ValueError(
                 "No frames provided to embed. Video might be empty or unreadable."
             )
 
-        # Preprocess each frame for CLIP
-        processed_frames = [
-            preprocess_frame_for_clip(frame, self.preprocess_config)
-            for frame in frames
-        ]
-        pil_frames = [Image.fromarray(f) for f in processed_frames]
+        if self.metrics is not None:
+            with self.metrics.stage("preprocess", items=len(frames)):
+                pil_frames = self._prepare_images(frames)
+        else:
+            pil_frames = self._prepare_images(frames)
 
         # Sample frames if we have more than needed
         if len(pil_frames) > self.num_frames:
@@ -176,13 +305,15 @@ class VideoEmbedder:
             while len(pil_frames) < self.num_frames:
                 pil_frames.append(pil_frames[-1])
 
-        with torch.no_grad():
-            # CLIP Embedding
-            clip_inputs = self.clip_processor(images=pil_frames, return_tensors="pt").to(
-                self.device
-            )
-            clip_outputs = self.clip_model(**clip_inputs)
-            clip_emb = clip_outputs.pooler_output.mean(dim=0).cpu().numpy()
+        embed_context = self.metrics.stage("embed", items=len(pil_frames)) if self.metrics is not None else nullcontext()
+        with embed_context:
+            with self._inference_context():
+                # CLIP Embedding
+                clip_inputs = self.clip_processor(images=pil_frames, return_tensors="pt").to(
+                    self.device
+                )
+                clip_outputs = self.clip_model(**clip_inputs)
+                clip_emb = clip_outputs.pooler_output.mean(dim=0).detach().float().cpu().numpy()
 
         # L2 normalize
         clip_emb = l2_normalize(clip_emb)
@@ -202,19 +333,24 @@ class VideoEmbedder:
         Returns:
             1D numpy array of shape (512,) with dtype float32, L2 normalized
         """
-        frame = frame.astype("uint8")
+        frame = np.asarray(frame, dtype="uint8")
 
         # Preprocess frame for CLIP
-        processed = preprocess_frame_for_clip(frame, self.preprocess_config)
-        pil_frame = Image.fromarray(processed)
+        if self.metrics is not None:
+            with self.metrics.stage("preprocess", items=1):
+                pil_frame = self._prepare_images(frame[None, ...])[0]
+        else:
+            pil_frame = self._prepare_images(frame[None, ...])[0]
 
-        with torch.no_grad():
-            # CLIP Embedding for single frame
-            clip_inputs = self.clip_processor(images=[pil_frame], return_tensors="pt").to(
-                self.device
-            )
-            clip_outputs = self.clip_model(**clip_inputs)
-            clip_emb = clip_outputs.pooler_output[0].cpu().numpy()
+        embed_context = self.metrics.stage("embed", items=1) if self.metrics is not None else nullcontext()
+        with embed_context:
+            with self._inference_context():
+                # CLIP Embedding for single frame
+                clip_inputs = self.clip_processor(images=[pil_frame], return_tensors="pt").to(
+                    self.device
+                )
+                clip_outputs = self.clip_model(**clip_inputs)
+                clip_emb = clip_outputs.pooler_output[0].detach().float().cpu().numpy()
 
         # L2 normalize
         clip_emb = l2_normalize(clip_emb)
@@ -226,6 +362,7 @@ class VideoEmbedder:
         frames: np.ndarray,
         batch_size: int = 32,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        frames_are_preprocessed: bool = False,
     ) -> np.ndarray:
         """
         Embed multiple frames, returning one embedding per frame.
@@ -235,39 +372,62 @@ class VideoEmbedder:
 
         Args:
             frames: numpy array of shape (N, H, W, 3) dtype uint8
+            frames_are_preprocessed: True when frames are RGB CLIP-sized pixels
+                produced by DynamicFrameSampler; skips geometric preprocessing.
 
         Returns:
             2D numpy array of shape (N, 512) with dtype float32, L2 normalized
         """
-        frames = frames.astype("uint8")
+        frames = np.asarray(frames, dtype="uint8")
 
         if len(frames) == 0:
             return np.zeros((0, 512), dtype="float32")
 
         batch_size = max(1, int(batch_size))
+        current_batch_size = batch_size
+        self.last_batch_sizes = []
         embeddings = []
         total = len(frames)
 
-        for start in range(0, total, batch_size):
-            batch = frames[start:start + batch_size]
-            processed_frames = [
-                preprocess_frame_for_clip(frame, self.preprocess_config)
-                for frame in batch
-            ]
-            pil_frames = [Image.fromarray(f) for f in processed_frames]
+        start = 0
+        while start < total:
+            active_size = min(current_batch_size, total - start)
+            batch = frames[start:start + active_size]
+            try:
+                if self.metrics is not None:
+                    with self.metrics.stage("preprocess", items=len(batch)) if not frames_are_preprocessed else nullcontext():
+                        pil_frames = self._prepare_images(batch, frames_are_preprocessed=frames_are_preprocessed)
+                else:
+                    pil_frames = self._prepare_images(batch, frames_are_preprocessed=frames_are_preprocessed)
 
-            with torch.no_grad():
-                clip_inputs = self.clip_processor(images=pil_frames, return_tensors="pt").to(
-                    self.device
-                )
-                clip_outputs = self.clip_model(**clip_inputs)
-                batch_embs = clip_outputs.pooler_output.cpu().numpy()
+                embed_context = self.metrics.stage("embed", items=len(batch)) if self.metrics is not None else nullcontext()
+                with embed_context:
+                    with self._inference_context():
+                        clip_inputs = self.clip_processor(images=pil_frames, return_tensors="pt").to(
+                            self.device
+                        )
+                        clip_outputs = self.clip_model(**clip_inputs)
+                        batch_embs = clip_outputs.pooler_output.detach().float().cpu().numpy()
+            except RuntimeError as error:
+                if not self._is_cuda_oom(error, self.device) or active_size <= 1:
+                    raise
+                current_batch_size = max(1, active_size // 2)
+                if self.metrics is not None:
+                    self.metrics.count("embedding_oom_retries")
+                # Only an actual CUDA OOM is allowed to trigger cache cleanup.
+                torch.cuda.empty_cache()
+                continue
 
             embeddings.append(batch_embs)
-            if str(self.device).startswith("cuda"):
-                torch.cuda.empty_cache()
+            self.last_batch_sizes.append(len(batch))
+            if self.metrics is not None:
+                self.metrics.count("embedding_batches")
+                self.metrics.count("embedding_frames", len(batch))
+                self.metrics.set_count("embedding_batch_size_min", min(self.last_batch_sizes))
+                self.metrics.set_count("embedding_batch_size_max", max(self.last_batch_sizes))
+            start += len(batch)
             if progress_callback:
-                progress_callback(min(start + len(batch), total), total)
+                progress_callback(min(start, total), total)
 
         clip_embs = np.concatenate(embeddings, axis=0)
         clip_embs = l2_normalize(clip_embs)
@@ -464,6 +624,7 @@ class FrameEmbeddingCache:
         frame_step: Optional[int] = None,
         preprocess_config: Optional["PreprocessConfig"] = None,
         embedding_model: Optional[str] = None,
+        embedding_runtime: Optional[str] = None,
     ) -> Dict[str, object]:
         """Build metadata used to decide whether a frame cache is still valid."""
         if preprocess_config is None:
@@ -482,6 +643,7 @@ class FrameEmbeddingCache:
             "frame_step": max(1, int(frame_step or 1)),
             "preprocess_config": preprocess_config.to_dict(),
             "embedding_model": embedding_model or embedding_model_fingerprint(),
+            "embedding_runtime": embedding_runtime or embedding_runtime_fingerprint(),
         }
 
     @classmethod
@@ -511,6 +673,7 @@ class FrameEmbeddingCache:
         skip_threshold: Optional[float] = None,
         max_gap_sec: Optional[float] = None,
         frame_step: Optional[int] = None,
+        embedding_runtime: Optional[str] = None,
     ) -> Optional["FrameEmbeddingCache"]:
         """Load a cache only when the file and all analysis parameters match."""
         cache_path = cls.get_cache_path(
@@ -540,6 +703,7 @@ class FrameEmbeddingCache:
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
             preprocess_config=preprocess_config,
+            embedding_runtime=embedding_runtime,
         )
         if cls.is_metadata_fresh(cache.metadata, expected):
             return cache
@@ -596,9 +760,296 @@ def _embedding_batch_size(device: str, preprocess_config: Optional[PreprocessCon
     return 32
 
 
+class _StreamingCancelled(RuntimeError):
+    """Internal cancellation signal used to stop a bounded producer queue."""
+
+
+def _streaming_pipeline_enabled(value: Optional[bool] = None) -> bool:
+    """Return whether the bounded streaming path is enabled."""
+
+    return _env_flag("VIDEO_SIM_STREAMING_PIPELINE", True) if value is None else bool(value)
+
+
+def _retained_frame_pixels(retained_frame, preprocess_config: Optional[PreprocessConfig]) -> np.ndarray:
+    """Return one RGB prepared frame, preserving the legacy thumbnail fallback."""
+
+    clip_frame = getattr(retained_frame, "clip_frame", None)
+    if clip_frame is not None:
+        return np.asarray(clip_frame, dtype=np.uint8)
+
+    thumbnail_path = getattr(retained_frame, "thumbnail_path", "")
+    if thumbnail_path:
+        from PIL import Image as PILImage
+
+        with PILImage.open(thumbnail_path) as img:
+            raw = np.array(img.convert("RGB"), dtype=np.uint8)
+        return preprocess_frame_for_clip(raw, preprocess_config)
+
+    raise ValueError(
+        f"Retained frame {getattr(retained_frame, 'frame_index', '?')} "
+        "has no in-memory frame data or thumbnail path."
+    )
+
+
+def _build_stream_cache(
+    *,
+    video_path: Path,
+    cache_path: Path,
+    frame_indices: List[int],
+    timestamps: List[float],
+    phashes: List[str],
+    thumbnail_paths: List[str],
+    embedding_chunks: List[np.ndarray],
+    preprocess_config: Optional[PreprocessConfig],
+    skip_threshold: Optional[float],
+    max_gap_sec: Optional[float],
+    frame_step: Optional[int],
+    source_duration_sec: Optional[float],
+    runtime_identity: str,
+) -> FrameEmbeddingCache:
+    embeddings = np.concatenate(embedding_chunks, axis=0).astype("float32")
+    metadata = FrameEmbeddingCache.build_metadata(
+        video_path,
+        skip_threshold=skip_threshold,
+        max_gap_sec=max_gap_sec,
+        frame_step=frame_step,
+        preprocess_config=preprocess_config,
+        embedding_runtime=runtime_identity,
+    )
+    retained_duration_sec = max(timestamps, default=0.0)
+    duration_sec = max(retained_duration_sec, float(source_duration_sec or 0.0))
+    metadata.update(
+        {
+            "retained_frame_count": len(frame_indices),
+            "retained_duration_sec": retained_duration_sec,
+            "duration_sec": duration_sec,
+        }
+    )
+    cache = FrameEmbeddingCache(
+        video_path=str(video_path),
+        frame_indices=np.asarray(frame_indices, dtype=np.int64),
+        # Preserve the legacy cache's float64 timestamp representation so
+        # streaming and materialized paths are byte-for-byte equivalent.
+        timestamps=np.asarray(timestamps, dtype=np.float64),
+        phashes=phashes,
+        thumbnail_paths=thumbnail_paths,
+        embeddings=embeddings,
+        preprocess_config=preprocess_config,
+        metadata=metadata,
+    )
+    cache.save(cache_path)
+    return cache
+
+
+def _embed_streaming_from_sampler(
+    *,
+    video_path: Path,
+    sampler,
+    embedder: VideoEmbedder,
+    cache_path: Path,
+    preprocess_config: Optional[PreprocessConfig],
+    skip_threshold: Optional[float],
+    max_gap_sec: Optional[float],
+    frame_step: Optional[int],
+    progress_callback: Optional[Callable[[int, int], None]],
+    sample_progress_callback: Optional[Callable[[int, int, float], None]],
+    runtime_identity: str,
+    cancel_event: Optional[threading.Event],
+    metrics: Optional[RecognitionMetrics],
+    resolved_device: str,
+) -> FrameEmbeddingCache:
+    """Stream prepared frames into bounded batches and write one cache."""
+
+    batch_size = _embedding_batch_size(resolved_device, preprocess_config)
+    frame_indices: List[int] = []
+    timestamps: List[float] = []
+    phashes: List[str] = []
+    thumbnail_paths: List[str] = []
+    embedding_chunks: List[np.ndarray] = []
+    batch_frames: List[np.ndarray] = []
+    total_seen = 0
+    released = 0
+    streaming_batches = 0
+    max_batch_bytes = 0
+    callback_embed_elapsed = 0.0
+
+    def flush_batch() -> None:
+        nonlocal batch_size, callback_embed_elapsed, released, streaming_batches, max_batch_bytes
+        if not batch_frames:
+            return
+        frame_count = len(batch_frames)
+        batch_bytes = sum(int(frame.nbytes) for frame in batch_frames)
+        max_batch_bytes = max(max_batch_bytes, batch_bytes)
+        frames_array = np.stack(batch_frames, axis=0)
+        embed_started = time.perf_counter()
+        try:
+            embeddings = embedder.embed_frames_batch(
+                frames_array,
+                batch_size=batch_size,
+                progress_callback=None,
+                frames_are_preprocessed=True,
+            )
+            embedding_chunks.append(np.asarray(embeddings, dtype="float32"))
+            successful_batches = getattr(embedder, "last_batch_sizes", None) or []
+            if successful_batches:
+                batch_size = max(1, min(batch_size, min(successful_batches)))
+        finally:
+            callback_embed_elapsed += time.perf_counter() - embed_started
+            del frames_array
+            batch_frames.clear()
+            released += frame_count
+        streaming_batches += 1
+        if metrics is not None:
+            metrics.count("streaming_batches")
+            metrics.count("prepared_frames_released", frame_count)
+        if progress_callback:
+            # The sampler does not know the final retained count until EOF;
+            # report monotonic ``N/N`` updates rather than a false estimate.
+            progress_callback(released, max(1, released))
+
+    def consume(retained_frame, pixels: Optional[np.ndarray] = None) -> None:
+        nonlocal total_seen
+        if cancel_event is not None and cancel_event.is_set():
+            raise _StreamingCancelled("streaming embedding cancelled")
+        if pixels is None:
+            pixels = _retained_frame_pixels(retained_frame, preprocess_config)
+        frame_indices.append(int(retained_frame.frame_index))
+        timestamps.append(float(retained_frame.timestamp))
+        phashes.append(str(retained_frame.phash))
+        thumbnail_paths.append(str(getattr(retained_frame, "thumbnail_path", "")))
+        batch_frames.append(pixels)
+        total_seen += 1
+        if metrics is not None:
+            metrics.count("frames_sampled")
+            metrics.set_count(
+                "queue_peak_frames",
+                max(metrics.counters.get("queue_peak_frames", 0), len(batch_frames)),
+            )
+            metrics.set_count("queue_peak_bytes", max(max_batch_bytes, sum(int(f.nbytes) for f in batch_frames)))
+        if len(batch_frames) >= batch_size:
+            flush_batch()
+
+    use_pipeline = str(resolved_device).lower().startswith("cuda")
+    if not use_pipeline:
+        sample_started = time.perf_counter()
+        try:
+            sampler.sample_stream(
+                video_path,
+                retained_callback=consume,
+                progress_callback=sample_progress_callback,
+            )
+        finally:
+            if metrics is not None:
+                metrics.record_stage(
+                    "decode_sample",
+                    max(0.0, time.perf_counter() - sample_started - callback_embed_elapsed),
+                    items=total_seen,
+                )
+    else:
+        queue_batch_capacity = max(
+            1,
+            min(4, int(os.environ.get("VIDEO_SIM_STREAMING_QUEUE_SIZE", "2"))),
+        )
+        # Queue individual prepared frames, but size it in batch units so the
+        # default retains at most two batches behind the GPU consumer.
+        capacity = max(batch_size, queue_batch_capacity * batch_size)
+        work_queue: queue.Queue = queue.Queue(maxsize=capacity)
+        producer_errors: queue.SimpleQueue = queue.SimpleQueue()
+        stop_event = threading.Event()
+        queue_lock = threading.Lock()
+        queued_frames = 0
+        queued_bytes = 0
+        queue_peak_frames = 0
+        queue_peak_bytes = 0
+
+        def enqueue(retained_frame) -> None:
+            nonlocal queued_frames, queued_bytes, queue_peak_frames, queue_peak_bytes
+            if cancel_event is not None and cancel_event.is_set():
+                raise _StreamingCancelled("streaming embedding cancelled")
+            pixels = _retained_frame_pixels(retained_frame, preprocess_config)
+            item = (retained_frame, pixels)
+            while not stop_event.is_set():
+                try:
+                    work_queue.put(item, timeout=0.05)
+                    with queue_lock:
+                        queued_frames += 1
+                        queued_bytes += int(pixels.nbytes)
+                        queue_peak_frames = max(queue_peak_frames, queued_frames)
+                        queue_peak_bytes = max(queue_peak_bytes, queued_bytes)
+                    return
+                except queue.Full:
+                    continue
+            raise _StreamingCancelled("streaming embedding cancelled")
+
+        def produce() -> None:
+            try:
+                sample_context = metrics.stage("decode_sample") if metrics is not None else nullcontext()
+                with sample_context:
+                    sampler.sample_stream(
+                        video_path,
+                        retained_callback=enqueue,
+                        progress_callback=sample_progress_callback,
+                    )
+            except BaseException as error:
+                if not stop_event.is_set() or not isinstance(error, _StreamingCancelled):
+                    producer_errors.put(error)
+            finally:
+                while not stop_event.is_set():
+                    try:
+                        work_queue.put(None, timeout=0.05)
+                        return
+                    except queue.Full:
+                        continue
+
+        producer = threading.Thread(target=produce, name="video-sim-frame-producer", daemon=False)
+        producer.start()
+        try:
+            while True:
+                item = work_queue.get()
+                if item is None:
+                    break
+                retained_frame, pixels = item
+                with queue_lock:
+                    queued_frames = max(0, queued_frames - 1)
+                    queued_bytes = max(0, queued_bytes - int(pixels.nbytes))
+                consume(retained_frame, pixels)
+            if not producer_errors.empty():
+                raise producer_errors.get()
+        finally:
+            stop_event.set()
+            producer.join(timeout=10.0)
+            if producer.is_alive():
+                raise RuntimeError("streaming frame producer did not stop")
+        if metrics is not None:
+            metrics.set_count("queue_peak_frames", queue_peak_frames)
+            metrics.set_count("queue_peak_bytes", queue_peak_bytes)
+
+    flush_batch()
+    if not frame_indices or not embedding_chunks:
+        raise ValueError(f"No retained frames available for embedding: {video_path.name}")
+    if metrics is not None:
+        metrics.set_count("frames_sampled", total_seen)
+        metrics.set_count("streaming_batches", streaming_batches)
+    return _build_stream_cache(
+        video_path=video_path,
+        cache_path=cache_path,
+        frame_indices=frame_indices,
+        timestamps=timestamps,
+        phashes=phashes,
+        thumbnail_paths=thumbnail_paths,
+        embedding_chunks=embedding_chunks,
+        preprocess_config=preprocess_config,
+        skip_threshold=skip_threshold,
+        max_gap_sec=max_gap_sec,
+        frame_step=frame_step,
+        source_duration_sec=sampler.source_duration_sec,
+        runtime_identity=runtime_identity,
+    )
+
+
 def embed_frames_with_cache(
     video_path: Union[str, Path],
-    retained_frames: List,
+    retained_frames: Optional[Iterable] = None,
     embedder: Optional[VideoEmbedder] = None,
     cache_dir: Union[str, Path] = "data",
     device: Optional[str] = None,
@@ -609,6 +1060,11 @@ def embed_frames_with_cache(
     frame_step: Optional[int] = None,
     source_duration_sec: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    embedding_runtime: Optional[str] = None,
+    sampler=None,
+    streaming: Optional[bool] = None,
+    sample_progress_callback: Optional[Callable[[int, int, float], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> FrameEmbeddingCache:
     """
     Embed frames with caching support.
@@ -618,7 +1074,8 @@ def embed_frames_with_cache(
 
     Args:
         video_path: Path to the video file
-        retained_frames: List of RetainedFrame objects from DynamicFrameSampler
+        retained_frames: Iterable of RetainedFrame objects from DynamicFrameSampler.
+            When omitted, ``sampler`` can provide the bounded streaming source.
         embedder: VideoEmbedder instance (created if None)
         cache_dir: Base cache directory
         device: Device to use ('cpu', 'cuda', or 'auto')
@@ -638,6 +1095,18 @@ def embed_frames_with_cache(
         frame_step=frame_step,
     )
 
+    if device == "auto" or device is None:
+        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        resolved_device = device
+    if embedder is not None and device is None:
+        resolved_device = str(getattr(embedder, "device", resolved_device))
+    metrics = getattr(embedder, "metrics", None) if embedder is not None else None
+    runtime_identity = embedding_runtime
+    if runtime_identity is None and embedder is not None:
+        runtime_identity = embedder.embedding_runtime_fingerprint()
+    runtime_identity = runtime_identity or embedding_runtime_fingerprint(resolved_device)
+
     # Check cache
     if not force:
         cache = FrameEmbeddingCache.load_valid(
@@ -647,40 +1116,44 @@ def embed_frames_with_cache(
             skip_threshold=skip_threshold,
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
+            embedding_runtime=runtime_identity,
         )
         if cache is not None:
             return cache
 
-    # Resolve device
-    if device == "auto" or device is None:
-        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        resolved_device = device
-
     # Create embedder if not provided
     if embedder is None:
         embedder = VideoEmbedder(device=resolved_device, preprocess_config=preprocess_config)
+        metrics = getattr(embedder, "metrics", None)
 
-    # Prefer in-memory preprocessed frames from DynamicFrameSampler. Older caches
-    # may still provide thumbnail_path, so keep that path as a fallback.
+    if sampler is not None and retained_frames is None:
+        if _streaming_pipeline_enabled(streaming):
+            return _embed_streaming_from_sampler(
+                video_path=video_path,
+                sampler=sampler,
+                embedder=embedder,
+                cache_path=cache_path,
+                preprocess_config=preprocess_config,
+                skip_threshold=skip_threshold,
+                max_gap_sec=max_gap_sec,
+                frame_step=frame_step,
+                progress_callback=progress_callback,
+                sample_progress_callback=sample_progress_callback,
+                runtime_identity=runtime_identity or embedder.embedding_runtime_fingerprint(),
+                cancel_event=cancel_event,
+                metrics=metrics,
+                resolved_device=resolved_device,
+            )
+        retained_frames = sampler.sample(progress_callback=sample_progress_callback)
+        if source_duration_sec is None:
+            source_duration_sec = sampler.source_duration_sec
+
+    # Prefer in-memory RGB frames already prepared by DynamicFrameSampler.
+    # Older callers may provide thumbnails, so normalize that fallback once
+    # before sending a prepared-frame batch to the embedder.
     frames = []
     for rf in retained_frames:
-        clip_frame = getattr(rf, "clip_frame", None)
-        if clip_frame is not None:
-            frames.append(np.asarray(clip_frame, dtype=np.uint8))
-            continue
-
-        thumbnail_path = getattr(rf, "thumbnail_path", "")
-        if thumbnail_path:
-            from PIL import Image as PILImage
-            img = PILImage.open(thumbnail_path)
-            frames.append(np.array(img, dtype=np.uint8))
-            continue
-
-        raise ValueError(
-            f"Retained frame {getattr(rf, 'frame_index', '?')} from {video_path.name} "
-            "has no in-memory frame data or thumbnail path."
-        )
+        frames.append(_retained_frame_pixels(rf, preprocess_config))
 
     if not frames:
         raise ValueError(f"No retained frames available for embedding: {video_path.name}")
@@ -693,6 +1166,7 @@ def embed_frames_with_cache(
         frames_array,
         batch_size=batch_size,
         progress_callback=progress_callback,
+        frames_are_preprocessed=True,
     )
 
     # Create cache
@@ -702,6 +1176,7 @@ def embed_frames_with_cache(
         max_gap_sec=max_gap_sec,
         frame_step=frame_step,
         preprocess_config=preprocess_config,
+        embedding_runtime=runtime_identity or embedder.embedding_runtime_fingerprint(),
     )
     retained_duration_sec = max((float(rf.timestamp) for rf in retained_frames), default=0.0)
     duration_sec = max(
@@ -794,7 +1269,13 @@ def _write_profile_sidecar(
         except Exception:
             preprocess_config = None
     if metadata:
-        for key in ("skip_threshold", "max_gap_sec", "frame_step", "embedding_model"):
+        for key in (
+            "skip_threshold",
+            "max_gap_sec",
+            "frame_step",
+            "embedding_model",
+            "embedding_runtime",
+        ):
             if key in metadata:
                 profile[key] = metadata[key]
     if preprocess_config is not None:

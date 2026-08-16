@@ -2,21 +2,19 @@ import { describe, expect, it } from 'vitest'
 
 import type { VideoMetadata } from '@/services/backend'
 import type { MergeQueueItem, MergeTextItem } from '@/stores/mergeStore'
+import type { AudioClipLayout } from './timelineModel'
 import {
   activeLayoutsAt,
   buildClipLayouts,
   canSplitClipAt,
+  createTimelinePlaybackIndex,
   clipSourceEnd,
   nearestNonOverlappingStart,
-  normalizeTimelineZoom,
   playbackStructureKey,
   resolveTimelineDragStart,
-  timelineMinimumPixelsPerSecond,
-  timelinePixelsPerSecond,
-  timelinePixelsPerSecondForZoom,
+  timelineLayoutsInRange,
+  timelineVisibleRange,
   timelineTimeFromClientX,
-  timelineZoomDefault,
-  timelineZoomMaximum,
   timeTicks,
 } from './timelineModel'
 
@@ -140,13 +138,44 @@ describe('timeline layout behavior', () => {
     expect(timelineTimeFromClientX(1000, rect, 30, 12)).toBe(30)
   })
 
-  it('keeps timeline zoom finite, bounded, and monotonic', () => {
-    expect(normalizeTimelineZoom(Number.NaN)).toBe(timelineZoomDefault)
-    expect(normalizeTimelineZoom(1000)).toBe(timelineZoomMaximum)
-    expect(timelinePixelsPerSecondForZoom(0)).toBe(timelineMinimumPixelsPerSecond)
-    expect(timelinePixelsPerSecondForZoom(timelineZoomDefault)).toBeCloseTo(timelinePixelsPerSecond)
-    expect(timelinePixelsPerSecondForZoom(timelineZoomMaximum))
-      .toBeGreaterThan(timelinePixelsPerSecond)
+  it('keeps an overscanned visible range bounded to the complete timeline', () => {
+    expect(timelineVisibleRange(240, 360, 120, 12, 120)).toEqual({ start: 10, end: 60 })
+    expect(timelineVisibleRange(0, 360, 120, 12, 120)).toEqual({ start: 0, end: 40 })
+    expect(timelineVisibleRange(1400, 360, 120, 12, 120)).toEqual({ start: 106.66666666666667, end: 120 })
+  })
+
+  it('limits a large timeline to intersecting items while retaining boundary overlaps', () => {
+    const layouts = Array.from({ length: 10_000 }, (_, index) => ({
+      start: index * 2,
+      end: index * 2 + 2,
+      index,
+    }))
+
+    const visible = timelineLayoutsInRange(layouts, { start: 4_001, end: 4_019 })
+
+    expect(visible.map((layout) => layout.index)).toEqual([2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009])
+  })
+
+  it('queries active structures from an indexed large timeline', () => {
+    const items = Array.from({ length: 10_000 }, (_, index) => clip(`clip-${index}`, 'video-1', 1, index))
+    const layouts = buildClipLayouts(items, ['video-1'], metadata(items))
+    const index = createTimelinePlaybackIndex(layouts, [], ['video-1'])
+
+    expect(index.activeVideosAt(7_654.5).map((layout) => layout.item.id)).toEqual(['clip-7654'])
+    expect(index.structureKeyAt(7_654.5)).toBe('clip-7654::')
+    expect(index.activeVideosAt(10_000)).toEqual([])
+  })
+
+  it('queries active audio without scanning every audio layout', () => {
+    const audio = Array.from({ length: 5_000 }, (_, index) => ({
+      item: { id: `audio-${index}` }, trackId: 'audio-1', start: index, duration: 0.5, end: index + 0.5,
+    })) as AudioClipLayout[]
+    const index = createTimelinePlaybackIndex([], [], [], audio)
+    expect(index.activeAudiosAt(200.25).map((layout) => layout.item.id)).toEqual(['audio-200'])
+    expect(index.activeAudiosAt(200.75)).toEqual([])
+  })
+
+  it('keeps timeline ticks deterministic for a fit-to-width timeline', () => {
     expect(timeTicks(0)).toEqual([0])
     expect(timeTicks(10, 500)).toEqual([0, 2, 4, 6, 8, 10])
   })

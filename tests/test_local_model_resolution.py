@@ -59,3 +59,13 @@ def test_local_model_fingerprint_changes_with_model_files(tmp_path: Path, monkey
     assert first.startswith("local-sha256:")
     assert second.startswith("local-sha256:")
     assert first != second
+
+
+def test_explicit_clip_model_override_is_used_for_cache_fingerprint(tmp_path: Path, monkeypatch) -> None:
+    model_dir = tmp_path / "offline-model"
+    write_model_snapshot(model_dir)
+    monkeypatch.setenv("VIDEO_SIM_CLIP_MODEL_DIR", str(model_dir))
+
+    assert resolve_embedding_model_source() == model_dir.resolve()
+    assert embedding_model_fingerprint() == embedding_model_fingerprint(tmp_path)
+    assert embedding_model_fingerprint().startswith("local-sha256:")

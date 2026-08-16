@@ -978,7 +978,7 @@ export function ResultsPage() {
               <tbody>
                 {visibleSegments.length > 0 ? visibleSegments.map(({ id, pair, segment }) => (
                   <tr key={id} onDoubleClick={() => openCompare(pair)}>
-                    <td title={`${pair.videoAPath || pair.videoA} / ${pair.videoBPath || pair.videoB}`}>{pair.videoA} / {pair.videoB}</td>
+                    <td title={`${pair.videoAPath || pair.videoA} / ${pair.videoBPath || pair.videoB}`}><span className="video-name-text" title={`${pair.videoA} / ${pair.videoB}`}>{pair.videoA} / {pair.videoB}</span></td>
                     <td title={`${formatHHMMSS(segment.aStart)} - ${formatHHMMSS(segment.aEnd)}`}>{formatHHMMSS(segment.aStart)} - {formatHHMMSS(segment.aEnd)}</td>
                     <td title={`${formatHHMMSS(segment.bStart)} - ${formatHHMMSS(segment.bEnd)}`}>{formatHHMMSS(segment.bStart)} - {formatHHMMSS(segment.bEnd)}</td>
                     <td title={formatPercent(segment.coverage)}>{formatPercent(segment.coverage)}</td>
@@ -1011,7 +1011,7 @@ export function ResultsPage() {
               <tbody>
                 {visibleWindows.length > 0 ? visibleWindows.map(({ id, pair, window }) => (
                   <tr key={id} onDoubleClick={() => openCompare(pair)}>
-                    <td title={`${pair.videoAPath || pair.videoA} / ${pair.videoBPath || pair.videoB}`}>{pair.videoA} / {pair.videoB}</td>
+                    <td title={`${pair.videoAPath || pair.videoA} / ${pair.videoBPath || pair.videoB}`}><span className="video-name-text" title={`${pair.videoA} / ${pair.videoB}`}>{pair.videoA} / {pair.videoB}</span></td>
                     <td title={formatWindowDirection(window.direction)}>{formatWindowDirection(window.direction)}</td>
                     <td title={`${formatHHMMSS(window.sourceStart)} - ${formatHHMMSS(window.sourceEnd)}`}>{formatHHMMSS(window.sourceStart)} - {formatHHMMSS(window.sourceEnd)}</td>
                     <td title={`${formatHHMMSS(window.bestTargetStart)} - ${formatHHMMSS(window.bestTargetEnd)}`}>{formatHHMMSS(window.bestTargetStart)} - {formatHHMMSS(window.bestTargetEnd)}</td>
@@ -1576,7 +1576,7 @@ function ReportListDialog({
                           onChange={(e) => toggleSelect(path, e.target.checked)}
                         />
                       </td>
-                      <td title={path} style={{ padding: '10px 16px', color: 'rgba(248, 250, 255, 0.94)', fontSize: '13px', fontWeight: 600 }}>{reportOptionLabel(r)}</td>
+                      <td title={path} style={{ padding: '10px 16px', color: 'rgba(248, 250, 255, 0.94)', fontSize: '13px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '320px' }}>{reportOptionLabel(r)}</td>
                       <td style={{ padding: '10px 16px', color: 'rgba(226, 232, 255, 0.65)', fontSize: '12px' }}>{formatDateTime(r.modifiedAt || r.createdAt)}</td>
                       <td style={{ padding: '10px 16px', color: 'rgba(226, 232, 255, 0.85)', fontSize: '12px', textAlign: 'right' }}>{r.pairCount ?? '-'}</td>
                     </tr>

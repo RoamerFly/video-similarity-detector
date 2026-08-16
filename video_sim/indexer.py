@@ -5,7 +5,9 @@ Provides indexing functionality for video embeddings using FAISS.
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+from threading import Lock
 from typing import Dict, List, Optional, Union
 
 import faiss
@@ -14,6 +16,49 @@ import numpy as np
 from video_sim.config import Config
 from video_sim.embedder import FrameEmbeddingCache, VideoEmbedder, get_embedder
 from video_sim.frame_sampler import FrameSampler, sample_frames
+
+
+_FAISS_THREAD_LOCK = Lock()
+_LAST_FAISS_THREAD_BUDGET: Optional[int] = None
+
+
+def calculate_faiss_thread_budget(
+    compare_workers: int = 1,
+    available_cpus: Optional[int] = None,
+) -> int:
+    """Calculate a per-operation FAISS/OpenMP budget.
+
+    The outer comparison pool owns concurrency.  Dividing available CPUs by
+    that worker count prevents ``N`` Python workers from each starting a full
+    OpenMP team.  The function is deterministic and handles restricted or
+    unavailable CPU information for tests and packaged runtimes.
+    """
+    workers = max(1, int(compare_workers or 1))
+    detected = os.cpu_count() if available_cpus is None else available_cpus
+    cpus = max(1, int(detected or 1))
+    return max(1, cpus // workers)
+
+
+def configure_faiss_thread_budget(
+    compare_workers: int = 1,
+    available_cpus: Optional[int] = None,
+) -> int:
+    """Set FAISS's global OpenMP budget once from the coordinating thread.
+
+    FAISS versions without ``omp_set_num_threads`` are supported.  A small
+    lock and last-value guard make accidental repeated calls harmless; batch
+    workers never call this function themselves.
+    """
+    global _LAST_FAISS_THREAD_BUDGET
+    budget = calculate_faiss_thread_budget(compare_workers, available_cpus)
+    with _FAISS_THREAD_LOCK:
+        if _LAST_FAISS_THREAD_BUDGET == budget:
+            return budget
+        setter = getattr(faiss, "omp_set_num_threads", None)
+        if callable(setter):
+            setter(int(budget))
+            _LAST_FAISS_THREAD_BUDGET = budget
+    return budget
 
 
 class VideoIndexer:
@@ -251,14 +296,30 @@ def build_frame_index(
     Returns:
         FrameIndexResult with FAISS index and metadata
     """
-    embeddings = cache.embeddings.astype("float32")
+    raw_embeddings = np.asarray(cache.embeddings)
+    embeddings_reusable = (
+        raw_embeddings.dtype == np.dtype("float32")
+        and raw_embeddings.ndim == 2
+        and raw_embeddings.flags.c_contiguous
+        and _is_l2_normalized(raw_embeddings)
+    )
+    if embeddings_reusable:
+        # FAISS copies vectors into its own index.  Avoid making a second
+        # Python-side matrix when the cache already satisfies the contract.
+        embeddings = raw_embeddings
+    else:
+        # Legacy/non-normalized caches need an isolated float32 buffer because
+        # normalization is in-place and must not mutate the loaded cache.
+        embeddings = np.array(raw_embeddings, dtype="float32", order="C", copy=True)
     d = embeddings.shape[1]
 
     # Use IndexFlatIP for inner product (cosine similarity when normalized)
     index = faiss.IndexFlatIP(d)
 
-    # Normalize embeddings for cosine similarity
-    faiss.normalize_L2(embeddings)
+    # Normalize only the legacy/non-normalized path; the reusable path is
+    # already L2-normalized by the embedder contract.
+    if not embeddings_reusable:
+        faiss.normalize_L2(embeddings)
     index.add(embeddings)
 
     return FrameIndexResult(
@@ -268,6 +329,16 @@ def build_frame_index(
         timestamps=cache.timestamps.copy(),
         thumbnail_paths=list(cache.thumbnail_paths),
     )
+
+
+def _is_l2_normalized(embeddings: np.ndarray, tolerance: float = 1e-3) -> bool:
+    """Return whether a float32 matrix already satisfies the cosine contract."""
+    if embeddings.ndim != 2 or len(embeddings) == 0:
+        return embeddings.ndim == 2
+    if not np.isfinite(embeddings).all():
+        return False
+    squared_norms = np.einsum("ij,ij->i", embeddings, embeddings)
+    return bool(np.all(np.abs(squared_norms - 1.0) <= float(tolerance)))
 
 
 def build_frame_index_from_path(

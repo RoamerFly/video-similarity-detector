@@ -20,7 +20,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from video_sim.frame_sampler import DynamicFrameSampler
-from video_sim.embedder import VideoEmbedder, embed_frames_with_cache, FrameEmbeddingCache
+from video_sim.embedder import (
+    FrameEmbeddingCache,
+    VideoEmbedder,
+    embed_frames_with_cache,
+    embedding_runtime_fingerprint,
+)
 from video_sim.preprocess import PreprocessConfig, add_preprocess_args
 
 
@@ -84,6 +89,12 @@ def main():
 
     cache_dir = Path(args.cache_dir)
 
+    if args.device == "auto":
+        import torch
+        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        resolved_device = args.device
+
     # Check if cache exists
     cache_path = FrameEmbeddingCache.get_cache_path(
         video_path,
@@ -102,6 +113,7 @@ def main():
             skip_threshold=args.skip_threshold,
             max_gap_sec=args.max_gap_sec,
             frame_step=args.frame_step,
+            embedding_runtime=embedding_runtime_fingerprint(resolved_device),
         )
     if cache is not None:
         print(f"  Cache exists: {cache_path}")
@@ -127,24 +139,11 @@ def main():
             preprocess_config=preprocess_config,
         )
 
-        retained_frames = sampler.sample(video_path)
-        print(f"  Retained {len(retained_frames)} frames")
-
-        if len(retained_frames) == 0:
-            print("Error: No frames retained from video")
-            sys.exit(1)
-
-        # Step 2 & 3: Extract embeddings and save to cache
+        # Step 2 & 3: Stream retained frames into bounded embedding batches.
         print(f"\nExtracting frame-level embeddings...")
         print(f"  device={args.device}")
         print(f"  cache_dir={cache_dir}")
 
-        # Resolve device
-        if args.device == "auto":
-            import torch
-            resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            resolved_device = args.device
         print(f"  resolved_device={resolved_device}")
 
         # Create embedder
@@ -153,7 +152,8 @@ def main():
         # Embed frames with cache
         cache = embed_frames_with_cache(
             video_path=video_path,
-            retained_frames=retained_frames,
+            retained_frames=None,
+            sampler=sampler,
             embedder=embedder,
             cache_dir=cache_dir,
             device=resolved_device,
@@ -163,7 +163,9 @@ def main():
             max_gap_sec=args.max_gap_sec,
             frame_step=args.frame_step,
             source_duration_sec=sampler.source_duration_sec,
+            embedding_runtime=embedder.embedding_runtime_fingerprint(),
         )
+        print(f"  Retained {len(cache.frame_indices)} frames")
         print(f"  Saved cache to: {cache_path}")
 
     # Step 4: Print summary

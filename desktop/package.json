@@ -1,7 +1,7 @@
 {
   "name": "video-similarity-desktop",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "visual:qa": "node scripts/visual-qa.mjs --mock-tauri",
-    "visual:qa:merge": "node scripts/visual-qa.mjs --mock-tauri --route /merge",
+    "visual:qa:merge": "node scripts/visual-qa.mjs --mock-tauri --route merge",
     "visual:qa:real": "node scripts/visual-qa.mjs --real-tauri",
     "tauri": "npx tauri",
     "tauri:dev": "npx tauri dev",

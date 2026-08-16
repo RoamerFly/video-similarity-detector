@@ -21,6 +21,8 @@ Execution flow:
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
+import gc
 import hashlib
 import json
 import os
@@ -33,6 +35,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, RLock
+
+import numpy as np
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1223,6 +1227,7 @@ def ensure_video_indexed(
     preprocess_config: PreprocessConfig = None,
     progress_callback=None,
     embed_progress_callback=None,
+    metrics=None,
 ):
     """
     Ensure a video is indexed (has frame embeddings cache).
@@ -1242,7 +1247,12 @@ def ensure_video_indexed(
     Returns:
         Tuple of (FrameEmbeddingCache, VideoEmbedder or None, cache_hit)
     """
-    from video_sim.embedder import FrameEmbeddingCache, VideoEmbedder, embed_frames_with_cache
+    from video_sim.embedder import (
+        FrameEmbeddingCache,
+        VideoEmbedder,
+        embed_frames_with_cache,
+        embedding_runtime_fingerprint,
+    )
     from video_sim.frame_sampler import DynamicFrameSampler
 
     cache_path = FrameEmbeddingCache.get_cache_path(
@@ -1262,10 +1272,14 @@ def ensure_video_indexed(
             skip_threshold=skip_threshold,
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
+            embedding_runtime=embedding_runtime_fingerprint(device),
         )
         if cache is not None:
             log(f"  Cache hit: {video_path.name}")
             log(f"  Cache file: {cache_path}")
+            if metrics is not None:
+                metrics.count("cache_hits")
+                metrics.count("embeddings", len(cache.embeddings))
             return cache, embedder, True
         if cache_path.exists():
             log(f"  Cache stale, rebuilding: {cache_path}")
@@ -1287,30 +1301,56 @@ def ensure_video_indexed(
         frame_step=frame_step,
         cache_dir=cache_dir,
         preprocess_config=preprocess_config,
+        metrics=metrics,
     )
-    retained_frames = sampler.sample(video_path, progress_callback=progress_callback)
-
-    if len(retained_frames) == 0:
-        raise ValueError(f"No frames retained from {video_path}")
-
     if embedder is None:
         log("Initializing embedder...")
-        embedder = VideoEmbedder(device=device, preprocess_config=preprocess_config)
+        embedder = VideoEmbedder(device=device, preprocess_config=preprocess_config, metrics=metrics)
+    elif metrics is not None:
+        embedder.metrics = metrics
 
     log(f"  Extracting embeddings: {video_path.name}")
-    cache = embed_frames_with_cache(
-        video_path=video_path,
-        retained_frames=retained_frames,
-        embedder=embedder,
-        cache_dir=cache_dir,
-        force=True,
-        preprocess_config=preprocess_config,
-        skip_threshold=skip_threshold,
-        max_gap_sec=max_gap_sec,
-        frame_step=frame_step,
-        source_duration_sec=sampler.source_duration_sec,
-        progress_callback=embed_progress_callback,
-    )
+    streaming_enabled = os.environ.get("VIDEO_SIM_STREAMING_PIPELINE", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+    if streaming_enabled:
+        cache = embed_frames_with_cache(
+            video_path=video_path,
+            retained_frames=None,
+            sampler=sampler,
+            embedder=embedder,
+            cache_dir=cache_dir,
+            force=True,
+            preprocess_config=preprocess_config,
+            skip_threshold=skip_threshold,
+            max_gap_sec=max_gap_sec,
+            frame_step=frame_step,
+            progress_callback=embed_progress_callback,
+            sample_progress_callback=progress_callback,
+            embedding_runtime=embedding_runtime_fingerprint(device),
+        )
+    else:
+        sample_context = metrics.stage("decode_sample") if metrics is not None else nullcontext()
+        with sample_context:
+            retained_frames = sampler.sample(video_path, progress_callback=progress_callback)
+        if not retained_frames:
+            raise ValueError(f"No frames retained from {video_path}")
+        cache = embed_frames_with_cache(
+            video_path=video_path,
+            retained_frames=retained_frames,
+            embedder=embedder,
+            cache_dir=cache_dir,
+            force=True,
+            preprocess_config=preprocess_config,
+            skip_threshold=skip_threshold,
+            max_gap_sec=max_gap_sec,
+            frame_step=frame_step,
+            source_duration_sec=sampler.source_duration_sec,
+            progress_callback=embed_progress_callback,
+            embedding_runtime=embedding_runtime_fingerprint(device),
+        )
+    if metrics is not None:
+        metrics.count("embeddings", len(cache.embeddings))
     log(f"  Saved cache: {cache_path}")
 
     return cache, embedder, False
@@ -1502,9 +1542,11 @@ def main():
     emit_progress("scan", 0, 1, "加载视频扫描模块")
     from video_sim.preprocess import PreprocessConfig
     from video_sim.scanner import scan_videos
+    from video_sim.metrics import RecognitionMetrics
 
     # Create preprocess config
     preprocess_config = PreprocessConfig.from_args(args)
+    metrics = RecognitionMetrics()
     cancel_file = Path(args.cancel_file) if args.cancel_file else None
 
     input_dir = Path(args.input)
@@ -1706,12 +1748,16 @@ def main():
         f"preflight_validation={not args.skip_stream_validation}"
     )
 
-    # Audit exact-profile caches before extraction. Cache hits are retained in
-    # memory so the feature stage does not load the same NPZ twice.
+    # Audit exact-profile caches before extraction. Cache hits are reduced to
+    # bounded candidate summaries; full embeddings are loaded later by the
+    # ExactResourcePool only while an active exact pair is being compared.
     emit_progress("model", 0, max(1, len(videos)), "检查可复用视频特征缓存")
-    from video_sim.embedder import FrameEmbeddingCache
+    from video_sim.embedder import FrameEmbeddingCache, embedding_runtime_fingerprint
 
-    video_caches = {}
+    # Candidate summaries are bounded and can outlive the full cache objects.
+    # Exact caches are loaded later by ExactResourcePool only for active pairs.
+    candidate_summaries = {}
+    cache_artifacts = {}
     cache_hits = 0
     cache_misses = []
     force_feature_redo = args.target_stage == "features" and args.redo_stage
@@ -1724,11 +1770,26 @@ def main():
             skip_threshold=args.skip_threshold,
             max_gap_sec=args.max_gap_sec,
             frame_step=args.frame_step,
+            embedding_runtime=embedding_runtime_fingerprint(resolved_device),
         )
         if cache is None:
             cache_misses.append(video_path)
         else:
-            video_caches[video_path] = cache
+            from video_sim.candidate_selector import build_candidate_summary
+            candidate_summaries[video_path] = build_candidate_summary(
+                cache,
+                representatives_per_video=64,
+                max_index_frames_per_video=1024,
+            )
+            cache_artifacts[video_path] = FrameEmbeddingCache.get_cache_path(
+                video_path,
+                cache_dir,
+                preprocess_config,
+                skip_threshold=args.skip_threshold,
+                max_gap_sec=args.max_gap_sec,
+                frame_step=args.frame_step,
+            )
+            del cache
             cache_hits += 1
         emit_progress(
             "model",
@@ -1761,7 +1822,7 @@ def main():
         raise_if_cancelled(cancel_file)
         video_units = index_video_units[video_path]
         video_total_frames = max(1, int(video_frame_counts.get(video_path, 1)))
-        if video_path in video_caches:
+        if video_path in candidate_summaries:
             index_units_done += video_units
             emit_progress(
                 "index",
@@ -1852,8 +1913,24 @@ def main():
                 preprocess_config,
                 on_sample_progress,
                 on_embed_progress,
+                metrics,
             )
-            video_caches[video_path] = cache
+            from video_sim.candidate_selector import build_candidate_summary
+            candidate_summaries[video_path] = build_candidate_summary(
+                cache,
+                representatives_per_video=64,
+                max_index_frames_per_video=1024,
+            )
+            cache_artifacts[video_path] = FrameEmbeddingCache.get_cache_path(
+                video_path,
+                cache_dir,
+                preprocess_config,
+                skip_threshold=args.skip_threshold,
+                max_gap_sec=args.max_gap_sec,
+                frame_step=args.frame_step,
+            )
+            del cache
+            gc.collect()
             if cache_hit:
                 cache_hits += 1
             else:
@@ -1948,8 +2025,8 @@ def main():
     if index_quarantined:
         videos = [video_path for video_path in videos if video_path not in index_quarantined]
 
-    log(f"\nSuccessfully indexed {len(video_caches)}/{len(videos)} videos")
-    if len(video_caches) < 2:
+    log(f"\nSuccessfully indexed {len(candidate_summaries)}/{len(videos)} videos")
+    if len(candidate_summaries) < 2:
         log(
             "Error: Fewer than 2 valid videos remain after decoding and indexing; "
             "comparison cannot continue."
@@ -1989,9 +2066,13 @@ def main():
         report_data.add_warning(w)
 
     # Perform pairwise comparison
-    indexed_videos = list(video_caches.keys())
+    indexed_videos = list(candidate_summaries.keys())
     emit_candidate_progress(0, max(1, len(indexed_videos)), "正在进行全局候选粗筛")
     from video_sim.candidate_selector import select_candidate_pairs
+    from video_sim.indexer import configure_faiss_thread_budget
+
+    candidate_faiss_threads = configure_faiss_thread_budget(compare_workers=1)
+    log(f"Candidate FAISS thread budget: {candidate_faiss_threads}")
 
     def on_candidate_progress(done: int, total: int, label: str):
         raise_if_cancelled(cancel_file)
@@ -2004,12 +2085,36 @@ def main():
             label,
         )
 
-    candidate_selection = select_candidate_pairs(
-        video_caches,
-        candidate_limit=max(0, int(args.candidate_limit)),
-        match_threshold=args.match_threshold,
-        progress_callback=on_candidate_progress,
+    with metrics.stage("candidate", items=len(indexed_videos)):
+        candidate_selection = select_candidate_pairs(
+            candidate_summaries,
+            candidate_limit=max(0, int(args.candidate_limit)),
+            match_threshold=args.match_threshold,
+            representatives_per_video=64,
+            max_index_frames_per_video=1024,
+            progress_callback=on_candidate_progress,
+        )
+    metrics.set_count("videos", len(indexed_videos))
+    metrics.set_count("candidate_pairs", len(candidate_selection.pairs))
+    summary_bytes = sum(
+        int(
+            summary.timestamps.nbytes
+            + summary.optimized_source_representatives.nbytes
+            + summary.optimized_index_embeddings.nbytes
+            + summary.auxiliary_signatures.nbytes
+        )
+        for summary in candidate_summaries.values()
     )
+    metrics.set_count("candidate_summary_bytes", summary_bytes)
+    # Exact comparison will reload full caches through the pool. Drop all
+    # candidate-only arrays before scheduling those leases; keep only scalar
+    # frame counts/durations and artifact paths for progress/reporting.
+    for summary in candidate_summaries.values():
+        summary.timestamps = np.zeros((0,), dtype="float32")
+        summary.optimized_source_representatives = np.zeros((0, 0), dtype="float32")
+        summary.optimized_index_embeddings = np.zeros((0, 0), dtype="float32")
+        summary.auxiliary_signatures = np.zeros((0,), dtype="uint64")
+    gc.collect()
     video_pairs = candidate_selection.pairs
     total_pairs = len(video_pairs)
     report_data.total_possible_pairs = candidate_selection.all_pair_count
@@ -2056,18 +2161,18 @@ def main():
     log(f"Cache hits: {cache_hits}, rebuilt: {cache_rebuilds}")
 
     emit_progress("compare", 0, max(total_pairs, 1), "加载视频比对模块")
-    from video_sim.indexer import build_frame_index
     from video_sim.matcher import compare_frame_indexes_bidirectional
-    from video_sim.segmenter import aggregate_segments, fixed_window_similarity
-
-    frame_indexes = {}
-    for frame_index, video_path in enumerate(indexed_videos, start=1):
-        raise_if_cancelled(cancel_file)
-        log(f"  Building frame index {frame_index}/{len(indexed_videos)}: {video_path.name}")
-        frame_indexes[video_path] = build_frame_index(video_caches[video_path])
+    from video_sim.segmenter import aggregate_bidirectional_segments, fixed_window_similarity
+    from video_sim.resource_pool import ExactResourcePool
 
     pair_units = {
-        pair_key(video_a, video_b): float(max(1, len(video_caches[video_a].embeddings) + len(video_caches[video_b].embeddings)))
+        pair_key(video_a, video_b): float(
+            max(
+                1,
+                candidate_summaries[video_a].frame_count
+                + candidate_summaries[video_b].frame_count,
+            )
+        )
         for video_a, video_b in video_pairs
     }
     compare_units_total = max(1.0, sum(pair_units.values()))
@@ -2095,6 +2200,60 @@ def main():
         f"Exact comparison workers: {compare_workers}; "
         f"conservative early-stop {'enabled' if early_stop_enabled else 'disabled'}."
     )
+    exact_faiss_threads = configure_faiss_thread_budget(
+        compare_workers=compare_workers
+    )
+    log(f"Exact FAISS thread budget: {exact_faiss_threads}")
+    configured_pool_cap = os.environ.get("VIDEO_SIM_EXACT_CACHE_VIDEOS", "").strip()
+    requested_pool_cap = int(configured_pool_cap) if configured_pool_cap.isdigit() else 0
+    exact_pool = ExactResourcePool(
+        max_resident_videos=max(2, compare_workers * 2, requested_pool_cap)
+    )
+
+    def compare_leased_pair(cache_a, index_a, cache_b, index_b, progress_callback):
+        total_frames_a = max(1, len(cache_a.embeddings))
+        total_frames_b = max(1, len(cache_b.embeddings))
+        with metrics.stage("exact_compare", items=total_frames_a + total_frames_b):
+            result = compare_frame_indexes_bidirectional(
+                cache_a=cache_a,
+                cache_b=cache_b,
+                index_a=index_a,
+                index_b=index_b,
+                match_threshold=args.match_threshold,
+                top_k=args.top_k,
+                progress_callback=progress_callback,
+                early_stop=early_stop_enabled,
+            )
+        duration_a = cache_duration_seconds(cache_a)
+        duration_b = cache_duration_seconds(cache_b)
+        windows_a_to_b = fixed_window_similarity(
+            result.matches_a_to_b,
+            window_size=args.window_size,
+            total_source_duration=duration_a,
+            source_timestamps=cache_a.timestamps,
+        )
+        windows_b_to_a = fixed_window_similarity(
+            result.matches_b_to_a,
+            window_size=args.window_size,
+            total_source_duration=duration_b,
+            source_timestamps=cache_b.timestamps,
+        )
+        with metrics.stage(
+            "segment",
+            items=len(result.matches_a_to_b) + len(result.matches_b_to_a),
+        ):
+            segments = aggregate_bidirectional_segments(
+                result.matches_a_to_b,
+                result.matches_b_to_a,
+                source_timestamps_a=cache_a.timestamps,
+                source_timestamps_b=cache_b.timestamps,
+                total_source_duration_a=duration_a,
+                total_source_duration_b=duration_b,
+                min_segment_duration=args.min_segment_duration,
+                min_segment_matches=args.min_segment_matches,
+                offset_tolerance_sec=args.offset_tolerance,
+            )
+        return result, segments, windows_a_to_b, windows_b_to_a
 
     if compare_workers > 1:
         progress_lock = Lock()
@@ -2108,10 +2267,8 @@ def main():
             current_pair_units: float,
             pair_sub_label: str,
         ):
-            cache_a = video_caches[video_a]
-            cache_b = video_caches[video_b]
-            total_frames_a = max(1, len(cache_a.embeddings))
-            total_frames_b = max(1, len(cache_b.embeddings))
+            total_frames_a = max(1, candidate_summaries[video_a].frame_count)
+            total_frames_b = max(1, candidate_summaries[video_b].frame_count)
 
             def on_parallel_compare_progress(direction: str, done: int, total: int):
                 raise_if_cancelled(cancel_file)
@@ -2147,36 +2304,19 @@ def main():
                     pair_sub_label,
                 )
 
-            return compare_frame_indexes_bidirectional(
-                cache_a=cache_a,
-                cache_b=cache_b,
-                index_a=frame_indexes[video_a],
-                index_b=frame_indexes[video_b],
-                match_threshold=args.match_threshold,
-                top_k=args.top_k,
-                progress_callback=on_parallel_compare_progress,
-                early_stop=early_stop_enabled,
-            )
+            with exact_pool.acquire_pair(
+                cache_artifacts[video_a], cache_artifacts[video_b]
+            ) as (resource_a, resource_b):
+                return compare_leased_pair(
+                    resource_a.cache,
+                    resource_a.frame_index,
+                    resource_b.cache,
+                    resource_b.frame_index,
+                    on_parallel_compare_progress,
+                )
 
-        def store_parallel_pair(current_pair_key: str, result, cache_a, cache_b):
-            duration_a = cache_duration_seconds(cache_a)
-            duration_b = cache_duration_seconds(cache_b)
-            windows_a_to_b = fixed_window_similarity(
-                result.matches_a_to_b,
-                window_size=args.window_size,
-                total_source_duration=duration_a,
-            )
-            windows_b_to_a = fixed_window_similarity(
-                result.matches_b_to_a,
-                window_size=args.window_size,
-                total_source_duration=duration_b,
-            )
-            segments = aggregate_segments(
-                result.matches_a_to_b + result.matches_b_to_a,
-                min_segment_duration=args.min_segment_duration,
-                min_segment_matches=args.min_segment_matches,
-                offset_tolerance_sec=args.offset_tolerance,
-            )
+        def store_parallel_pair(current_pair_key: str, payload):
+            result, segments, windows_a_to_b, windows_b_to_a = payload
             report_data.add_pair_result(
                 result=result,
                 segments=[s.to_dict() for s in segments],
@@ -2251,7 +2391,7 @@ def main():
                     try:
                         raise_if_cancelled(cancel_file)
                         result = future.result()
-                        store_parallel_pair(current_pair_key, result, video_caches[video_a], video_caches[video_b])
+                        store_parallel_pair(current_pair_key, result)
                         with progress_lock:
                             in_flight_pair_units.pop(current_pair_key, None)
                             compare_units_done += current_pair_units
@@ -2327,10 +2467,8 @@ def main():
             continue
 
         try:
-            cache_a = video_caches[video_a]
-            cache_b = video_caches[video_b]
-            total_frames_a = max(1, len(cache_a.embeddings))
-            total_frames_b = max(1, len(cache_b.embeddings))
+            total_frames_a = max(1, candidate_summaries[video_a].frame_count)
+            total_frames_b = max(1, candidate_summaries[video_b].frame_count)
 
             def on_compare_progress(direction: str, done: int, total: int):
                 raise_if_cancelled(cancel_file)
@@ -2352,40 +2490,16 @@ def main():
                     pair_sub_label,
                 )
 
-            # Perform bidirectional comparison
-            result = compare_frame_indexes_bidirectional(
-                cache_a=cache_a,
-                cache_b=cache_b,
-                index_a=frame_indexes[video_a],
-                index_b=frame_indexes[video_b],
-                match_threshold=args.match_threshold,
-                top_k=args.top_k,
-                progress_callback=on_compare_progress,
-                early_stop=early_stop_enabled,
-            )
-
-            # Compute directional window similarity so A→B and B→A are not mixed.
-            duration_a = cache_duration_seconds(cache_a)
-            duration_b = cache_duration_seconds(cache_b)
-            windows_a_to_b = fixed_window_similarity(
-                result.matches_a_to_b,
-                window_size=args.window_size,
-                total_source_duration=duration_a,
-            )
-            windows_b_to_a = fixed_window_similarity(
-                result.matches_b_to_a,
-                window_size=args.window_size,
-                total_source_duration=duration_b,
-            )
-
-            # Aggregate segments
-            all_matches = result.matches_a_to_b + result.matches_b_to_a
-            segments = aggregate_segments(
-                all_matches,
-                min_segment_duration=args.min_segment_duration,
-                min_segment_matches=args.min_segment_matches,
-                offset_tolerance_sec=args.offset_tolerance,
-            )
+            with exact_pool.acquire_pair(
+                cache_artifacts[video_a], cache_artifacts[video_b]
+            ) as (resource_a, resource_b):
+                result, segments, windows_a_to_b, windows_b_to_a = compare_leased_pair(
+                    resource_a.cache,
+                    resource_a.frame_index,
+                    resource_b.cache,
+                    resource_b.frame_index,
+                    on_compare_progress,
+                )
 
             # Add to report
             report_data.add_pair_result(
@@ -2471,6 +2585,9 @@ def main():
     # Write reports
     emit_progress("report", 0, 1, "写入分析报告")
     log("\nWriting reports...")
+    for stat_name, stat_value in exact_pool.stats().items():
+        metrics.set_count(f"exact_pool_{stat_name}", stat_value)
+    report_data.metrics = metrics.to_dict()
 
     json_path = output_base.with_suffix(".json")
     write_json_report(report_data, json_path)
@@ -2489,7 +2606,7 @@ def main():
     log("\n" + "=" * 60)
     log("Batch Comparison Summary")
     log("=" * 60)
-    log(f"Videos indexed: {len(video_caches)}")
+    log(f"Videos indexed: {len(candidate_summaries)}")
     log(f"Cache hits: {cache_hits}")
     log(f"Cache rebuilt: {cache_rebuilds}")
     log(f"Pairs compared: {len(report_data.video_pairs)}")

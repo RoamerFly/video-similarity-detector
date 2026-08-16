@@ -8,6 +8,7 @@ video frame extraction, and dynamic frame sampling based on perceptual hashing.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+import time
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
@@ -23,6 +24,7 @@ from video_sim.preprocess import (
     preprocess_frame_for_clip,
     preprocess_frame_for_hash,
 )
+from video_sim.metrics import RecognitionMetrics
 
 try:
     cv2.setLogLevel(0)
@@ -32,7 +34,12 @@ except Exception:
 
 @dataclass
 class RetainedFrame:
-    """Information about a retained frame from dynamic sampling."""
+    """Information about a retained frame from dynamic sampling.
+
+    ``clip_frame`` is an RGB ``uint8`` array already passed through
+    ``preprocess_frame_for_clip``.  Embedding callers must not apply the
+    geometric preprocessing a second time.
+    """
     video_path: str
     frame_index: int
     timestamp: float
@@ -231,6 +238,7 @@ class DynamicFrameSampler:
         frame_step: int = 1,
         cache_dir: Union[str, Path] = "data",
         preprocess_config: Optional[PreprocessConfig] = None,
+        metrics: Optional[RecognitionMetrics] = None,
     ):
         """
         Initialize the dynamic frame sampler.
@@ -248,6 +256,12 @@ class DynamicFrameSampler:
         self.cache_dir = Path(cache_dir)
         self.preprocess_config = preprocess_config or PreprocessConfig()
         self.source_duration_sec = 0.0
+        self.metrics = metrics
+        self._preprocess_elapsed_seconds = 0.0
+        self._preprocess_calls = 0
+        self.retained_count = 0
+        self.total_frames = 0
+        self._retained_callback_failed = False
 
     def _get_thumbnail_dir(self, video_path: Union[str, Path]) -> Path:
         """Get the thumbnail directory for a video."""
@@ -316,43 +330,104 @@ class DynamicFrameSampler:
         Returns:
             List of RetainedFrame objects with metadata for each retained frame
         """
+        retained_frames: List[RetainedFrame] = []
+        self._run_sampling(
+            video_path,
+            progress_callback=progress_callback,
+            retained_frames=retained_frames,
+        )
+        return retained_frames
+
+    def sample_stream(
+        self,
+        video_path: Union[str, Path],
+        retained_callback: Callable[[RetainedFrame], None],
+        progress_callback: Optional[Callable[[int, int, float], None]] = None,
+    ) -> int:
+        """Emit retained frames in order without materializing the full list."""
+
+        if not callable(retained_callback):
+            raise TypeError("retained_callback must be callable")
+        self._run_sampling(
+            video_path,
+            progress_callback=progress_callback,
+            retained_callback=retained_callback,
+        )
+        return self.retained_count
+
+    def _run_sampling(
+        self,
+        video_path: Union[str, Path],
+        progress_callback: Optional[Callable[[int, int, float], None]],
+        retained_frames: Optional[List[RetainedFrame]] = None,
+        retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
+    ) -> None:
         video_path = Path(video_path)
         self.source_duration_sec = 0.0
+        self._preprocess_elapsed_seconds = 0.0
+        self._preprocess_calls = 0
+        self.retained_count = 0
+        self.total_frames = 0
+        # Sampling instances are reusable.  A callback failure from an
+        # earlier run must not suppress the safe decoder fallback on the next
+        # run.
+        self._retained_callback_failed = False
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
         # Decord implements sparse get_batch requests with repeated random
-        # seeking. Older DVD/x264 files with long GOPs or irregular timestamps
-        # can make each seek spin for thousands of attempts and emit
-        # video_reader.cc:711 warnings. OpenCV's grab loop advances
-        # sequentially and is much more reliable for frame_step > 1.
-        if self.frame_step > 1:
-            try:
-                return self._sample_with_opencv(video_path, progress_callback)
-            except Exception as opencv_error:
-                print(
-                    f"Warning: OpenCV sequential frame reader failed for {video_path.resolve()}; "
-                    f"falling back to Decord: {opencv_error}"
-                )
-                return self._sample_with_decord(video_path, progress_callback)
-
+        # seeking. OpenCV advances sequentially and is more reliable for
+        # sparse frame_step values.
         try:
-            return self._sample_with_decord(video_path, progress_callback)
-        except Exception as decord_error:
-            print(
-                f"Warning: Decord frame reader failed for {video_path.resolve()}; "
-                f"falling back to OpenCV: {decord_error}"
-            )
-            return self._sample_with_opencv(video_path, progress_callback)
+            if self.frame_step > 1:
+                try:
+                    self._sample_with_opencv(
+                        video_path, progress_callback, retained_frames, retained_callback
+                    )
+                except Exception as opencv_error:
+                    if self._retained_callback_failed or self.retained_count > 0:
+                        raise
+                    print(
+                        f"Warning: OpenCV sequential frame reader failed for {video_path.resolve()}; "
+                        f"falling back to Decord: {opencv_error}"
+                    )
+                    self._sample_with_decord(
+                        video_path, progress_callback, retained_frames, retained_callback
+                    )
+            else:
+                try:
+                    self._sample_with_decord(
+                        video_path, progress_callback, retained_frames, retained_callback
+                    )
+                except Exception as decord_error:
+                    if self._retained_callback_failed or self.retained_count > 0:
+                        raise
+                    print(
+                        f"Warning: Decord frame reader failed for {video_path.resolve()}; "
+                        f"falling back to OpenCV: {decord_error}"
+                    )
+                    self._sample_with_opencv(
+                        video_path, progress_callback, retained_frames, retained_callback
+                    )
+        finally:
+            if self.metrics is not None and self._preprocess_elapsed_seconds > 0:
+                self.metrics.add_elapsed(
+                    "preprocess",
+                    self._preprocess_elapsed_seconds,
+                    items=self._preprocess_calls,
+                )
 
     def _sample_with_decord(
         self,
         video_path: Path,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        retained_frames: Optional[List[RetainedFrame]] = None,
+        retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> List[RetainedFrame]:
         """Sample frames with Decord first to avoid OpenCV swscaler noise."""
         vr = VideoReader(str(video_path), ctx=cpu(0), num_threads=1)
         total_frames = len(vr)
+        self.total_frames = total_frames
         if total_frames <= 0:
             return []
 
@@ -363,7 +438,6 @@ class DynamicFrameSampler:
 
         max_gap_frames = max(1, int(self.max_gap_sec * fps))
         notify_interval = max(1, int(fps * 2))
-        retained_frames: List[RetainedFrame] = []
         last_retained_hash: Optional[imagehash.ImageHash] = None
         last_retained_index = -max_gap_frames - 1
         last_notified_index = -notify_interval
@@ -379,6 +453,7 @@ class DynamicFrameSampler:
                 last_retained_index=last_retained_index,
                 max_gap_frames=max_gap_frames,
                 video_path=video_path,
+                retained_callback=retained_callback,
             )
 
             if (
@@ -391,10 +466,10 @@ class DynamicFrameSampler:
         if progress_callback:
             progress_callback(total_frames, total_frames, total_frames / fps)
 
-        if not retained_frames and total_frames > 0:
+        if self.retained_count == 0 and total_frames > 0:
             raise ValueError("Decord decoded no usable frames")
 
-        return retained_frames
+        return retained_frames or []
 
     def _iter_decord_bgr_frames(
         self,
@@ -427,6 +502,8 @@ class DynamicFrameSampler:
         self,
         video_path: Path,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        retained_frames: Optional[List[RetainedFrame]] = None,
+        retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> List[RetainedFrame]:
         # Open video with OpenCV
         cap = cv2.VideoCapture(str(video_path))
@@ -439,10 +516,10 @@ class DynamicFrameSampler:
             fps = 30.0  # Default fallback
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self.total_frames = total_frames
         self.source_duration_sec = total_frames / fps if total_frames > 0 else 0.0
         max_gap_frames = max(1, int(self.max_gap_sec * fps))
         notify_interval = max(1, int(fps * 2))
-        retained_frames: List[RetainedFrame] = []
         last_retained_hash: Optional[imagehash.ImageHash] = None
         last_retained_index = -max_gap_frames - 1  # Ensure first frame is retained
         frame_index = 0
@@ -472,6 +549,7 @@ class DynamicFrameSampler:
                     last_retained_index=last_retained_index,
                     max_gap_frames=max_gap_frames,
                     video_path=video_path,
+                    retained_callback=retained_callback,
                 )
 
                 if progress_callback and frame_index % notify_interval == 0:
@@ -493,21 +571,25 @@ class DynamicFrameSampler:
         if progress_callback:
             progress_callback(frame_index, total_frames, frame_index / fps if fps > 0 else 0.0)
 
-        return retained_frames
+        return retained_frames or []
 
     def _consider_frame(
         self,
         frame: np.ndarray,
         frame_index: int,
         timestamp: float,
-        retained_frames: List[RetainedFrame],
+        retained_frames: Optional[List[RetainedFrame]],
         last_retained_hash: Optional[imagehash.ImageHash],
         last_retained_index: int,
         max_gap_frames: int,
         video_path: Path,
+        retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> Tuple[Optional[imagehash.ImageHash], int]:
+        preprocess_started = time.perf_counter()
         # Preprocess frame for hash computation
         preprocessed = preprocess_frame_for_hash(frame, self.preprocess_config)
+        self._preprocess_elapsed_seconds += time.perf_counter() - preprocess_started
+        self._preprocess_calls += 1
 
         # Convert to PIL and compute pHash
         pil_image = Image.fromarray(cv2.cvtColor(preprocessed, cv2.COLOR_BGR2RGB))
@@ -538,8 +620,11 @@ class DynamicFrameSampler:
             # Keep the compact preprocessed RGB frame in memory for embedding.
             # The UI uses timestamps to seek in the original videos, so no
             # thumbnail files are needed.
+            clip_preprocess_started = time.perf_counter()
             clip_frame = preprocess_frame_for_clip(frame, self.preprocess_config)
             clip_frame = cv2.cvtColor(clip_frame, cv2.COLOR_BGR2RGB)
+            self._preprocess_elapsed_seconds += time.perf_counter() - clip_preprocess_started
+            self._preprocess_calls += 1
             retained_frame = RetainedFrame(
                 video_path=str(video_path),
                 frame_index=frame_index,
@@ -547,7 +632,13 @@ class DynamicFrameSampler:
                 phash=str(current_hash),
                 clip_frame=clip_frame,
             )
-            retained_frames.append(retained_frame)
+            if retained_frames is not None:
+                retained_frames.append(retained_frame)
+            self.retained_count += 1
+            if retained_callback is not None:
+                self._retained_callback_failed = True
+                retained_callback(retained_frame)
+                self._retained_callback_failed = False
 
             # Update state
             last_retained_hash = current_hash

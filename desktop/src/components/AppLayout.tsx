@@ -219,7 +219,7 @@ export function AppLayout() {
   }, [])
 
   return (
-    <div className="app-frame">
+    <div className="app-frame compact-shell">
       <header className="brand-header" data-tauri-drag-region>
         <div className="brand-left" data-tauri-drag-region>
           <img className="brand-logo" src={appIcon} alt={t('视频相似度分析')} />
@@ -353,33 +353,21 @@ function getRouteCopy(pathname: string, resultSummary: { videos: number; pairs: 
       title: '结果总览',
       subtitle: resultSummary
         ? `共分析 ${resultSummary.videos} 个视频，生成 ${resultSummary.pairs} 对比较结果`
-        : '读取真实分析报告并展示比较结果',
+        : '',
     }
   }
 
   if (pathname === '/compare') {
-    return {
-      title: '对比视图',
-      subtitle: '并排查看两个视频的匹配帧，人工确认相似关系',
-    }
+    return { title: '对比视图', subtitle: '' }
   }
 
   if (pathname === '/merge') {
-    return {
-      title: '合并视频',
-      subtitle: '整理相似视频，统一画面规格并输出合并或分割文件',
-    }
+    return { title: '合并视频', subtitle: '' }
   }
 
   if (pathname === '/settings') {
-    return {
-      title: '设置',
-      subtitle: '集中管理环境、路径和分析参数',
-    }
+    return { title: '设置', subtitle: '' }
   }
 
-  return {
-    title: '视频相似度分析',
-    subtitle: '扫描视频、启动分析，并跟踪实时运行状态',
-  }
+  return { title: '视频相似度分析', subtitle: '' }
 }

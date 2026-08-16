@@ -39,7 +39,7 @@ export function useMergeMetadata({
     let alive = true
     probeVideoMetadata(missing, undefined, projectRoot, pythonPath)
       .then((rows) => {
-        rows.forEach((row) => metadataCache.set(normalizePath(row.path), row))
+        ;(rows ?? []).forEach((row) => metadataCache.set(normalizePath(row.path), row))
         if (alive) setMetadata(Object.fromEntries(metadataCache))
       })
       .catch((error) => {

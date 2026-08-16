@@ -30,6 +30,7 @@ class BatchReportData:
     total_possible_pairs: int = 0
     candidate_pairs: int = 0
     skipped_by_candidate_screening: int = 0
+    metrics: Optional[Dict[str, Any]] = None
 
     def add_pair_result(
         self,
@@ -92,6 +93,7 @@ class BatchReportData:
             "total_possible_pairs": self.total_possible_pairs,
             "candidate_pairs": self.candidate_pairs,
             "skipped_by_candidate_screening": self.skipped_by_candidate_screening,
+            **({"metrics": self.metrics} if self.metrics is not None else {}),
             "warnings": self.warnings,
             "video_pairs": self.video_pairs,
         }

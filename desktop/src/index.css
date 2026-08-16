@@ -300,6 +300,10 @@ select {
 .sidebar-link span {
   font-size: 24px;
   font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .version-pill {
@@ -313,6 +317,9 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-main {
@@ -2867,12 +2874,16 @@ select {
   border: 1px solid rgba(255, 79, 117, 0.36);
   border-radius: 8px;
   background: rgba(255, 79, 117, 0.12);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .compact-message {
   min-height: 32px;
   margin: 0 6px 8px;
   padding: 7px 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .video-list-strip {
@@ -4862,6 +4873,7 @@ select {
 
 .duplicate-path-table {
   min-width: 980px;
+  table-layout: fixed;
 }
 
 .duplicate-path-table th:first-child,
@@ -4871,7 +4883,7 @@ select {
 }
 
 .duplicate-path-table td:nth-child(2) {
-  max-width: 220px;
+  width: 220px;
 }
 
 .duplicate-path-table td:nth-child(2),
@@ -5114,6 +5126,8 @@ select {
   border: 1px solid rgba(36, 213, 139, 0.28);
   border-radius: 8px;
   background: rgba(36, 213, 139, 0.1);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .results-data-table {
@@ -6711,6 +6725,7 @@ select {
   padding: 7px 9px;
   font-size: 11px;
   border-radius: 6px;
+  overflow-wrap: anywhere;
 }
 
 .merge-message.error {
@@ -6756,6 +6771,8 @@ select {
   border: 1px solid rgba(116, 145, 255, 0.16);
   border-radius: 6px;
   background: rgba(2, 8, 22, 0.54);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .merge-log-view .stderr {
@@ -6768,11 +6785,12 @@ select {
   position: relative;
   width: 100%;
   max-width: 100%;
-  min-height: 100%;
-  grid-template-rows: auto auto auto auto;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 10px;
-  align-content: start;
-  overflow: visible;
+  align-content: stretch;
+  overflow: hidden;
   overflow-x: hidden;
 }
 
@@ -6849,9 +6867,9 @@ select {
 .editor-main-grid {
   display: grid;
   min-height: 0;
-  width: min(100%, 1120px);
+  width: 100%;
   margin: 0 auto;
-  grid-template-columns: minmax(520px, 720px) minmax(320px, 380px);
+  grid-template-columns: minmax(520px, 1fr) minmax(320px, 380px);
   justify-content: center;
   align-items: stretch;
   gap: 10px;
@@ -6869,7 +6887,7 @@ select {
   display: grid;
   min-width: 0;
   width: 100%;
-  max-width: 720px;
+  max-width: none;
   padding: 10px;
   align-self: stretch;
   grid-template-rows: auto 44px auto;
@@ -7029,9 +7047,8 @@ select {
 }
 
 .editor-player-controls {
-  display: grid;
+  display: flex;
   min-width: 0;
-  grid-template-columns: 34px 40px 34px 34px 34px auto minmax(120px, 1fr);
   align-items: center;
   gap: 7px;
 }
@@ -7058,27 +7075,6 @@ select {
 .editor-player-controls button svg {
   width: 17px;
   height: 17px;
-}
-
-.editor-player-controls time {
-  display: grid;
-  min-width: 0;
-  overflow: hidden;
-  color: rgba(228, 237, 255, 0.84);
-  font-family: Consolas, monospace;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.editor-player-controls time small {
-  color: rgba(178, 198, 230, 0.58);
-  font-size: 9px;
-}
-
-.editor-player-controls input[type="range"] {
-  min-width: 0;
-  width: 100%;
 }
 
 .editor-inspector-panel {
@@ -7415,6 +7411,113 @@ select {
   font-size: 10px;
 }
 
+.editor-workspace-controls {
+  display: flex;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 0 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid rgba(96, 126, 183, 0.18);
+}
+
+.editor-workspace-controls > .neon-button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding-inline: 9px;
+  font-size: 11px;
+}
+
+.editor-workspace-controls .editor-overlap-layout {
+  min-width: 0;
+  padding: 0;
+}
+
+.merge-advanced-dialog-backdrop {
+  display: grid;
+  position: fixed;
+  z-index: 10050;
+  inset: 0;
+  padding: 28px;
+  overflow: auto;
+  background: rgba(1, 7, 20, 0.76);
+  backdrop-filter: blur(7px);
+  place-items: center;
+}
+
+.merge-advanced-dialog {
+  display: grid;
+  width: min(860px, 100%);
+  max-height: min(760px, calc(100vh - 56px));
+  padding: 18px;
+  gap: 18px;
+  overflow: auto;
+  color: rgba(234, 243, 255, 0.94);
+  border: 1px solid rgba(98, 178, 255, 0.4);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(14, 33, 70, 0.98), rgba(4, 14, 37, 0.98));
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.62);
+}
+
+.merge-advanced-dialog > header,
+.merge-advanced-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.merge-advanced-dialog h2 {
+  margin: 3px 0 0;
+  font-size: 21px;
+}
+
+.merge-advanced-dialog .eyebrow {
+  color: rgba(116, 210, 255, 0.78);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.merge-advanced-dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+}
+
+.merge-advanced-dialog-grid > label,
+.merge-advanced-dialog-grid > .merge-number-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.merge-advanced-dialog-grid .design-select,
+.merge-advanced-dialog-grid .design-input {
+  min-width: 0;
+  height: 38px;
+}
+
+.merge-advanced-dialog-grid .editor-toggle-row {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border: 1px solid rgba(99, 143, 213, 0.24);
+  border-radius: 7px;
+  background: rgba(4, 15, 38, 0.56);
+}
+
+.merge-advanced-dialog-grid .editor-toggle-row.disabled {
+  opacity: 0.48;
+}
+
+.merge-advanced-dialog > footer {
+  justify-content: flex-end;
+}
+
 .editor-advanced-inline {
   display: grid;
   min-width: 0;
@@ -7571,82 +7674,16 @@ select {
 .editor-timeline-panel {
   display: grid;
   padding: 8px 10px 10px;
-  grid-template-rows: auto auto;
+  grid-template-rows: minmax(0, 1fr);
   gap: 8px;
-  overflow: visible;
-}
-
-.timeline-tool-card {
-  display: flex;
-  width: max-content;
-  min-height: 34px;
-  padding: 5px 7px;
-  align-items: center;
-  gap: 8px;
-  color: rgba(221, 234, 255, 0.82);
-  border: 1px solid rgba(88, 125, 195, 0.28);
-  border-radius: 7px;
-  background: rgba(5, 17, 43, 0.7);
-}
-
-.timeline-tool-card > div {
-  display: flex;
-  gap: 5px;
-}
-
-.timeline-tool-card button {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  color: rgba(237, 246, 255, 0.9);
-  border: 1px solid rgba(101, 152, 223, 0.3);
-  border-radius: 5px;
-  background: rgba(13, 39, 78, 0.72);
-  place-items: center;
-}
-
-.timeline-tool-card svg {
-  width: 14px;
-  height: 14px;
-}
-
-.timeline-tool-card span {
-  min-width: 38px;
-  font: 11px/1 Consolas, monospace;
-}
-
-.timeline-tool-card .timeline-zoom-value,
-.timeline-zoom-input {
-  min-width: 44px;
-  width: auto;
-  height: 24px;
-  padding: 0 5px;
-  color: rgba(221, 234, 255, 0.86);
-  text-align: center;
-  font: 11px/1 Consolas, monospace;
-  border: 1px solid rgba(101, 152, 223, 0.24);
-  border-radius: 5px;
-  background: rgba(4, 14, 35, 0.58);
-}
-
-.timeline-tool-card .timeline-zoom-value {
-  cursor: text;
-}
-
-.timeline-zoom-input {
-  outline: none;
-}
-
-.timeline-zoom-input:focus {
-  border-color: rgba(117, 207, 255, 0.72);
-  box-shadow: 0 0 0 2px rgba(56, 205, 255, 0.16);
+  overflow: hidden;
 }
 
 .timeline-ruler {
   display: block;
   position: relative;
   height: 24px;
+  overflow: hidden;
   color: rgba(190, 207, 233, 0.62);
   font-size: 10px;
   border-bottom: 1px solid rgba(103, 135, 194, 0.22);
@@ -7664,7 +7701,8 @@ select {
   min-height: 0;
   grid-template-columns: 78px minmax(0, 1fr);
   gap: 8px;
-  overflow: visible;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .timeline-track-labels {
@@ -7714,7 +7752,7 @@ select {
 .timeline-scroll-viewport {
   min-width: 0;
   min-height: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
   overscroll-behavior: contain;
   overscroll-behavior-x: contain;
@@ -8247,6 +8285,430 @@ select {
   background: rgba(214, 54, 82, 0.28);
 }
 
+/* Merge workspace: keep the preview as the primary canvas while the timeline
+   remains visible below it. These rules are scoped to the merge route so the
+   analysis, results, compare and settings workspaces keep their dimensions. */
+.merge-editor-page {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 8px;
+}
+
+.merge-editor-page .editor-toolbar {
+  min-height: 42px;
+  padding: 5px 10px;
+  gap: 8px;
+}
+
+.merge-editor-page .editor-toolbar-group {
+  gap: 5px;
+}
+
+.merge-editor-page .editor-toolbar-group .neon-button,
+.merge-editor-page .editor-toolbar-group > button:not(.neon-button) {
+  min-height: 30px;
+  height: 30px;
+  padding-inline: 8px;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.merge-editor-page .editor-toolbar-group > button.active {
+  color: #f6fcff;
+  border-color: rgba(77, 218, 255, 0.72);
+  background: rgba(25, 116, 167, 0.52);
+  box-shadow: 0 0 0 2px rgba(49, 196, 255, 0.12);
+}
+
+.merge-editor-page .editor-toolbar-utility {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 30px;
+  height: 30px;
+  padding-inline: 7px;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.merge-editor-page .editor-toolbar-utility svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.merge-editor-page .editor-main-grid {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  gap: 0;
+}
+
+.merge-editor-page .editor-preview-panel {
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  padding: 8px;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.merge-editor-page .editor-preview-panel.has-overlap-layout {
+  grid-template-rows: minmax(0, 1fr) auto auto;
+}
+
+.merge-editor-page .editor-preview-stage {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  place-items: center;
+  justify-self: center;
+  align-self: center;
+}
+
+.merge-editor-page .editor-preview-screen {
+  min-height: 0;
+  height: auto;
+}
+
+.merge-editor-page .editor-player-controls {
+  display: flex;
+  gap: 5px;
+}
+
+.merge-editor-page .editor-player-controls button {
+  width: 30px;
+  height: 30px;
+}
+
+.merge-editor-page .editor-player-controls button.primary {
+  width: 36px;
+  height: 36px;
+}
+
+.merge-editor-page .editor-workspace-controls {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  z-index: 2;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid rgba(96, 126, 183, 0.3);
+  border-radius: 7px;
+  background: rgba(4, 14, 35, 0.78);
+  backdrop-filter: blur(8px);
+}
+
+.merge-editor-page .editor-workspace-controls > .neon-button {
+  min-height: 25px;
+}
+
+.merge-editor-page .editor-overlap-layout {
+  min-height: 25px;
+  gap: 4px;
+}
+
+.merge-editor-page .editor-overlap-layout > button {
+  height: 23px;
+  padding-inline: 6px;
+  font-size: 10px;
+}
+
+.merge-editor-page .editor-inspector-drawer {
+  display: none;
+  position: absolute;
+  z-index: 35;
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  width: min(370px, calc(100% - 16px));
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(102, 185, 255, 0.5);
+  border-radius: 10px;
+  background: rgba(4, 14, 35, 0.96);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(45, 176, 255, 0.12);
+  backdrop-filter: blur(16px);
+}
+
+.merge-editor-page .editor-inspector-drawer.is-open {
+  display: flex;
+}
+
+.merge-editor-page .editor-inspector-drawer[aria-hidden="true"] {
+  pointer-events: none;
+}
+
+.merge-editor-page .editor-inspector-drawer-head {
+  display: flex;
+  flex: 0 0 34px;
+  min-height: 34px;
+  padding: 0 8px 0 12px;
+  align-items: center;
+  justify-content: space-between;
+  color: rgba(229, 241, 255, 0.88);
+  border-bottom: 1px solid rgba(101, 152, 223, 0.22);
+  background: rgba(10, 30, 64, 0.78);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.merge-editor-page .editor-inspector-drawer-head button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: rgba(224, 239, 255, 0.8);
+  border: 1px solid rgba(101, 152, 223, 0.25);
+  border-radius: 5px;
+  background: rgba(5, 18, 43, 0.62);
+  place-items: center;
+}
+
+.merge-editor-page .editor-inspector-drawer-head button svg {
+  width: 14px;
+}
+
+.merge-editor-page .editor-inspector-drawer .editor-inspector-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto !important;
+  max-height: none !important;
+  padding: 10px;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.merge-editor-page .editor-inspector-drawer .editor-inspector-title {
+  display: none;
+}
+
+.merge-editor-page .editor-timeline-panel {
+  min-height: 0;
+  height: var(--merge-timeline-height);
+  max-height: min(var(--merge-timeline-height), 42vh);
+  padding: 5px 8px 7px;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+}
+
+.merge-editor-page .timeline-workspace {
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.merge-editor-page .timeline-track-labels {
+  grid-template-rows: var(--merge-timeline-ruler-height) auto;
+  gap: var(--merge-timeline-row-gap);
+}
+
+.merge-editor-page .timeline-track-label-list {
+  gap: var(--merge-timeline-row-gap);
+}
+
+.merge-editor-page .timeline-track-label-list button,
+.merge-editor-page .timeline-video-track,
+.merge-editor-page .timeline-audio-track,
+.merge-editor-page .timeline-text-track {
+  min-height: var(--merge-timeline-row-height);
+  height: var(--merge-timeline-row-height);
+}
+
+.merge-editor-page .timeline-track-label-list button {
+  height: var(--merge-timeline-row-height);
+  padding-inline: 3px;
+  font-size: 10px;
+}
+
+.merge-editor-page .timeline-tracks {
+  margin-top: var(--merge-timeline-tracks-margin);
+  gap: var(--merge-timeline-row-gap);
+}
+
+.merge-editor-page .timeline-ruler {
+  height: var(--merge-timeline-ruler-height);
+}
+
+.merge-editor-page .timeline-video-clip,
+.merge-editor-page .timeline-audio-clip,
+.merge-editor-page .timeline-text-clip {
+  top: 4px;
+  bottom: 4px;
+  padding: 3px 5px;
+  gap: 4px;
+}
+
+.merge-editor-page .timeline-video-clip span,
+.merge-editor-page .timeline-audio-clip span,
+.merge-editor-page .timeline-text-clip span {
+  font-size: 10px;
+}
+
+.merge-editor-page .timeline-scroll-content {
+  min-height: var(--merge-timeline-workspace-height);
+}
+
+.merge-editor-page .editor-export-status {
+  min-height: 0;
+  padding: 5px 9px;
+  gap: 5px 10px;
+}
+
+@media (max-height: 820px) {
+  .merge-editor-page {
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+  }
+
+  .merge-editor-page .timeline-track-label-list button,
+  .merge-editor-page .timeline-video-track,
+  .merge-editor-page .timeline-audio-track,
+  .merge-editor-page .timeline-text-track {
+    min-height: var(--merge-timeline-row-height);
+    height: var(--merge-timeline-row-height);
+  }
+
+  .merge-editor-page .timeline-track-label-list button {
+    height: var(--merge-timeline-row-height);
+  }
+
+  .merge-editor-page .timeline-track-labels {
+    grid-template-rows: var(--merge-timeline-ruler-height) auto;
+  }
+}
+
+@media (max-width: 900px) {
+  .merge-editor-page .editor-toolbar-group:first-child {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .merge-editor-page .editor-toolbar-group:first-child::-webkit-scrollbar {
+    display: none;
+  }
+
+  .merge-editor-page .editor-toolbar-group.right > span {
+    display: none;
+  }
+
+  .merge-editor-page .editor-inspector-drawer {
+    width: min(340px, calc(100% - 12px));
+    top: 6px;
+    right: 6px;
+    bottom: 6px;
+  }
+}
+
+@media (max-width: 1450px) {
+  .merge-editor-page .editor-toolbar-utility > span {
+    display: none;
+  }
+}
+
+/* Compact shell density applied to every route: the header/logo/sidebar and
+   content offsets stay fixed so switching pages never shifts the frame. */
+.compact-shell .brand-header {
+  top: 10px;
+  right: 108px;
+  left: 22px;
+  min-height: 50px;
+  align-items: center;
+}
+
+.compact-shell .brand-left {
+  gap: 10px;
+  min-width: 0;
+}
+
+.compact-shell .brand-logo {
+  width: 50px;
+  height: 50px;
+  border-radius: 14px;
+}
+
+.compact-shell .brand-title {
+  font-size: 22px;
+  line-height: 1.05;
+}
+
+.compact-shell .brand-subtitle {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.2;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-shell .header-actions {
+  gap: 10px;
+  margin-top: 0;
+  margin-right: 4px;
+}
+
+.compact-shell .header-actions .neon-button {
+  min-height: 38px;
+  padding: 0 14px;
+  font-size: 14px;
+  gap: 8px;
+}
+
+.compact-shell .header-actions .neon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.compact-shell .window-controls {
+  top: 8px;
+  right: 12px;
+}
+
+.compact-shell .app-sidebar,
+.compact-shell .app-main {
+  top: 72px;
+  bottom: 12px;
+}
+
+.compact-shell .app-main {
+  right: 12px;
+  left: 224px;
+  overflow: hidden;
+}
+
+.compact-shell .merge-editor-page {
+  gap: 5px;
+}
+
+.compact-shell .merge-editor-page .editor-toolbar {
+  min-height: 38px;
+  padding: 4px 8px;
+  gap: 6px;
+}
+
+.compact-shell .merge-editor-page .editor-toolbar-group {
+  gap: 4px;
+}
+
+.compact-shell .merge-editor-page .editor-preview-panel {
+  padding: 6px;
+  gap: 4px;
+}
+
+.compact-shell .merge-editor-page .editor-timeline-panel {
+  padding: 3px 6px 5px;
+}
+
+.compact-shell .merge-editor-page > .editor-export-status {
+  padding: 3px 7px;
+  gap: 4px 8px;
+}
+
 .pair-results-table .video-name > input[type="checkbox"] {
   flex: 0 0 auto;
   width: 15px;
@@ -8483,6 +8945,8 @@ select {
   background: rgba(17, 112, 80, 0.94);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
   animation: settings-toast-in 0.28s ease both;
+  max-width: min(720px, calc(100vw - 40px));
+  overflow-wrap: anywhere;
 }
 
 .settings-save-toast.is-error {
@@ -10149,6 +10613,10 @@ select {
     left: 102px;
   }
 
+  .compact-shell .app-main {
+    left: 102px;
+  }
+
   .analyze-simple-page,
   .analysis-launch-panel {
     grid-template-columns: minmax(0, 1fr);
@@ -10861,10 +11329,6 @@ select {
 }
 
 /* Results and compare interaction polish. */
-.brand-header {
-  right: 154px;
-}
-
 .header-actions {
   max-width: min(620px, calc(100vw - 560px));
   justify-content: flex-end;
@@ -10955,10 +11419,6 @@ select {
 }
 
 @media (max-width: 1280px) {
-  .brand-header {
-    right: 140px;
-  }
-
   .header-actions {
     max-width: 440px;
   }

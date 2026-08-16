@@ -12,13 +12,16 @@ const routes = [
   { id: 'page2_results_page', route: '/results', baseline: 'page/page2_results_page.png', title: '结果总览' },
   { id: 'page4_settings_page', route: '/settings', baseline: 'page/page4_settings_page.png', title: '设置' },
   { id: 'page5_merge_page', route: '/merge', baseline: null, title: '视频合并' },
+  { id: 'page5_merge_single_page', route: '/merge?scenario=single', baseline: null, title: '视频合并（单轨）' },
 ]
 
 const options = parseArgs(process.argv.slice(2))
 const targetUrl = options.url ?? process.env.VISUAL_QA_URL ?? 'http://127.0.0.1:5173/'
-const selectedRoutes = options.route
-  ? routes.filter((route) => route.route === options.route || route.id === options.route)
-  : routes
+const selectedRoutes = options.route === 'merge'
+  ? routes.filter((route) => route.route.startsWith('/merge'))
+  : options.route
+    ? routes.filter((route) => route.route === options.route || route.id === options.route)
+    : routes
 if (selectedRoutes.length === 0) {
   throw new Error(`Unknown visual QA route: ${options.route}`)
 }
@@ -59,7 +62,34 @@ if (mockTauri) {
   await installTauriMock(page, options.language)
 }
 
+if (mockTauri && selectedRoutes.some((route) => route.route.startsWith('/merge'))) {
+  await page.addInitScript(() => {
+    const video = (id, name, trackId, startTime) => ({
+      id, path: `D:\\VisualQA\\${name}`, name, trackId, startTime, trimStart: 0, trimEnd: 8,
+      muted: false, volume: 1, rotation: 0, cropEnabled: false, cropX: 0, cropY: 0, cropWidth: 1920, cropHeight: 1080,
+      layoutCustom: false, layoutX: 0, layoutY: 0, layoutWidth: 1, layoutHeight: 1,
+    })
+    const singleScenario = new URL(window.location.href).searchParams.get('scenario') === 'single'
+    const state = {
+      state: {
+        items: singleScenario
+          ? [video('qa-video-a', '主持人.mp4', 'video-track-1', 0)]
+          : [video('qa-video-a', '主持人.mp4', 'video-track-1', 0), video('qa-video-b', '屏幕录制.mp4', 'video-track-2', 0)],
+        audioItems: singleScenario ? [] : [{ id: 'qa-audio-a', path: 'D:\\VisualQA\\旁白.mp3', name: '旁白.mp3', trackId: 'audio-track-1', startTime: 0, trimStart: 0, trimEnd: 8 }],
+        textItems: singleScenario ? [] : [{ id: 'qa-text-a', text: '多轨合并预览', trackId: 'text-track-1', startTime: 0, duration: 5, x: 0.5, y: 0.84, fontSize: 42, color: '#ffffff', backgroundColor: 'rgba(0,0,0,0.45)' }],
+        videoTracks: singleScenario
+          ? [{ id: 'video-track-1', name: '视频线 1' }]
+          : [{ id: 'video-track-1', name: '视频线 1' }, { id: 'video-track-2', name: '视频线 2' }],
+        audioTracks: [{ id: 'audio-track-1', name: '音频线 1' }], textTracks: [{ id: 'text-track-1', name: '文本线 1' }],
+        settings: { outputDir: 'data/merged', outputName: 'visual-qa-merge', width: 1920, height: 1080, fps: 30, includeAudio: true, canvasBackground: 'black', fitMode: 'contain', snapToVideos: true, videoEncoder: 'h264', rateControl: 'quality', crf: 23, videoBitrate: 4000, twoPass: false, encoderPreset: 'medium', audioBitrate: 192 },
+      }, version: 0,
+    }
+    localStorage.setItem('video-similarity-merge:v2', JSON.stringify(state))
+  })
+}
+
 const results = []
+const mergeMetricsByRoute = new Map()
 
 for (const route of selectedRoutes) {
   const beforeErrorCount = pageErrors.length
@@ -70,11 +100,181 @@ for (const route of selectedRoutes) {
   const baselinePath = route.baseline ? path.resolve(repoRoot, route.baseline) : null
 
   let result
+  let mergeLayoutMetrics = null
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeout })
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
     await page.locator('.app-frame').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
     await page.waitForTimeout(350)
+
+    if (route.route.startsWith('/merge')) {
+      const singleScenario = route.route.includes('scenario=single')
+      await page.locator('.timeline-video-clip').first().waitFor({ state: 'visible', timeout: 5000 })
+      if (!singleScenario) {
+        await page.locator('.timeline-audio-clip').first().waitFor({ state: 'visible', timeout: 5000 })
+        await page.locator('.timeline-text-clip').first().waitFor({ state: 'visible', timeout: 5000 })
+      }
+      await page.waitForFunction(() => {
+        const canvas = document.querySelector('.editor-output-canvas')
+        return Boolean(canvas?.style.width && canvas.style.height)
+      }, { timeout: 5000 })
+      const previewBox = await page.locator('.editor-preview-screen').boundingBox()
+      const previewStageBox = await page.locator('.editor-preview-stage').boundingBox()
+      const canvasBox = await page.locator('.editor-output-canvas').boundingBox()
+      const headerBox = await page.locator('.compact-shell .brand-header').boundingBox()
+      const canvasStyle = await page.locator('.editor-output-canvas').evaluate((node) => ({
+        left: node.style.left,
+        top: node.style.top,
+        right: node.style.right,
+        bottom: node.style.bottom,
+        width: node.style.width,
+        height: node.style.height,
+      }))
+      const playerBox = await page.locator('.editor-player-controls').boundingBox()
+      const previewSliderCount = await page.locator('.editor-player-controls input[type="range"]').count()
+      const previewResetCount = await page.locator('.editor-preview-size-tools').count()
+      const topResetCount = await page.locator('.editor-toolbar').getByRole('button', { name: '还原窗口' }).count()
+      const topAdvancedCount = await page.locator('.editor-toolbar').getByRole('button', { name: '高级导出设置' }).count()
+      const mergeSubtitleCount = await page.locator('.compact-shell .brand-subtitle').count()
+      const timelineBox = await page.locator('.timeline-workspace').boundingBox()
+      const mergePageOverflow = await page.locator('.merge-editor-page').evaluate((node) => ({
+        clientWidth: node.clientWidth,
+        scrollWidth: node.scrollWidth,
+        clientHeight: node.clientHeight,
+        scrollHeight: node.scrollHeight,
+      }))
+      const zoomControlCount = await page.locator('.timeline-tool-card, .timeline-zoom-value, .timeline-zoom-input').count()
+      const overlapToolbarCount = await page.locator('.editor-overlap-layout').count()
+      const timelineMetrics = await page.locator('.timeline-scroll-viewport').evaluate((node) => {
+        const viewport = node.getBoundingClientRect()
+        const tracks = Array.from(node.querySelectorAll('[data-track-kind]')).map((track) => {
+          const rect = track.getBoundingClientRect()
+          const clip = track.querySelector('[class*="-clip"]')
+          const clipRect = clip?.getBoundingClientRect()
+          return {
+            kind: track.dataset.trackKind,
+            width: rect.width,
+            clipWidth: clipRect?.width ?? 0,
+            clipLeft: clipRect?.left ?? 0,
+            left: rect.left,
+            top: rect.top,
+            bottom: rect.bottom,
+          }
+        })
+        return {
+          clientWidth: node.clientWidth,
+          scrollWidth: node.scrollWidth,
+          viewportWidth: viewport.width,
+          tracks,
+        }
+      })
+      const visibleTrackLabels = await page.locator('.timeline-track-label-list button').evaluateAll((nodes) => nodes.map((node) => {
+        const rect = node.getBoundingClientRect()
+        return { top: rect.top, bottom: rect.bottom }
+      }))
+      const trackCounts = await page.locator('.timeline-scroll-viewport [data-track-kind]').evaluateAll((nodes) => nodes.reduce((counts, node) => {
+        const kind = node.dataset.trackKind
+        if (kind) counts[kind] = (counts[kind] ?? 0) + 1
+        return counts
+      }, {}))
+      const minimumPreviewHeight = viewport.height >= 900 ? 400 : 240
+      if (!previewBox || previewBox.height < minimumPreviewHeight) {
+        throw new Error(`Merge preview is too short: ${previewBox ? `${Math.round(previewBox.width)}x${Math.round(previewBox.height)}` : 'missing'}`)
+      }
+      if (!playerBox || playerBox.height < 24) {
+        throw new Error(`Merge playback controls are not visible: ${playerBox ? `${Math.round(playerBox.width)}x${Math.round(playerBox.height)}` : 'missing'}`)
+      }
+      if (!previewStageBox || !canvasBox) {
+        throw new Error(`Merge preview stage or output canvas is missing: ${JSON.stringify({ previewStageBox, canvasBox })}`)
+      }
+      if (!headerBox || headerBox.height > 64) {
+        throw new Error(`Merge shell header is not compact enough: ${JSON.stringify({ headerBox })}`)
+      }
+      if (mergeSubtitleCount !== 0) {
+        throw new Error(`Merge page still renders a descriptive subtitle: ${mergeSubtitleCount}`)
+      }
+      if (previewResetCount !== 0 || topResetCount !== 1 || topAdvancedCount !== 1) {
+        throw new Error(`Merge window controls are not in the top toolbar: ${JSON.stringify({ previewResetCount, topResetCount, topAdvancedCount })}`)
+      }
+      const outputRatio = 1920 / 1080
+      const canvasRatio = canvasBox.width / Math.max(1, canvasBox.height)
+      const canvasRight = canvasBox.x + canvasBox.width
+      const canvasBottom = canvasBox.y + canvasBox.height
+      const cellRight = previewStageBox.x + previewStageBox.width
+      const cellBottom = previewStageBox.y + previewStageBox.height
+      const horizontalCanvasGap = Math.max(canvasBox.x - previewStageBox.x, cellRight - canvasRight)
+      const verticalCanvasGap = Math.max(canvasBox.y - previewStageBox.y, cellBottom - canvasBottom)
+      if (horizontalCanvasGap > 8 || verticalCanvasGap > 8 || Math.abs(canvasRatio - outputRatio) > 0.02) {
+        throw new Error(`Merge output canvas does not fill its preview cell or preserve aspect ratio: ${JSON.stringify({ previewBox, previewStageBox, canvasBox, canvasStyle, horizontalCanvasGap, verticalCanvasGap, canvasRatio, outputRatio })}`)
+      }
+      if (previewSliderCount !== 0) {
+        throw new Error(`Merge preview still contains ${previewSliderCount} deprecated playback sliders`)
+      }
+      if (zoomControlCount !== 0) {
+        throw new Error(`Merge timeline still contains ${zoomControlCount} manual zoom controls`)
+      }
+      const expectedTrackCounts = singleScenario
+        ? { video: 1, audio: 0, text: 0 }
+        : { video: 2, audio: 1, text: 1 }
+      for (const kind of ['video', 'audio', 'text']) {
+        if ((trackCounts[kind] ?? 0) !== expectedTrackCounts[kind]) {
+          throw new Error(`Merge ${kind} track visibility mismatch: expected ${expectedTrackCounts[kind]}, got ${trackCounts[kind] ?? 0}`)
+        }
+      }
+      const expectedOverlapToolbarCount = singleScenario ? 0 : 1
+      if (overlapToolbarCount !== expectedOverlapToolbarCount) {
+        throw new Error(`Merge overlap toolbar visibility mismatch: expected ${expectedOverlapToolbarCount}, got ${overlapToolbarCount}`)
+      }
+      if (timelineMetrics.scrollWidth > timelineMetrics.clientWidth + 1) {
+        throw new Error(`Merge timeline unexpectedly overflows horizontally: ${JSON.stringify(timelineMetrics)}`)
+      }
+      if (mergePageOverflow.scrollWidth > mergePageOverflow.clientWidth + 1 || mergePageOverflow.scrollHeight > mergePageOverflow.clientHeight + 1) {
+        throw new Error(`Merge page unexpectedly scrolls: ${JSON.stringify(mergePageOverflow)}`)
+      }
+      for (const kind of singleScenario ? ['video'] : ['video', 'audio', 'text']) {
+        const track = timelineMetrics.tracks.find((item) => item.kind === kind)
+        const expectedMinimumRatio = kind === 'text' ? 0.55 : 0.8
+        if (!track || track.clipWidth < track.width * expectedMinimumRatio || Math.abs(track.clipLeft - track.left) > 2) {
+          throw new Error(`Merge ${kind} track is not fit-to-width: ${JSON.stringify(track)}`)
+        }
+      }
+      const expectedLabelCount = singleScenario ? 1 : 4
+      const timelineBottom = timelineBox ? timelineBox.y + timelineBox.height : Number.NEGATIVE_INFINITY
+      if (!timelineBox || visibleTrackLabels.length !== expectedLabelCount || visibleTrackLabels.some((rect) => rect.bottom > timelineBottom + 1)) {
+        throw new Error(`Merge timeline tracks are not simultaneously visible: ${JSON.stringify({ timelineBox, visibleTrackLabels })}`)
+      }
+      const trackBottom = Math.max(...timelineMetrics.tracks.map((track) => track.bottom))
+      const timelineBottomGap = timelineBox ? timelineBottom - trackBottom : Number.POSITIVE_INFINITY
+      if (timelineBottomGap > 18) {
+        throw new Error(`Merge timeline reserves too much empty space below visible tracks: ${JSON.stringify({ timelineBox, trackBottom, timelineBottomGap })}`)
+      }
+      if (singleScenario && timelineBox && timelineBox.height > 120) {
+        throw new Error(`Single-track timeline is still too tall: ${Math.round(timelineBox.height)}px`)
+      }
+      if (!singleScenario && timelineBox && timelineBox.height > 210) {
+        throw new Error(`Multi-track timeline is still using a fixed oversized height: ${Math.round(timelineBox.height)}px`)
+      }
+      const inspectorToggle = page.getByRole('button', { name: '属性' })
+      await inspectorToggle.click()
+      await page.locator('.editor-inspector-drawer.is-open').waitFor({ state: 'visible', timeout: 1000 })
+      await page.locator('.editor-inspector-drawer-head button').click()
+      if (await page.locator('.editor-inspector-drawer.is-open').count()) {
+        throw new Error('Merge inspector drawer did not close after clicking its close button')
+      }
+      console.log(`[merge-layout] header=${Math.round(headerBox.width)}x${Math.round(headerBox.height)} preview=${Math.round(previewBox.width)}x${Math.round(previewBox.height)} player=${Math.round(playerBox.width)}x${Math.round(playerBox.height)} timeline=${Math.round(timelineBox.width)}x${Math.round(timelineBox.height)}`)
+      mergeLayoutMetrics = {
+        headerHeight: headerBox.height,
+        previewHeight: previewBox.height,
+        timelineHeight: timelineBox.height,
+        timelineBottomGap,
+        trackCount: trackCounts,
+        canvasGap: Math.max(horizontalCanvasGap, verticalCanvasGap),
+        canvasRatio,
+      }
+      if (await page.locator('.editor-export-status .merge-message.error').count()) {
+        throw new Error(`Merge page displayed an application error: ${await page.locator('.editor-export-status .merge-message.error').first().innerText()}`)
+      }
+    }
 
     const screenshot = await page.screenshot({ fullPage: false })
     fs.writeFileSync(actualPath, screenshot)
@@ -141,7 +341,18 @@ for (const route of selectedRoutes) {
   }
 
   results.push(result)
+  if (mergeLayoutMetrics) mergeMetricsByRoute.set(route.id, mergeLayoutMetrics)
   writeProgress(result)
+}
+
+const singleMergeMetrics = mergeMetricsByRoute.get('page5_merge_single_page')
+const overlapMergeMetrics = mergeMetricsByRoute.get('page5_merge_page')
+if (singleMergeMetrics && overlapMergeMetrics && singleMergeMetrics.previewHeight <= overlapMergeMetrics.previewHeight) {
+  const singleResult = results.find((item) => item.id === 'page5_merge_single_page')
+  if (singleResult) {
+    singleResult.ok = false
+    singleResult.reason = `Single-track preview should be taller than the overlapping multi-track preview: ${Math.round(singleMergeMetrics.previewHeight)}px <= ${Math.round(overlapMergeMetrics.previewHeight)}px`
+  }
 }
 
 await browser.close()
@@ -477,6 +688,7 @@ async function installTauriMock(page, language) {
           }
         }
         if (cmd === 'scan_videos') return videos
+        if (cmd === 'probe_video_metadata') return []
         if (cmd === 'list_reports') return reports
         if (cmd === 'read_report') return sampleReport
         if (cmd === 'read_text_file') return JSON.stringify(sampleReport)

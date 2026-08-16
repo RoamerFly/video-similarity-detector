@@ -1,4 +1,4 @@
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Film, RotateCcw } from 'lucide-react'
 
 import { localFileSrc, type VideoMetadata } from '@/services/backend'
@@ -9,9 +9,10 @@ import type {
 } from '@/stores/mergeStore'
 import { MergeCropMasks } from './MergeCropMasks'
 import { MergePlaybackControls } from './MergePlaybackControls'
-import type { PlaybackClock } from './PlaybackClock'
-import { clamp, formatPreciseTime, normalizePath } from './mergeFormat'
+import { PreviewEditDraft, usePreviewEditDraft } from './PreviewEditDraft'
+import { clamp, normalizePath } from './mergeFormat'
 import {
+  boundingLayoutRect,
   cropRectFromClip,
   cropSelectionStyle,
   previewExportVideoStyle,
@@ -41,10 +42,11 @@ interface MergePreviewCanvasProps {
   previewScreenRef: MutableRef<HTMLDivElement | null>
   outputCanvasRef: MutableRef<HTMLDivElement | null>
   previewRef: MutableRef<HTMLVideoElement | null>
+  editDraft: PreviewEditDraft
   previewVideoRefs: MutableRef<Map<string, HTMLVideoElement>>
-  previewSize: PreviewSize
+  previewSize: PreviewSize | null
   outputCanvasGeometry: PreviewCanvasGeometry | null
-  settings: Pick<MergeSettings, 'canvasBackground' | 'fitMode' | 'width'>
+  settings: Pick<MergeSettings, 'canvasBackground' | 'fitMode' | 'height' | 'width'>
   previewLayouts: ClipLayout[]
   previewCells: PreviewCanvasGeometry[]
   metadata: Record<string, VideoMetadata>
@@ -57,11 +59,9 @@ interface MergePreviewCanvasProps {
   activeGroupPixelRect: PixelRect | null
   cropEditing: boolean
   cropGeometry: CropGeometry | null
-  playbackClock: PlaybackClock
   playing: boolean
   totalDuration: number
   previewStart: number | null
-  previewDuration: number
   onPreviewLayoutPointerDown: (
     event: ReactPointerEvent<HTMLDivElement>,
     layout: ClipLayout,
@@ -81,7 +81,6 @@ interface MergePreviewCanvasProps {
     handle: CropHandle,
   ) => void
   onResetCropSelection: () => void
-  onResetPreviewSize: () => void
   onPreviewResizePointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void
   onPreviewMetadataLoaded: () => void
   onSeek: (time: number) => void
@@ -95,6 +94,7 @@ export function MergePreviewCanvas({
   previewScreenRef,
   outputCanvasRef,
   previewRef,
+  editDraft,
   previewVideoRefs,
   previewSize,
   outputCanvasGeometry,
@@ -111,37 +111,90 @@ export function MergePreviewCanvas({
   activeGroupPixelRect,
   cropEditing,
   cropGeometry,
-  playbackClock,
   playing,
   totalDuration,
   previewStart,
-  previewDuration,
   onPreviewLayoutPointerDown,
   onPreviewTextPointerDown,
   onEditText,
   onGroupLayoutPointerDown,
   onCropPointerDown,
   onResetCropSelection,
-  onResetPreviewSize,
   onPreviewResizePointerDown,
   onPreviewMetadataLoaded,
   onSeek,
   onTogglePlayback,
   onNudge,
 }: MergePreviewCanvasProps) {
+  const previewStageRef = useRef<HTMLDivElement | null>(null)
+  const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 })
+  const draft = usePreviewEditDraft(editDraft)
+  useEffect(() => {
+    const stage = previewStageRef.current
+    if (!stage) return undefined
+    const measure = () => setPreviewStageSize({ width: stage.clientWidth, height: stage.clientHeight })
+    const observer = new ResizeObserver(measure)
+    observer.observe(stage)
+    measure()
+    return () => observer.disconnect()
+  }, [])
+  const previewFrameSize = useMemo(() => {
+    const availableWidth = previewStageSize.width
+    const availableHeight = previewStageSize.height
+    if (availableWidth <= 0 || availableHeight <= 0) return null
+    const outputRatio = Math.max(0.01, settings.width / Math.max(1, settings.height))
+    if (previewSize) {
+      const requestedHeight = Math.min(availableHeight, Math.max(220, previewSize.height))
+      const requestedWidth = requestedHeight * outputRatio
+      if (requestedWidth <= availableWidth) return { width: requestedWidth, height: requestedHeight }
+      return { width: availableWidth, height: availableWidth / outputRatio }
+    }
+    return availableWidth / availableHeight > outputRatio
+      ? { width: availableHeight * outputRatio, height: availableHeight }
+      : { width: availableWidth, height: availableWidth / outputRatio }
+  }, [previewSize, previewStageSize.height, previewStageSize.width, settings.height, settings.width])
+  useEffect(() => {
+    if (!previewFrameSize) return undefined
+    const frame = window.requestAnimationFrame(onPreviewMetadataLoaded)
+    return () => window.cancelAnimationFrame(frame)
+  }, [onPreviewMetadataLoaded, previewFrameSize])
+  const draftGroup = draft?.layout && outputCanvasGeometry
+    ? boundingLayoutRect(previewLayouts.map((layout, index) => draft.layout?.[layout.item.id] ?? {
+      x: (previewCells[index]?.left ?? 0) / Math.max(1, outputCanvasGeometry.width),
+      y: (previewCells[index]?.top ?? 0) / Math.max(1, outputCanvasGeometry.height),
+      width: (previewCells[index]?.width ?? 0) / Math.max(1, outputCanvasGeometry.width),
+      height: (previewCells[index]?.height ?? 0) / Math.max(1, outputCanvasGeometry.height),
+    }))
+    : null
+  const displayedGroupPixelRect = draftGroup && outputCanvasGeometry ? {
+    left: draftGroup.x * outputCanvasGeometry.width,
+    top: draftGroup.y * outputCanvasGeometry.height,
+    width: draftGroup.width * outputCanvasGeometry.width,
+    height: draftGroup.height * outputCanvasGeometry.height,
+  } : activeGroupPixelRect
   return (
     <>
       <div
-        ref={previewScreenRef}
-        className={`frame-image-box video-box editor-preview-screen ${cropEditing ? 'crop-editing' : ''}`}
-        style={{ height: previewSize.height }}
+        ref={previewStageRef}
+        className="editor-preview-stage"
+        style={previewFrameSize ? {
+          width: previewFrameSize.width,
+          height: previewFrameSize.height,
+        } : undefined}
       >
+        <div
+          ref={previewScreenRef}
+          className={`frame-image-box video-box editor-preview-screen ${cropEditing ? 'crop-editing' : ''}`}
+          style={{ width: '100%', height: '100%', minHeight: 0 }}
+        >
         <div
           ref={outputCanvasRef}
           className="editor-output-canvas"
           style={outputCanvasGeometry ? {
             left: outputCanvasGeometry.left,
             top: outputCanvasGeometry.top,
+            right: 'auto',
+            bottom: 'auto',
             width: outputCanvasGeometry.width,
             height: outputCanvasGeometry.height,
             background: settings.canvasBackground === 'white' ? '#fff' : '#000',
@@ -150,8 +203,15 @@ export function MergePreviewCanvas({
           {previewLayouts.length > 0 ? previewLayouts.map((layout, index) => {
             const info = metadata[normalizePath(layout.item.path)]
             const cell = previewCells[index]
-            const localCell = cell
-              ? { left: 0, top: 0, width: cell.width, height: cell.height }
+            const layoutDraft = draft?.layout?.[layout.item.id]
+            const displayedCell = cell && layoutDraft && outputCanvasGeometry ? {
+              left: layoutDraft.x * outputCanvasGeometry.width,
+              top: layoutDraft.y * outputCanvasGeometry.height,
+              width: layoutDraft.width * outputCanvasGeometry.width,
+              height: layoutDraft.height * outputCanvasGeometry.height,
+            } : cell
+            const localCell = displayedCell
+              ? { left: 0, top: 0, width: displayedCell.width, height: displayedCell.height }
               : undefined
             return (
               <div
@@ -164,11 +224,11 @@ export function MergePreviewCanvas({
                 title={activeLayoutCount > 1
                   ? `${layout.item.name}：拖动可调整画面位置`
                   : layout.item.name}
-                style={cell ? {
-                  left: cell.left,
-                  top: cell.top,
-                  width: cell.width,
-                  height: cell.height,
+                style={displayedCell ? {
+                  left: displayedCell.left,
+                  top: displayedCell.top,
+                  width: displayedCell.width,
+                  height: displayedCell.height,
                 } : undefined}
                 onPointerDown={(event) => onPreviewLayoutPointerDown(event, layout, index)}
               >
@@ -215,8 +275,8 @@ export function MergePreviewCanvas({
               key={item.id}
               className={`editor-preview-text ${selectedTextId === item.id ? 'selected' : ''}`}
               style={{
-                left: item.x * outputCanvasGeometry.width,
-                top: item.y * outputCanvasGeometry.height,
+                left: (draft?.text?.[item.id]?.x ?? item.x) * outputCanvasGeometry.width,
+                top: (draft?.text?.[item.id]?.y ?? item.y) * outputCanvasGeometry.height,
                 fontSize: clamp(
                   item.fontSize / Math.max(1, settings.width) * outputCanvasGeometry.width,
                   10,
@@ -237,10 +297,10 @@ export function MergePreviewCanvas({
             </div>
           ))}
 
-          {groupEditing && !cropEditing && activeGroupPixelRect && (
+          {groupEditing && !cropEditing && displayedGroupPixelRect && (
             <div
               className="editor-group-selection"
-              style={activeGroupPixelRect}
+              style={displayedGroupPixelRect}
               onPointerDown={(event) => onGroupLayoutPointerDown(event, 'move')}
             >
               <span>组合画面</span>
@@ -268,12 +328,12 @@ export function MergePreviewCanvas({
               onPointerDown={(event) => onCropPointerDown(event, 'draw')}
             >
               <MergeCropMasks
-                rect={cropRectFromClip(previewClip, cropGeometry)}
+                rect={draft?.crop?.id === previewClip.id ? draft.crop.rect : cropRectFromClip(previewClip, cropGeometry)}
                 geometry={cropGeometry}
               />
               <div
                 className="video-crop-selection"
-                style={cropSelectionStyle(cropRectFromClip(previewClip, cropGeometry), cropGeometry)}
+                style={cropSelectionStyle(draft?.crop?.id === previewClip.id ? draft.crop.rect : cropRectFromClip(previewClip, cropGeometry), cropGeometry)}
                 onPointerDown={(event) => onCropPointerDown(event, 'move')}
               >
                 <span>导出区域</span>
@@ -301,11 +361,6 @@ export function MergePreviewCanvas({
             <RotateCcw />重置裁剪框
           </button>
         )}
-        <div className="editor-preview-size-tools">
-          <button type="button" title="还原播放窗口默认尺寸" onClick={onResetPreviewSize}>
-            <RotateCcw />还原窗口
-          </button>
-        </div>
         <button
           type="button"
           className="editor-preview-resize-handle"
@@ -313,15 +368,13 @@ export function MergePreviewCanvas({
           title="按住鼠标左键拖动调整播放窗口尺寸"
           onPointerDown={onPreviewResizePointerDown}
         />
+        </div>
       </div>
 
       <MergePlaybackControls
-        clock={playbackClock}
         playing={playing}
         totalDuration={totalDuration}
         previewStart={previewStart}
-        previewDuration={previewDuration}
-        formatTime={formatPreciseTime}
         onSeek={onSeek}
         onTogglePlayback={onTogglePlayback}
         onNudge={onNudge}

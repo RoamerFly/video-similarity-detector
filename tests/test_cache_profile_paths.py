@@ -6,7 +6,7 @@ import pytest
 
 from scripts import batch_compare
 
-from video_sim.embedder import FrameEmbeddingCache
+from video_sim.embedder import FrameEmbeddingCache, embedding_runtime_fingerprint
 from video_sim.preprocess import PreprocessConfig
 
 
@@ -67,6 +67,7 @@ def test_frame_cache_profiles_use_short_numbered_directories(tmp_path: Path):
     assert profile["max_gap_sec"] == 45.0
     assert profile["frame_step"] == 30
     assert profile["profile_key"]
+    assert profile["embedding_runtime"]
 
     same_path = FrameEmbeddingCache.get_cache_path(
         video,
@@ -87,6 +88,44 @@ def test_frame_cache_profiles_use_short_numbered_directories(tmp_path: Path):
         frame_step=30,
     )
     assert second_path.parent.name == "2"
+
+
+def test_frame_cache_runtime_fingerprint_prevents_dtype_reuse(tmp_path: Path):
+    video = tmp_path / "runtime.mp4"
+    video.write_bytes(b"video")
+    config = PreprocessConfig()
+    metadata = FrameEmbeddingCache.build_metadata(
+        video,
+        skip_threshold=0.4,
+        max_gap_sec=45.0,
+        frame_step=30,
+        preprocess_config=config,
+        embedding_runtime="precision=fp32",
+    )
+    expected = FrameEmbeddingCache.build_metadata(
+        video,
+        skip_threshold=0.4,
+        max_gap_sec=45.0,
+        frame_step=30,
+        preprocess_config=config,
+        embedding_runtime="precision=fp16",
+    )
+    assert not FrameEmbeddingCache.is_metadata_fresh(metadata, expected)
+
+
+def test_runtime_fingerprint_is_portable_across_devices(monkeypatch):
+    assert embedding_runtime_fingerprint("cpu", autocast_enabled=False) == (
+        embedding_runtime_fingerprint("cuda", autocast_enabled=False)
+    )
+
+    monkeypatch.setattr("video_sim.embedder.torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("video_sim.embedder.torch.cuda.is_bf16_supported", lambda: True)
+    assert embedding_runtime_fingerprint(
+        "cuda", autocast_enabled=True, autocast_dtype="float16"
+    ) == "precision=fp16"
+    assert embedding_runtime_fingerprint(
+        "cuda", autocast_enabled=True, autocast_dtype="bfloat16"
+    ) == "precision=bf16"
 
 
 def test_frame_cache_round_trip_does_not_require_pickle(tmp_path: Path):

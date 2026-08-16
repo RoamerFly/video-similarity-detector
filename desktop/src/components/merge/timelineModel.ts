@@ -6,14 +6,7 @@ import type {
 } from '@/stores/mergeStore'
 import { clamp, normalizePath } from './mergeFormat'
 
-export const timelinePixelsPerSecond = 12
 export const timelineMinimumWidth = 720
-export const timelineZoomDefault = 100
-export const timelineZoomMinimum = -1000
-export const timelineZoomMaximum = 200
-export const timelineZoomStep = 1
-export const timelineMinimumPixelsPerSecond = 2000 / 3600
-export const timelineMaximumPixelsPerSecond = timelinePixelsPerSecond * 20
 
 export interface ClipLayout {
   item: MergeQueueItem
@@ -88,6 +81,57 @@ export function playbackStructureKey(
     .map((item) => item.id)
     .join('|')
   return `${videoKey}::${textKey}`
+}
+
+export function createTimelinePlaybackIndex(
+  layouts: ClipLayout[],
+  textItems: MergeTextItem[],
+  trackIds: string[],
+  audioLayouts: AudioClipLayout[] = [],
+) {
+  const trackOrder = new Map(trackIds.map((trackId, index) => [trackId, index]))
+  const videos = createIntervalIndex(layouts, (layout) => layout.start, (layout) => layout.end)
+  const texts = createIntervalIndex(textItems, (item) => item.startTime, (item) => item.startTime + item.duration)
+  const audios = createIntervalIndex(audioLayouts, (layout) => layout.start, (layout) => layout.end)
+  const activeVideosAt = (time: number) => videos.query(time).sort((left, right) => (
+    (trackOrder.get(left.trackId) ?? 0) - (trackOrder.get(right.trackId) ?? 0)
+    || left.start - right.start
+  ))
+  return {
+    activeVideosAt,
+    activeAudiosAt: (time: number) => audios.query(time),
+    structureKeyAt(time: number) {
+      const videoKey = activeVideosAt(time).map((layout) => layout.item.id).join('|')
+      const textKey = texts.query(time).map((item) => item.id).join('|')
+      return `${videoKey}::${textKey}`
+    },
+  }
+}
+
+function createIntervalIndex<T>(items: T[], startOf: (item: T) => number, endOf: (item: T) => number) {
+  const sorted = [...items].sort((left, right) => startOf(left) - startOf(right))
+  const prefixMaxEnd: number[] = []
+  sorted.forEach((item, index) => {
+    prefixMaxEnd[index] = Math.max(index === 0 ? Number.NEGATIVE_INFINITY : prefixMaxEnd[index - 1], endOf(item))
+  })
+  return {
+    query(time: number) {
+      let low = 0
+      let high = sorted.length
+      while (low < high) {
+        const middle = (low + high) >>> 1
+        if (startOf(sorted[middle]) <= time) low = middle + 1
+        else high = middle
+      }
+      const active: T[] = []
+      for (let index = low - 1; index >= 0; index -= 1) {
+        if (prefixMaxEnd[index] <= time) break
+        const item = sorted[index]
+        if (time >= startOf(item) && time < endOf(item)) active.push(item)
+      }
+      return active.reverse()
+    },
+  }
 }
 
 export function resolveTimelineDragStart<
@@ -184,25 +228,30 @@ export function timelineLength(duration: number, pixelsPerSecond: number) {
   return `${Math.max(2, duration * pixelsPerSecond)}px`
 }
 
-export function normalizeTimelineZoom(value: number) {
-  if (!Number.isFinite(value)) return timelineZoomDefault
-  return clamp(value, timelineZoomMinimum, timelineZoomMaximum)
+/**
+ * Returns the logical time window that needs DOM nodes.  The range is kept
+ * independent of React so scrolling/virtualization behavior is deterministic
+ * and cheap to test.
+ */
+export function timelineVisibleRange(
+  scrollLeft: number,
+  viewportWidth: number,
+  totalDuration: number,
+  pixelsPerSecond: number,
+  overscanPixels: number,
+) {
+  if (viewportWidth <= 0 || pixelsPerSecond <= 0) return { start: 0, end: totalDuration }
+  return {
+    start: Math.max(0, (scrollLeft - overscanPixels) / pixelsPerSecond),
+    end: Math.min(totalDuration, (scrollLeft + viewportWidth + overscanPixels) / pixelsPerSecond),
+  }
 }
 
-export function timelinePixelsPerSecondForZoom(zoomPercent: number) {
-  const zoom = normalizeTimelineZoom(zoomPercent)
-  if (zoom <= timelineZoomDefault) {
-    return timelineMinimumPixelsPerSecond
-      * Math.pow(
-        timelinePixelsPerSecond / timelineMinimumPixelsPerSecond,
-        zoom / timelineZoomDefault,
-      )
-  }
-  return timelinePixelsPerSecond
-    * Math.pow(
-      timelineMaximumPixelsPerSecond / timelinePixelsPerSecond,
-      (zoom - timelineZoomDefault) / timelineZoomDefault,
-    )
+export function timelineLayoutsInRange<T extends { start: number; end: number }>(
+  layouts: T[],
+  range: { start: number; end: number },
+) {
+  return layouts.filter((layout) => layout.end >= range.start && layout.start <= range.end)
 }
 
 export function canSplitClipAt(

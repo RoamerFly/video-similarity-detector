@@ -21,10 +21,15 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from video_sim.embedder import FrameEmbeddingCache, VideoEmbedder, embed_frames_with_cache
+from video_sim.embedder import (
+    FrameEmbeddingCache,
+    VideoEmbedder,
+    embed_frames_with_cache,
+)
 from video_sim.frame_sampler import DynamicFrameSampler
 from video_sim.matcher import ContainmentResult, compare_videos_bidirectional
 from video_sim.preprocess import PreprocessConfig, add_preprocess_args
+from video_sim.segmenter import aggregate_bidirectional_segments
 
 
 def ensure_video_indexed(
@@ -74,6 +79,7 @@ def ensure_video_indexed(
             skip_threshold=skip_threshold,
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
+            embedding_runtime=embedder.embedding_runtime_fingerprint(),
         )
     if cache is not None:
         print(f"  Loading cache: {cache_path}")
@@ -92,26 +98,22 @@ def ensure_video_indexed(
         cache_dir=cache_dir,
         preprocess_config=preprocess_config,
     )
-    retained_frames = sampler.sample(video_path)
-    print(f"    Retained {len(retained_frames)} frames")
-
-    if len(retained_frames) == 0:
-        print(f"Error: No frames retained from {video_path}")
-        sys.exit(1)
-
     print(f"    Extracting embeddings...")
     cache = embed_frames_with_cache(
         video_path=video_path,
-        retained_frames=retained_frames,
-            embedder=embedder,
-            cache_dir=cache_dir,
-            force=True,  # Always force when we get here (either force=True or cache doesn't exist)
-            preprocess_config=preprocess_config,
-            skip_threshold=skip_threshold,
-            max_gap_sec=max_gap_sec,
-            frame_step=frame_step,
-            source_duration_sec=sampler.source_duration_sec,
-        )
+        retained_frames=None,
+        sampler=sampler,
+        embedder=embedder,
+        cache_dir=cache_dir,
+        force=True,  # Always force when we get here (either force=True or cache doesn't exist)
+        preprocess_config=preprocess_config,
+        skip_threshold=skip_threshold,
+        max_gap_sec=max_gap_sec,
+        frame_step=frame_step,
+        source_duration_sec=sampler.source_duration_sec,
+        embedding_runtime=embedder.embedding_runtime_fingerprint(),
+    )
+    print(f"    Retained {len(cache.frame_indices)} frames")
     print(f"    Saved cache: {cache_path}")
 
     return cache
@@ -249,6 +251,17 @@ def main():
         match_threshold=args.match_threshold,
         top_k=args.top_k,
     )
+    # Keep the single-pair CLI on the same direction-aware segment path as
+    # batch_compare: aggregate A→B and B→A independently, then normalize and
+    # fuse them in A/B coordinates.
+    segments = aggregate_bidirectional_segments(
+        result.matches_a_to_b,
+        result.matches_b_to_a,
+        source_timestamps_a=cache_a.timestamps,
+        source_timestamps_b=cache_b.timestamps,
+        total_source_duration_a=result.duration_a,
+        total_source_duration_b=result.duration_b,
+    )
 
     # Print summary to console
     print("\n" + "=" * 60)
@@ -265,6 +278,7 @@ def main():
     print(f"relation:               {result.relation}")
     print(f"matches_a_to_b:         {len(result.matches_a_to_b)}")
     print(f"matches_b_to_a:         {len(result.matches_b_to_a)}")
+    print(f"matched_segments:       {len(segments)}")
     print("-" * 60)
     print("Raw similarity statistics (best-match per frame):")
     print(f"  max:   {result.raw_similarity_max:.4f}")
@@ -277,8 +291,10 @@ def main():
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        report = result.to_dict()
+        report["segments"] = [segment.to_dict() for segment in segments]
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+            json.dump(report, f, indent=2, ensure_ascii=False)
         print(f"\nSaved report to: {output_path}")
 
 
