@@ -11948,3 +11948,55 @@ select {
     grid-row: auto;
   }
 }
+
+/* Final results-page overflow ownership: keep the page at a fixed viewport
+   height and let the table shell scroll internally, so the pagination row is
+   always visible at the bottom. Without this, the adaptive viewport pass grows
+   the page to its content height (height: auto) while the compact-shell keeps
+   .app-main at overflow: hidden, which clips the pagination and blocks
+   scrolling. */
+.results-page.route-fill {
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  align-content: stretch;
+}
+
+.results-page.route-fill .results-summary-panel {
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.results-page.route-fill .results-table-panel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.results-page.route-fill .results-table-shell {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.results-page.route-fill .pagination-row {
+  flex: 0 0 auto;
+}
+
+/* Final compare-page overflow ownership: pin the frame-comparison page (and its
+   duplicate-file variant) to the viewport height so the page's own overflow: auto
+   engages, instead of growing to content height and being clipped by the compact
+   shell's .app-main { overflow: hidden }. This keeps the frame list and matched
+   segments reachable by scrolling. */
+.compare-page.route-fill {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
