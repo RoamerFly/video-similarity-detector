@@ -287,15 +287,17 @@ class TestDynamicFrameSamplerBasic:
             frame_step=30,
             cache_dir=tmp_path,
         )
-        expected = [MagicMock()]
+        def _fake_opencv(video_path, progress_callback, retained_frames, retained_callback):
+            retained_frames.append(MagicMock())
+            return retained_frames
 
         with (
-            patch.object(sampler, "_sample_with_opencv", return_value=expected) as opencv,
+            patch.object(sampler, "_sample_with_opencv", side_effect=_fake_opencv) as opencv,
             patch.object(sampler, "_sample_with_decord") as decord,
         ):
             retained = sampler.sample(video_path)
 
-        assert retained is expected
+        assert len(retained) == 1
         opencv.assert_called_once()
         decord.assert_not_called()
 
@@ -308,15 +310,17 @@ class TestDynamicFrameSamplerBasic:
             frame_step=30,
             cache_dir=tmp_path,
         )
-        expected = [MagicMock()]
+        def _fake_decord(video_path, progress_callback, retained_frames, retained_callback):
+            retained_frames.append(MagicMock())
+            return retained_frames
 
         with (
             patch.object(sampler, "_sample_with_opencv", side_effect=ValueError("open failed")),
-            patch.object(sampler, "_sample_with_decord", return_value=expected) as decord,
+            patch.object(sampler, "_sample_with_decord", side_effect=_fake_decord) as decord,
         ):
             retained = sampler.sample(video_path)
 
-        assert retained is expected
+        assert len(retained) == 1
         decord.assert_called_once()
 
     def _create_test_video(self, video_path: Path, num_frames: int):
