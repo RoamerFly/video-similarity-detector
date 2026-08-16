@@ -553,7 +553,13 @@ export function AnalyzePage() {
     setProgress(0, '正在读取任务配置', { subProgress: null, subStage: '' })
     setErrorMessage('')
     try {
-      const selectedVideos = await handleScan(config.videoDir)
+      // 如果视频目录自上次扫描后没有变化，直接复用已有的扫描结果，
+      // 避免“新建任务”每次都重新扫描整个目录。
+      const scanState = useAnalysisStore.getState()
+      const dirUnchanged = normalizeVideoPath(config.videoDir) === normalizeVideoPath(scanState.scannedDir)
+      const selectedVideos = dirUnchanged && scanState.scannedVideos.length > 0
+        ? scanState.scannedVideos
+        : await handleScan(config.videoDir)
       if (selectedVideos.length < 2) {
         setErrorMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
         setScanMessage('当前扫描范围内至少需要 2 个视频才能新建任务。')
