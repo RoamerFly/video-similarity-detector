@@ -66,6 +66,44 @@ interface AnalysisState {
 }
 
 const maxRetainedLogs = 5000
+const logFlushIntervalMs = 200
+
+// 日志批量合并：指纹判重与相似度分析都会逐视频打印日志，若每条日志都触发一次
+// set()，前端会高频整页重渲染，导致任务执行期间卡顿、无法切换页面。这里把
+// logFlushIntervalMs 内的日志攒成一批，统一刷入 store，收敛为低频状态更新。
+let pendingLogs: AnalysisLog[] = []
+let pendingLogsTotal = 0
+let logFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelLogFlush() {
+  if (logFlushTimer !== null) {
+    clearTimeout(logFlushTimer)
+    logFlushTimer = null
+  }
+}
+
+function flushPendingLogs() {
+  logFlushTimer = null
+  if (pendingLogs.length === 0) return
+  const batch = pendingLogs
+  const batchTotal = pendingLogsTotal
+  pendingLogs = []
+  pendingLogsTotal = 0
+  useAnalysisStore.setState((state) => {
+    const totalLogCount = state.totalLogCount + batchTotal
+    const logs = [...state.logs, ...batch].slice(-maxRetainedLogs)
+    return {
+      logs,
+      totalLogCount,
+      logsDropped: Math.max(0, totalLogCount - logs.length),
+    }
+  })
+}
+
+function scheduleLogFlush() {
+  if (logFlushTimer !== null) return
+  logFlushTimer = setTimeout(flushPendingLogs, logFlushIntervalMs)
+}
 
 const initialAnalysisConfig: AnalysisConfig = {
   videoDir: defaultSettings.videoDir,
@@ -176,17 +214,17 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       }
     }),
   setScanMessage: (scanMessage) => set({ scanMessage }),
-  appendLog: (log) =>
-    set((state) => {
-      const totalLogCount = state.totalLogCount + 1
-      const logs = [...state.logs, log].slice(-maxRetainedLogs)
-      return {
-        logs,
-        totalLogCount,
-        logsDropped: Math.max(0, totalLogCount - logs.length),
-      }
-    }),
-  clearLogs: () => set({ logs: [], totalLogCount: 0, logsDropped: 0 }),
+  appendLog: (log) => {
+    pendingLogs.push(log)
+    pendingLogsTotal += 1
+    scheduleLogFlush()
+  },
+  clearLogs: () => {
+    cancelLogFlush()
+    pendingLogs = []
+    pendingLogsTotal = 0
+    set({ logs: [], totalLogCount: 0, logsDropped: 0 })
+  },
   setReportPaths: (reportPaths) => set({ reportPaths }),
   setResultSummary: (resultSummary) => set({ resultSummary }),
   setSelectedPair: (selectedPair) => set({ selectedPair }),
@@ -222,7 +260,10 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       }
       return { scannedVideos, selectedVideoPaths }
     }),
-  resetRunState: () =>
+  resetRunState: () => {
+    cancelLogFlush()
+    pendingLogs = []
+    pendingLogsTotal = 0
     set({
       runningStatus: 'idle',
       progress: 0,
@@ -247,7 +288,8 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       videoMultiSelect: false,
       isScanning: false,
       activeSubpage: 'analysis',
-    }),
+    })
+  },
 }))
 
 function normalizeProgress(progress: number) {

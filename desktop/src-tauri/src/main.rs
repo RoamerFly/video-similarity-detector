@@ -5690,11 +5690,6 @@ where
     thread::spawn(move || {
         let reader = BufReader::new(stream);
         let mut decoder_warnings = DecoderWarningAccumulator::default();
-        // 比较阶段会逐帧回报进度，若每帧都下发一次 analysis-progress 事件，
-        // 前端会高频整页重渲染，导致任务执行期间界面卡顿、无法切换页面。
-        // 这里按时间节流（100ms），并始终放行明显跳变与最终进度。
-        let mut last_progress_emit_ms: u64 = 0;
-        let mut last_emitted_progress_centi: u64 = 0;
         for line in reader.lines().map_while(Result::ok) {
             last_activity.store(timestamp_millis_u64(), Ordering::Relaxed);
             let cleaned_line = strip_ansi_sequences(&line);
@@ -5721,24 +5716,17 @@ where
                 } else {
                     parsed.progress.max(previous_progress).min(99.99)
                 };
-                let progress_centi = progress_to_centi(progress);
-                current_progress.store(progress_centi, Ordering::Relaxed);
-
-                let now_ms = timestamp_millis_u64();
-                let is_final = progress >= 99.99;
-                let jumped = progress_centi.saturating_sub(last_emitted_progress_centi) >= 100;
-                let due = now_ms.saturating_sub(last_progress_emit_ms) >= 100;
-                if is_final || jumped || due {
-                    emit_progress_detail(
-                        &app,
-                        &parsed.stage,
-                        progress,
-                        parsed.sub_stage.as_deref(),
-                        parsed.sub_progress,
-                    );
-                    last_progress_emit_ms = now_ms;
-                    last_emitted_progress_centi = progress_centi;
-                }
+                // current_progress 始终记录最新进度（不节流），供取消/恢复等读取；
+                // 实际的 analysis-progress 事件下发由 emit_progress_detail 内的
+                // 全局节流统一收敛。
+                current_progress.store(progress_to_centi(progress), Ordering::Relaxed);
+                emit_progress_detail(
+                    &app,
+                    &parsed.stage,
+                    progress,
+                    parsed.sub_stage.as_deref(),
+                    parsed.sub_progress,
+                );
                 continue;
             }
             if should_hide_analysis_log_line(&cleaned_line) {
@@ -5965,6 +5953,13 @@ fn emit_progress<R: tauri::Runtime>(app: &tauri::AppHandle<R>, stage: &str, prog
     emit_progress_detail(app, stage, progress, None, None);
 }
 
+// 全局进度节流。所有会产生 analysis-progress 事件的调用路径（Python 子进程逐帧回报、
+// Rust 原生的指纹判重逐文件回报等）最终都汇聚到 emit_progress_detail，这里统一按时间
+// 节流（100ms 至多一次），避免前端高频整页重渲染导致任务执行期间卡顿、无法切换页面。
+// 始终放行「最终进度（>=100）」与「≥1% 的明显跳变」，保证收尾与阶段跃迁的即时反馈。
+static LAST_PROGRESS_EMIT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_PROGRESS_EMIT_CENTI: AtomicU64 = AtomicU64::new(0);
+
 fn emit_progress_detail<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     stage: &str,
@@ -5972,6 +5967,19 @@ fn emit_progress_detail<R: tauri::Runtime>(
     sub_stage: Option<&str>,
     sub_progress: Option<f64>,
 ) {
+    let now_ms = timestamp_millis_u64();
+    let progress_centi = progress_to_centi(progress);
+    let last_ms = LAST_PROGRESS_EMIT_MS.load(Ordering::Relaxed);
+    let last_centi = LAST_PROGRESS_EMIT_CENTI.load(Ordering::Relaxed);
+    let is_final = progress >= 100.0;
+    let jumped = progress_centi.saturating_sub(last_centi) >= 100;
+    let due = now_ms.saturating_sub(last_ms) >= 100;
+    if !is_final && !jumped && !due {
+        return;
+    }
+    LAST_PROGRESS_EMIT_MS.store(now_ms, Ordering::Relaxed);
+    LAST_PROGRESS_EMIT_CENTI.store(progress_centi, Ordering::Relaxed);
+
     let _ = app.emit(
         "analysis-progress",
         AnalysisProgressPayload {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -111,6 +111,63 @@ interface PendingTaskDraft {
  * `store.isScanning` with the real scan state.
  */
 let scanActuallyInProgress = false
+
+interface ScannedVideoListProps {
+  videos: VideoFile[]
+  videoMultiSelect: boolean
+  onToggle: (video: VideoFile) => void
+  onContextMenu: (event: MouseEvent, video: VideoFile) => void
+}
+
+/**
+ * 已扫描视频列表。单独用 React.memo 隔离：父组件 AnalyzePage 在任务执行期间
+ * 会随进度/日志事件高频重渲染（即便已节流），若每次都重建数千行视频列表会
+ * 显著拖慢主线程。这里只在 videos / videoMultiSelect / 选中集合变化时才重渲染，
+ * 进度与日志更新不再触发列表重建。
+ */
+const ScannedVideoList = memo(function ScannedVideoList({
+  videos,
+  videoMultiSelect,
+  onToggle,
+  onContextMenu,
+}: ScannedVideoListProps) {
+  const selectedVideoPaths = useAnalysisStore((state) => state.selectedVideoPaths)
+  return (
+    <div className="video-scroll-list" role="list" aria-label="已扫描视频">
+      {videos.map((video) => {
+        const selected = selectedVideoPaths.has(normalizeVideoPath(video.path))
+        return (
+          <button
+            type="button"
+            role="listitem"
+            className={selected ? 'video-list-row selected' : 'video-list-row'}
+            title={video.path}
+            key={video.path}
+            onClick={() => {
+              if (videoMultiSelect) onToggle(video)
+            }}
+            onContextMenu={(event) => onContextMenu(event, video)}
+          >
+            {videoMultiSelect ? (
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={() => onToggle(video)}
+                onClick={(event) => event.stopPropagation()}
+                aria-label={`选择 ${video.name}`}
+              />
+            ) : null}
+            <span className="video-row-main">
+              <strong>{video.name}</strong>
+              <small>{video.path}</small>
+            </span>
+            <span className="video-row-meta">{formatBytes(video.sizeBytes)}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+})
 
 export function AnalyzePage() {
   const navigate = useNavigate()
@@ -955,15 +1012,18 @@ export function AnalyzePage() {
     }
   }
 
-  function toggleVideoSelection(video: VideoFile) {
-    const key = normalizeVideoPath(video.path)
-    setSelectedVideoPaths((current) => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
+  const toggleVideoSelection = useCallback(
+    (video: VideoFile) => {
+      const key = normalizeVideoPath(video.path)
+      setSelectedVideoPaths((current) => {
+        const next = new Set(current)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    },
+    [setSelectedVideoPaths],
+  )
 
   function selectAllVideos() {
     setSelectedVideoPaths(new Set(filteredVideos.map((video) => normalizeVideoPath(video.path))))
@@ -973,14 +1033,17 @@ export function AnalyzePage() {
     setSelectedVideoPaths(new Set())
   }
 
-  function openVideoContextMenu(event: MouseEvent, video: VideoFile) {
-    event.preventDefault()
-    setVideoContextMenu({
-      x: event.clientX,
-      y: event.clientY,
-      video,
-    })
-  }
+  const openVideoContextMenu = useCallback(
+    (event: MouseEvent, video: VideoFile) => {
+      event.preventDefault()
+      setVideoContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        video,
+      })
+    },
+    [setVideoContextMenu],
+  )
 
   function selectedVideosForAction(fallback?: VideoFile) {
     if (videoMultiSelect && selectedVideoPaths.size > 0) {
@@ -1431,39 +1494,12 @@ export function AnalyzePage() {
                   </button>
                 </div>
               </div>
-              <div className="video-scroll-list" role="list" aria-label="已扫描视频">
-                {filteredVideos.map((video) => {
-                  const selected = selectedVideoPaths.has(normalizeVideoPath(video.path))
-                  return (
-                    <button
-                      type="button"
-                      role="listitem"
-                      className={selected ? 'video-list-row selected' : 'video-list-row'}
-                      title={video.path}
-                      key={video.path}
-                      onClick={() => {
-                        if (videoMultiSelect) toggleVideoSelection(video)
-                      }}
-                      onContextMenu={(event) => openVideoContextMenu(event, video)}
-                    >
-                      {videoMultiSelect ? (
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          onChange={() => toggleVideoSelection(video)}
-                          onClick={(event) => event.stopPropagation()}
-                          aria-label={`选择 ${video.name}`}
-                        />
-                      ) : null}
-                      <span className="video-row-main">
-                        <strong>{video.name}</strong>
-                        <small>{video.path}</small>
-                      </span>
-                      <span className="video-row-meta">{formatBytes(video.sizeBytes)}</span>
-                    </button>
-                  )
-                })}
-              </div>
+              <ScannedVideoList
+                videos={filteredVideos}
+                videoMultiSelect={videoMultiSelect}
+                onToggle={toggleVideoSelection}
+                onContextMenu={openVideoContextMenu}
+              />
               {isScanning && (
                 <div className="scan-progress-overlay" role="status" aria-live="polite">
                   <RefreshCw size={20} className="spin-slow" />
