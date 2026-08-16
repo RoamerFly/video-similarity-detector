@@ -148,7 +148,7 @@ export function AppLayout() {
         store.setRunningStatus('success')
         store.setProgress(100, '分析完成', { subProgress: 100, subStage: '当前子任务完成' })
         store.setErrorMessage('')
-        navigate('/results')
+        navigate('/results', { state: { autoLoadReport: true } })
       },
       onStageFinished: () => {
         const store = useAnalysisStore.getState()

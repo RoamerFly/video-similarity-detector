@@ -855,6 +855,13 @@ export async function readReport(path: string) {
   })
 }
 
+export async function readReportOverview(path: string) {
+  if (!hasTauriRuntime()) throw new Error('当前环境不可用：需要在 Tauri 应用中读取报告。')
+  return invoke<unknown>('read_report_overview', {
+    request: { path },
+  })
+}
+
 export async function readTextFile(path: string) {
   if (!hasTauriRuntime()) throw new Error('当前环境不可用：需要在 Tauri 应用中读取文件。')
   return invoke<string>('read_text_file', {

@@ -20,6 +20,7 @@ type CompareContextSide = 'source' | 'target'
 const mediaPathStatusCache = new Map<string, PathStatus>()
 const framePreviewCache = new Map<string, { dataUrl: string; error: string }>()
 const comparisonFrameCache = new Map<string, { dataUrl: string; error: string }>()
+const EMPTY_FRAME_MATCHES: ReportFrameMatch[] = []
 
 export function ComparePage() {
   const navigate = useNavigate()
@@ -42,13 +43,15 @@ export function ComparePage() {
   const targetVideoRef = useRef<HTMLVideoElement | null>(null)
   const addMergeVideo = useMergeStore((state) => state.addVideo)
   const addMergeVideos = useMergeStore((state) => state.addVideos)
-
+  // 结果总览页已把完整报告（含每个视频对的逐帧明细）加载进内存，selectedPair.frameMatches
+  // 即为该对的逐帧明细。对比视图只读取内存中的明细，绝不重新读盘 / 重新解析报告——
+  // 这是对比视图不再卡死的根本保证。
+  const resolvedFrameMatches = selectedPair?.frameMatches ?? EMPTY_FRAME_MATCHES
   const matches = useMemo(() => {
-    const rows = selectedPair?.frameMatches ?? []
-    return rows
+    return resolvedFrameMatches
       .filter((match) => direction === 'all' || match.direction === direction)
       .sort((left, right) => (right.similarity ?? -1) - (left.similarity ?? -1))
-  }, [direction, selectedPair?.frameMatches])
+  }, [direction, resolvedFrameMatches])
   const matchSections = useMemo(() => {
     const sections = [
       {

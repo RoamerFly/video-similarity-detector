@@ -3817,91 +3817,123 @@ fn read_report(app: tauri::AppHandle, request: ReportPathRequest) -> Result<Valu
     serde_json::from_str(&content).map_err(|e| format!("解析报告 JSON 失败: {e}"))
 }
 
+/// 读取报告文件并解析为 JSON 对象，完整返回（含每个视频对的逐帧明细 matches_a_to_b /
+/// matches_b_to_a）。结果总览页一次性把整份报告加载进内存，对比视图直接从内存中的
+/// selectedPair.frameMatches 读取明细，绝不重新读盘、绝不重新解析报告。
+///
+/// 报告文件可能非常大（数 MB ~ 数百 MB），读取 + 反序列化都是阻塞操作，若在同步命令里
+/// 执行会卡死主线程（表现为界面冻结、无法退出）。这里改为 async + spawn_blocking，让磁盘
+/// 读取与 JSON 解析在阻塞线程池中完成，主线程始终保持响应。
 #[tauri::command]
-fn read_text_file(app: tauri::AppHandle, request: ReportPathRequest) -> Result<String, String> {
-    let root = resolve_project_root(&app)?;
-    let path = resolve_user_path(&root, &request.path);
-    fs::read_to_string(&path).map_err(|e| format!("读取文件失败 {}: {e}", path.display()))
-}
-
-#[tauri::command]
-fn path_status(app: tauri::AppHandle, request: ReportPathRequest) -> Result<PathStatus, String> {
-    let root = resolve_project_root(&app)?;
-    let raw_path = PathBuf::from(&request.path);
-    let resolved_path = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        root.join(raw_path)
-    };
-    let normalized_path = resolved_path
-        .canonicalize()
-        .unwrap_or_else(|_| resolved_path.clone());
-    let metadata = fs::metadata(&normalized_path).ok();
-
-    Ok(PathStatus {
-        exists: metadata.is_some(),
-        is_file: metadata.as_ref().is_some_and(|item| item.is_file()),
-        normalized_path: path_to_string(normalized_path),
+async fn read_report_overview(app: tauri::AppHandle, request: ReportPathRequest) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_project_root(&app)?;
+        let path = resolve_user_path(&root, &request.path);
+        let content = fs::read_to_string(&path).map_err(|e| format!("读取报告失败: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("解析报告 JSON 失败: {e}"))
     })
+    .await
+    .map_err(|e| format!("读取报告线程异常: {e}"))?
 }
 
 #[tauri::command]
-fn authorize_media_path(
+async fn read_text_file(app: tauri::AppHandle, request: ReportPathRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_project_root(&app)?;
+        let path = resolve_user_path(&root, &request.path);
+        fs::read_to_string(&path).map_err(|e| format!("读取文件失败 {}: {e}", path.display()))
+    })
+    .await
+    .map_err(|e| format!("读取文件线程异常: {e}"))?
+}
+
+#[tauri::command]
+async fn path_status(app: tauri::AppHandle, request: ReportPathRequest) -> Result<PathStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_project_root(&app)?;
+        let raw_path = PathBuf::from(&request.path);
+        let resolved_path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            root.join(raw_path)
+        };
+        let normalized_path = resolved_path
+            .canonicalize()
+            .unwrap_or_else(|_| resolved_path.clone());
+        let metadata = fs::metadata(&normalized_path).ok();
+
+        Ok(PathStatus {
+            exists: metadata.is_some(),
+            is_file: metadata.as_ref().is_some_and(|item| item.is_file()),
+            normalized_path: path_to_string(normalized_path),
+        })
+    })
+    .await
+    .map_err(|e| format!("路径状态检查线程异常: {e}"))?
+}
+
+#[tauri::command]
+async fn authorize_media_path(
     app: tauri::AppHandle,
     request: ReportPathRequest,
 ) -> Result<PathStatus, String> {
-    let root = resolve_project_root(&app)?;
-    let raw_path = PathBuf::from(&request.path);
-    let resolved_path = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        root.join(raw_path)
-    };
-    let normalized_path = resolved_path
-        .canonicalize()
-        .unwrap_or_else(|_| resolved_path.clone());
-    let metadata = fs::metadata(&normalized_path).ok();
-    let exists = metadata.is_some();
-    let is_file = metadata.as_ref().is_some_and(|item| item.is_file());
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_project_root(&app)?;
+        let raw_path = PathBuf::from(&request.path);
+        let resolved_path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            root.join(raw_path)
+        };
+        let normalized_path = resolved_path
+            .canonicalize()
+            .unwrap_or_else(|_| resolved_path.clone());
+        let metadata = fs::metadata(&normalized_path).ok();
+        let exists = metadata.is_some();
+        let is_file = metadata.as_ref().is_some_and(|item| item.is_file());
 
-    if is_file {
-        app.asset_protocol_scope()
-            .allow_file(&normalized_path)
-            .map_err(|error| {
-                format!(
-                    "授权播放器访问视频文件失败 {}: {error}",
-                    path_to_string(&normalized_path)
-                )
-            })?;
-    }
+        if is_file {
+            app.asset_protocol_scope()
+                .allow_file(&normalized_path)
+                .map_err(|error| {
+                    format!(
+                        "授权播放器访问视频文件失败 {}: {error}",
+                        path_to_string(&normalized_path)
+                    )
+                })?;
+        }
 
-    Ok(PathStatus {
-        exists,
-        is_file,
-        normalized_path: path_to_string(normalized_path),
+        Ok(PathStatus {
+            exists,
+            is_file,
+            normalized_path: path_to_string(normalized_path),
+        })
     })
+    .await
+    .map_err(|e| format!("授权媒体路径线程异常: {e}"))?
 }
 
 #[tauri::command]
-fn capture_video_frame(
+async fn capture_video_frame(
     app: tauri::AppHandle,
     request: CaptureFrameRequest,
 ) -> Result<String, String> {
-    let root = resolve_project_root(&app)?;
-    let raw_path = PathBuf::from(request.path);
-    let video_path = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        root.join(raw_path)
-    };
-    if !video_path.exists() || !video_path.is_file() {
-        return Err(format!("视频文件不存在: {}", video_path.display()));
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_project_root(&app)?;
+        let raw_path = PathBuf::from(request.path);
+        let video_path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            root.join(raw_path)
+        };
+        if !video_path.exists() || !video_path.is_file() {
+            return Err(format!("视频文件不存在: {}", video_path.display()));
+        }
 
-    let python = resolve_python(&app, &root, None);
-    let timestamp = request.timestamp.max(0.0).to_string();
-    let frame_index = request.frame_index.unwrap_or(-1).max(-1).to_string();
-    let script = r#"
+        let python = resolve_python(&app, &root, None);
+        let timestamp = request.timestamp.max(0.0).to_string();
+        let frame_index = request.frame_index.unwrap_or(-1).max(-1).to_string();
+        let script = r#"
 import base64
 import sys
 
@@ -3938,74 +3970,78 @@ if not ok:
 print("data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii"))
 "#;
 
-    let output = run_capture(
-        &root,
-        &python,
-        vec![
-            "-c".into(),
-            script.into(),
-            script_arg(&video_path),
-            timestamp,
-            frame_index,
-        ],
-    )?;
+        let output = run_capture(
+            &root,
+            &python,
+            vec![
+                "-c".into(),
+                script.into(),
+                script_arg(&video_path),
+                timestamp,
+                frame_index,
+            ],
+        )?;
 
-    if !output.status_success {
-        return Err(format!(
-            "抽取视频帧失败: {}",
-            first_non_empty(&output.stderr, &output.stdout)
-        ));
-    }
+        if !output.status_success {
+            return Err(format!(
+                "抽取视频帧失败: {}",
+                first_non_empty(&output.stderr, &output.stdout)
+            ));
+        }
 
-    let data_url = output.stdout.trim();
-    if data_url.starts_with("data:image/jpeg;base64,") {
-        Ok(data_url.to_string())
-    } else {
-        Err(format!(
-            "抽取视频帧失败: {}",
-            first_non_empty(&output.stderr, &output.stdout)
-        ))
-    }
+        let data_url = output.stdout.trim();
+        if data_url.starts_with("data:image/jpeg;base64,") {
+            Ok(data_url.to_string())
+        } else {
+            Err(format!(
+                "抽取视频帧失败: {}",
+                first_non_empty(&output.stderr, &output.stdout)
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("抽取视频帧线程异常: {e}"))?
 }
 
 #[tauri::command]
-fn capture_comparison_frame(
+async fn capture_comparison_frame(
     app: tauri::AppHandle,
     request: CaptureComparisonFrameRequest,
 ) -> Result<String, String> {
-    let root = resolve_project_root(&app)?;
-    let raw_path = PathBuf::from(&request.path);
-    let video_path = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        root.join(raw_path)
-    };
-    if !video_path.exists() || !video_path.is_file() {
-        return Err(format!("视频文件不存在: {}", video_path.display()));
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_project_root(&app)?;
+        let raw_path = PathBuf::from(&request.path);
+        let video_path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            root.join(raw_path)
+        };
+        if !video_path.exists() || !video_path.is_file() {
+            return Err(format!("视频文件不存在: {}", video_path.display()));
+        }
 
-    let cache_path = comparison_frame_cache_path(&root, &video_path, &request)?;
-    if cache_path.is_file() {
-        return image_file_data_url(&cache_path);
-    }
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建算法帧缓存目录失败: {e}"))?;
-    }
+        let cache_path = comparison_frame_cache_path(&root, &video_path, &request)?;
+        if cache_path.is_file() {
+            return image_file_data_url(&cache_path);
+        }
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建算法帧缓存目录失败: {e}"))?;
+        }
 
-    let resize_mode = match request.resize_mode.as_str() {
-        "letterbox" => "letterbox",
-        _ => "center_crop",
-    };
-    let portrait_rotation = match request.portrait_rotation.as_str() {
-        "left_90" => "left_90",
-        _ => "right_90",
-    };
-    let input_size = request.input_size.clamp(1, 2048).to_string();
-    let timestamp = request.timestamp.max(0.0).to_string();
-    let frame_index = request.frame_index.unwrap_or(-1).max(-1).to_string();
-    let crop_black_borders = if request.crop_black_borders { "1" } else { "0" }.to_string();
-    let python = resolve_python(&app, &root, None);
-    let script = r#"
+        let resize_mode = match request.resize_mode.as_str() {
+            "letterbox" => "letterbox",
+            _ => "center_crop",
+        };
+        let portrait_rotation = match request.portrait_rotation.as_str() {
+            "left_90" => "left_90",
+            _ => "right_90",
+        };
+        let input_size = request.input_size.clamp(1, 2048).to_string();
+        let timestamp = request.timestamp.max(0.0).to_string();
+        let frame_index = request.frame_index.unwrap_or(-1).max(-1).to_string();
+        let crop_black_borders = if request.crop_black_borders { "1" } else { "0" }.to_string();
+        let python = resolve_python(&app, &root, None);
+        let script = r#"
 import base64
 import sys
 
@@ -4058,39 +4094,42 @@ encoded.tofile(output_path)
 print("data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii"))
 "#;
 
-    let output = run_capture(
-        &root,
-        &python,
-        vec![
-            "-c".into(),
-            script.into(),
-            script_arg(&video_path),
-            timestamp,
-            frame_index,
-            crop_black_borders,
-            resize_mode.to_string(),
-            input_size,
-            portrait_rotation.to_string(),
-            script_arg(&cache_path),
-        ],
-    )?;
+        let output = run_capture(
+            &root,
+            &python,
+            vec![
+                "-c".into(),
+                script.into(),
+                script_arg(&video_path),
+                timestamp,
+                frame_index,
+                crop_black_borders,
+                resize_mode.to_string(),
+                input_size,
+                portrait_rotation.to_string(),
+                script_arg(&cache_path),
+            ],
+        )?;
 
-    if !output.status_success {
-        return Err(format!(
-            "抽取算法对比帧失败: {}",
-            first_non_empty(&output.stderr, &output.stdout)
-        ));
-    }
+        if !output.status_success {
+            return Err(format!(
+                "抽取算法对比帧失败: {}",
+                first_non_empty(&output.stderr, &output.stdout)
+            ));
+        }
 
-    let data_url = output.stdout.trim();
-    if data_url.starts_with("data:image/jpeg;base64,") {
-        Ok(data_url.to_string())
-    } else {
-        Err(format!(
-            "抽取算法对比帧失败: {}",
-            first_non_empty(&output.stderr, &output.stdout)
-        ))
-    }
+        let data_url = output.stdout.trim();
+        if data_url.starts_with("data:image/jpeg;base64,") {
+            Ok(data_url.to_string())
+        } else {
+            Err(format!(
+                "抽取算法对比帧失败: {}",
+                first_non_empty(&output.stderr, &output.stdout)
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("抽取算法对比帧线程异常: {e}"))?
 }
 
 fn comparison_frame_cache_path(
@@ -5289,6 +5328,7 @@ fn main() {
             cancel_current_task,
             list_reports,
             read_report,
+            read_report_overview,
             read_text_file,
             path_status,
             authorize_media_path,
@@ -5955,7 +5995,7 @@ fn emit_progress<R: tauri::Runtime>(app: &tauri::AppHandle<R>, stage: &str, prog
 
 // 全局进度节流。所有会产生 analysis-progress 事件的调用路径（Python 子进程逐帧回报、
 // Rust 原生的指纹判重逐文件回报等）最终都汇聚到 emit_progress_detail，这里统一按时间
-// 节流（100ms 至多一次），避免前端高频整页重渲染导致任务执行期间卡顿、无法切换页面。
+// 节流（200ms 至多一次），避免前端高频整页重渲染导致任务执行期间卡顿、无法切换页面。
 // 始终放行「最终进度（>=100）」与「≥1% 的明显跳变」，保证收尾与阶段跃迁的即时反馈。
 static LAST_PROGRESS_EMIT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_PROGRESS_EMIT_CENTI: AtomicU64 = AtomicU64::new(0);
@@ -5973,7 +6013,7 @@ fn emit_progress_detail<R: tauri::Runtime>(
     let last_centi = LAST_PROGRESS_EMIT_CENTI.load(Ordering::Relaxed);
     let is_final = progress >= 100.0;
     let jumped = progress_centi.saturating_sub(last_centi) >= 100;
-    let due = now_ms.saturating_sub(last_ms) >= 100;
+    let due = now_ms.saturating_sub(last_ms) >= 200;
     if !is_final && !jumped && !due {
         return;
     }

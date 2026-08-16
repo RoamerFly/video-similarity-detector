@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   AlertCircle,
   ArrowDown,
@@ -91,6 +91,7 @@ const pageSizeOptions = [10, 20, 50]
 
 export function ResultsPage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const reportDir = useSettingsStore((state) => state.reportDir)
   const videoDir = useSettingsStore((state) => state.videoDir)
   const threshold = useSettingsStore((state) => state.defaultMatchThreshold)
@@ -331,6 +332,15 @@ export function ResultsPage() {
         reports = await loadReportList()
       }
 
+      // 初始进入结果页时不自动读取报告，只填充下拉框并保持「选择报告文件」占位，
+      // 避免刚进入即解析大报告导致卡顿；仅当任务完成（onFinished 通过路由 state 标记
+      // autoLoadReport）时才自动读取本次任务生成的报告。
+      const autoLoad = Boolean(location.state?.autoLoadReport)
+      if (!autoLoad) {
+        setSelectedReportKey('')
+        return
+      }
+
       const latestPaths: { reportJson?: string; reportCsv?: string } = reportPaths
         ? await existingReportPaths(reportPaths)
         : {}
@@ -344,7 +354,7 @@ export function ResultsPage() {
     }
 
     void initialize()
-  }, [loadReport, loadReportList, report, reportPaths])
+  }, [loadReport, loadReportList, report, reportPaths, location.state])
 
   useEffect(() => {
     const timer = window.setTimeout(() => resetPage(), 0)
@@ -1506,8 +1516,10 @@ function ReportListDialog({
   busy: boolean
 }) {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const handleSelectAll = (checked: boolean) => {
+    setConfirmingDelete(false)
     if (checked) {
       setSelectedPaths(new Set(reports.map(r => r.jsonPath || r.csvPath || r.htmlPath || r.path || '').filter(Boolean)))
     } else {
@@ -1516,6 +1528,7 @@ function ReportListDialog({
   }
 
   const toggleSelect = (path: string, checked: boolean) => {
+    setConfirmingDelete(false)
     const next = new Set(selectedPaths)
     if (checked) next.add(path)
     else next.delete(path)
@@ -1589,18 +1602,21 @@ function ReportListDialog({
             <NeonButton variant="ghost" type="button" disabled={busy} onClick={onClose}>
               取消
             </NeonButton>
-            <NeonButton 
-              tone="red" 
-              type="button" 
-              disabled={busy || selectedPaths.size === 0} 
+            <NeonButton
+              tone="red"
+              type="button"
+              disabled={busy || selectedPaths.size === 0}
               onClick={() => {
-                if (window.confirm(selectedPaths.size === reports.length ? '确定删除全部报告吗？此操作无法恢复！' : `确定删除选中的 ${selectedPaths.size} 个报告吗？此操作无法恢复！`)) {
-                  onDeleteSelected(Array.from(selectedPaths))
+                if (confirmingDelete) {
+                  void onDeleteSelected(Array.from(selectedPaths))
+                  setConfirmingDelete(false)
+                } else {
+                  setConfirmingDelete(true)
                 }
               }}
             >
               <Trash2 size={16} />
-              删除选中的报告 ({selectedPaths.size})
+              {confirmingDelete ? '确认删除？此操作无法恢复' : `删除选中的报告 (${selectedPaths.size})`}
             </NeonButton>
           </div>
         </section>

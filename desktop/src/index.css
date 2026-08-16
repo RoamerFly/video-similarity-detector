@@ -12000,3 +12000,21 @@ select {
   min-height: 0;
   overflow: auto;
 }
+
+/* Final sidebar-collapse ownership: at ≤1120px the sidebar collapses to an
+   icon-only rail (76px). The later "Usability pass" rules — .app-sidebar
+   { width: 196px } and .app-main/.analysis-log-drawer { left: 224px } — sit
+   later in source and would otherwise override the collapse, leaving the main
+   content overlapping the still-wide rail. Re-assert the collapsed geometry
+   with a higher-specificity selector so it always wins. */
+@media (max-width: 1120px) {
+  .app-frame .app-sidebar {
+    width: 76px;
+  }
+
+  .app-frame .app-main,
+  .app-frame .analysis-log-drawer,
+  .app-frame .analysis-log-drawer.collapsed {
+    left: 102px;
+  }
+}

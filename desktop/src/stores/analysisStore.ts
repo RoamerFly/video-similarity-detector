@@ -66,7 +66,7 @@ interface AnalysisState {
 }
 
 const maxRetainedLogs = 5000
-const logFlushIntervalMs = 200
+const logFlushIntervalMs = 300
 
 // 日志批量合并：指纹判重与相似度分析都会逐视频打印日志，若每条日志都触发一次
 // set()，前端会高频整页重渲染，导致任务执行期间卡顿、无法切换页面。这里把
