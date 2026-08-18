@@ -13,8 +13,9 @@ $envDir = if ([System.IO.Path]::IsPathRooted($DestinationDir)) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $DestinationDir))
 }
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("video-sim-ffmpeg-" + [Guid]::NewGuid().ToString("N"))
-$archiveName = "ffmpeg-n7.1-latest-win64-gpl-7.1.zip"
-$baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+# 固定到不可变的日期 tag（BtbN 的滚动 "latest" 会随 FFmpeg 升版移除旧资产导致 404）
+$archiveName = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"
+$baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-17-13-05"
 $archivePath = Join-Path $tempDir $archiveName
 $checksumPath = Join-Path $tempDir "checksums.sha256"
 

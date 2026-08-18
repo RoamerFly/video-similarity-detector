@@ -1,4 +1,4 @@
-## v1.2.0 新版本内容
+## v1.2.2 新版本内容
 
 本版本重点提升大批量视频下的识别性能与内存占用、重写合并编辑器、全面修复任务执行与报告查看过程中的卡顿，并修复一系列页面显示与数据明细问题。
 
@@ -54,15 +54,19 @@
 - 对比视图重复读取报告卡死
 - 修复界面英文折行：分析任务页「Create Task」等按钮折成两行浪费空间、设置页长英文参数标签折行而非省略、结果页分页与对比页「回到该帧」按钮在窄布局下折行，现均改为单行显示。
 
+### 六、安装与发布修复
+
+- 修复 Windows/Linux 首次运行环境下载失败：FFmpeg 运行库改用 BtbN 不可变日期发布（autobuild-2026-08-17-13-05，n8.1 分支），替代会被升版移除资产的滚动 latest 标签，避免安装包首次运行时因 404 无法下载 FFmpeg。
+
 ## 下载建议
 
 普通用户只需要下载一个与系统对应的应用包：
 
-- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.2.0-windows-x64-cpu-installer.exe`
-- Windows GPU 安装版：`Video_Similarity-v1.2.0-windows-x64-gpu-installer.exe`
-- macOS M 系列：`Video_Similarity-v1.2.0-macos-arm64-installer.dmg`
-- macOS Intel：`Video_Similarity-v1.2.0-macos-x64-installer.dmg`
-- Linux Debian/Ubuntu：`Video_Similarity-v1.2.0-linux-x64-installer.deb`
-- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.2.0-linux-x64-installer.rpm`
+- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.2.2-windows-x64-cpu-installer.exe`
+- Windows GPU 安装版：`Video_Similarity-v1.2.2-windows-x64-gpu-installer.exe`
+- macOS M 系列：`Video_Similarity-v1.2.2-macos-arm64-installer.dmg`
+- macOS Intel：`Video_Similarity-v1.2.2-macos-x64-installer.dmg`
+- Linux Debian/Ubuntu：`Video_Similarity-v1.2.2-linux-x64-installer.deb`
+- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.2.2-linux-x64-installer.rpm`
 
 不想安装时，可以选择同平台文件名中带 `portable` 的便携包，解压后直接运行。
