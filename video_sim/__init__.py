@@ -19,7 +19,7 @@ Usage:
     from video_sim.segmenter import fixed_window_similarity, aggregate_segments
 """
 
-__version__ = "1.2.1"
+__version__ = "1.2.0"
 
 # ============================================================================
 # Lightweight imports only - no torch, faiss, transformers, cv2, etc.

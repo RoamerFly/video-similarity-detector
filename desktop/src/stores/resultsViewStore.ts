@@ -54,7 +54,7 @@ export const useResultsViewStore = create<ResultsViewState>()(
       selectedReportKey: '',
       reportOptions: [],
       page: 1,
-      pageSize: 10,
+      pageSize: 20,
       setActiveTab: (activeTab) => set({ activeTab }),
       setQuery: (query) => set({ query }),
       setRelationFilter: (relationFilter) => set({ relationFilter }),
@@ -68,17 +68,17 @@ export const useResultsViewStore = create<ResultsViewState>()(
     }),
     {
       name: 'video-similarity-results-view:v2',
-      version: 3,
+      version: 4,
       migrate: (persistedState) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState
         const state = persistedState as Partial<ResultsViewState>
-        if (!state.sortState || state.sortState.key === 'completedAt') {
-          return {
-            ...state,
-            sortState: { key: 'symmetricSimilarity', direction: 'desc' },
-          }
+        const next: Partial<ResultsViewState> = { ...state }
+        // v4: 结果总览默认每页显示更多行，配合紧凑分页节省空间。
+        next.pageSize = 20
+        if (!next.sortState || next.sortState.key === 'completedAt') {
+          next.sortState = { key: 'symmetricSimilarity', direction: 'desc' }
         }
-        return state
+        return next
       },
       partialize: (state) => ({
         activeTab: state.activeTab,

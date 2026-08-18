@@ -12,7 +12,6 @@ import {
   Info,
   PackageCheck,
   RefreshCw,
-  RotateCcw,
   Save,
   ScanSearch,
   Settings,
@@ -378,6 +377,7 @@ export function SettingsPage() {
   }
 
   function handleReset() {
+    if (!window.confirm(resetConfirmMessage)) return
     if (activeTab === 'analysis') {
       settings.resetAnalysisSettings()
       showSettingsMessage('已恢复默认分析配置，请点击“保存设置”应用。')
@@ -411,6 +411,13 @@ export function SettingsPage() {
       : activeTab === 'video_scan'
         ? '恢复视频扫描范围默认'
         : '恢复基础默认'
+  const resetConfirmMessage = activeTab === 'analysis'
+    ? '此操作将恢复当前预设的分析配置默认设置'
+    : activeTab === 'error_tolerance'
+      ? '此操作将恢复错误容忍设置的默认值'
+      : activeTab === 'video_scan'
+        ? '此操作将恢复视频扫描范围的默认设置'
+        : '此操作将恢复设置到基础的默认设置'
   const toastMessage = error || savedMessage || (saveFeedback === 'saved' ? '设置保存成功' : '')
 
   return (
@@ -465,7 +472,7 @@ export function SettingsPage() {
               title={resetLabel}
               aria-label={resetLabel}
             >
-              <RotateCcw size={18} />
+              重置
             </NeonButton>
             <NeonButton
               className={`settings-save-button ${saveFeedback === 'saving' ? 'is-saving' : saveFeedback === 'saved' ? 'is-saved' : ''}`}

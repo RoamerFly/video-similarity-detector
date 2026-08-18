@@ -212,7 +212,10 @@ export function formatPercent(value: number | null | undefined) {
 export function formatScore(value: number | null | undefined) {
   if (!Number.isFinite(value ?? Number.NaN)) return '-'
   const numeric = value as number
-  return (numeric > 1 ? numeric / 100 : numeric).toFixed(2)
+  // 与 normalizedRatio 相同的处理：把 float32 精度残留（1.0000002）收敛为 1，
+  // 避免被误当成百分比而显示成 0.01。
+  const ratioSource = numeric > 1 && numeric <= 1.001 ? 1 : numeric
+  return (ratioSource > 1 ? ratioSource / 100 : ratioSource).toFixed(2)
 }
 
 export function metricPercent(value: number | null | undefined) {
@@ -436,7 +439,11 @@ function numberValue(value: unknown) {
 function normalizedRatio(value: unknown) {
   const numeric = numberValue(value)
   if (numeric === null) return null
-  const ratio = numeric > 1 && numeric <= 100 ? numeric / 100 : numeric
+  // 余弦相似度的 float32 计算会产生略大于 1 的精度残留（如 1.000000238），
+  // 这是归一化比值的浮点误差，而非 0-100 的百分比分数。先将其收敛到 1，
+  // 再套用百分比启发式，避免近重复对（相似度 1.0000002）被误读成 0.01。
+  const ratioSource = numeric > 1 && numeric <= 1.001 ? 1 : numeric
+  const ratio = ratioSource > 1 && ratioSource <= 100 ? ratioSource / 100 : ratioSource
   return Math.max(0, Math.min(1, ratio))
 }
 

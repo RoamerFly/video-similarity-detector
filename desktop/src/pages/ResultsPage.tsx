@@ -87,7 +87,7 @@ interface VideoContextMenuState {
   side: 'A' | 'B'
 }
 
-const pageSizeOptions = [10, 20, 50]
+const pageSizeOptions = [10, 20, 50, 100]
 
 export function ResultsPage() {
   const navigate = useNavigate()
@@ -1049,13 +1049,13 @@ export function ResultsPage() {
         <div className="pagination-row">
           <span>共 {totalRows} 条结果</span>
           <div className="pagination-center">
-            <button type="button" disabled={safePage <= 1} onClick={() => setPage(Math.max(1, safePage - 1))}>上一页</button>
+            <button className="page-nav-button" type="button" disabled={safePage <= 1} onClick={() => setPage(Math.max(1, safePage - 1))}>上一页</button>
             {pageNumbers(safePage, pageCount).map((item) => (
-              <button className={item === safePage ? 'active' : ''} type="button" key={item} onClick={() => setPage(item)}>
-                第 {item} 页
+              <button className={`page-number-button${item === safePage ? ' active' : ''}`} type="button" key={item} aria-label={`第 ${item} 页`} title={`第 ${item} 页`} onClick={() => setPage(item)}>
+                {item}
               </button>
             ))}
-            <button type="button" disabled={safePage >= pageCount} onClick={() => setPage(Math.min(pageCount, safePage + 1))}>下一页</button>
+            <button className="page-nav-button" type="button" disabled={safePage >= pageCount} onClick={() => setPage(Math.min(pageCount, safePage + 1))}>下一页</button>
             <label className="page-jump-control">
               <span>跳至</span>
               <input

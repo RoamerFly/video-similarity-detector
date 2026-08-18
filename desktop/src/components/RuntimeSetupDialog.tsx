@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, HardDrive, RefreshCw, X } from 'lucide-react'
 
-import { NeonButton } from '@/components/DesignSystem'
+import { NeonButton, TextInput } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
 import {
   cancelRuntimeInstall,
@@ -23,6 +23,7 @@ export function RuntimeSetupDialog() {
   const [dismissed, setDismissed] = useState(false)
   const [error, setError] = useState('')
   const [progress, setProgress] = useState<UpdateDownloadProgress | null>(null)
+  const [proxyInput, setProxyInput] = useState(proxyUrl)
 
   const refresh = useCallback(async () => {
     setChecking(true)
@@ -61,6 +62,12 @@ export function RuntimeSetupDialog() {
   }, [])
 
   async function handleInstall() {
+    // 下载前先把代理设置保存起来，后续检查更新、模型下载等也会沿用。
+    const proxy = proxyInput.trim()
+    const settings = useSettingsStore.getState()
+    settings.setNetworkProxy(proxy)
+    settings.saveSettings()
+
     setInstalling(true)
     setError('')
     setProgress({
@@ -70,7 +77,7 @@ export function RuntimeSetupDialog() {
       stage: '正在准备下载',
     })
     try {
-      const nextStatus = await installRuntime(proxyUrl)
+      const nextStatus = await installRuntime(proxy)
       setStatus(nextStatus)
       if (nextStatus.ready) setDismissed(true)
     } catch (reason) {
@@ -112,6 +119,16 @@ export function RuntimeSetupDialog() {
               <strong>v{status?.expectedVersion ?? '1'}</strong>
             </div>
           </div>
+
+          <label className="runtime-setup-proxy">
+            <span>网络代理（可选）</span>
+            <TextInput
+              value={proxyInput}
+              placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+              onChange={(event) => setProxyInput(event.target.value)}
+              disabled={installing}
+            />
+          </label>
 
           <p className="runtime-setup-path" title={status?.runtimeDir}>
             安装位置：{status?.runtimeDir}

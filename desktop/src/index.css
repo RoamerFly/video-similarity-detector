@@ -8149,6 +8149,27 @@ select {
   margin: 0;
 }
 
+.runtime-setup-proxy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.runtime-setup-proxy > span {
+  color: var(--text-muted, #94a3b8);
+  font-size: 13px;
+}
+
+.runtime-setup-proxy .design-input {
+  height: 40px;
+  font-size: 14px;
+}
+
+.runtime-setup-proxy .design-input:disabled {
+  opacity: 0.55;
+}
+
 .runtime-setup-actions {
   justify-content: flex-end;
 }
@@ -8874,9 +8895,7 @@ select {
 }
 
 .settings-fixed-actions .settings-reset-button {
-  width: 34px;
   min-width: 34px;
-  padding-inline: 0;
 }
 
 .settings-fixed-actions .settings-save-button {
@@ -11994,11 +12013,27 @@ select {
    duplicate-file variant) to the viewport height so the page's own overflow: auto
    engages, instead of growing to content height and being clipped by the compact
    shell's .app-main { overflow: hidden }. This keeps the frame list and matched
-   segments reachable by scrolling. */
+   segments reachable by scrolling.
+
+   The page is laid out as a plain vertical stack (block flow), NOT the earlier
+   grid: a fixed-height grid that is over-constrained (content taller than the
+   viewport) collapses its rows toward their minimums, so the preview panel shrank
+   below its video cards and they spilled into the detail grid (component overlap).
+   Block flow sizes every panel to its content, so nothing overlaps. */
 .compare-page.route-fill {
+  display: block;
   height: 100%;
   min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.compare-page.route-fill > * {
+  margin-bottom: 10px;
+}
+
+.compare-page.route-fill > *:last-child {
+  margin-bottom: 0;
 }
 
 /* Final sidebar-collapse ownership: at ≤1120px the sidebar collapses to an
@@ -12016,5 +12051,75 @@ select {
   .app-frame .analysis-log-drawer,
   .app-frame .analysis-log-drawer.collapsed {
     left: 102px;
+  }
+}
+
+/* Compact results pagination — 结果总览空间优化：页码按钮由「第 N 页」改为
+   纯数字，缩窄上一页/下一页与跳转输入，分页行整体压矮，让表格获得更多
+   可视空间。数字按钮保持 title/aria-label 语义（第 N 页），无碍无障碍。 */
+.results-page.route-fill .pagination-row {
+  height: 50px;
+  grid-template-columns: 120px minmax(0, 1fr) 170px;
+}
+
+.pagination-row .page-number-button {
+  width: 34px;
+  min-width: 34px;
+  height: 32px;
+  padding: 0;
+  font-size: 14px;
+  border-radius: 7px;
+}
+
+.pagination-row .page-nav-button {
+  min-width: 64px;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 14px;
+}
+
+.pagination-row .page-jump-control {
+  gap: 4px;
+  font-size: 13px;
+}
+
+.pagination-row .page-jump-control input {
+  width: 42px;
+  height: 30px;
+}
+
+/* 分页栏贴底：收窄表格面板底部内边距（16px → 6px），消掉分页栏下方约 17px
+   的空隙，分页栏随之下移，底部空间不再浪费。 */
+.results-page.route-fill .results-table-panel {
+  padding: 0 14px 6px;
+}
+
+/* 「每页」标签保持横向紧凑：禁止换行、禁止 flex 压缩。否则右边这一格不够宽时
+   会被压窄，两个字「每」「页」折成两行、看起来是竖排。 */
+.pagination-row .page-size-control span {
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 窄窗口（≤980px）下不再把分页压成整块纵向堆叠（那会把「每页」挤到单独
+   一行、看起来是竖排），改为横向换行：各控件保持一行内的横排，放不下时
+   整组换到下一行。 */
+@media (max-width: 980px) {
+  .results-page.route-fill .pagination-row {
+    height: auto;
+    display: flex;
+    grid-template-columns: none;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 14px;
+    padding-block: 10px;
+  }
+
+  .results-page.route-fill .pagination-center {
+    flex: 1 1 auto;
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 }
