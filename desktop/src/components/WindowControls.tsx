@@ -60,8 +60,8 @@ export function WindowControls({ onRequestClose }: WindowControlsProps) {
       <button
         className="window-control window-control-close"
         type="button"
-        title={t('关闭')}
-        aria-label={t('关闭')}
+        title={t('关闭窗口')}
+        aria-label={t('关闭窗口')}
         onClick={onRequestClose}
       >
         <X size={16} strokeWidth={2.2} />

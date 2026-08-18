@@ -807,6 +807,7 @@ select {
   margin-top: 34px;
   font-size: 28px;
   border-radius: 10px;
+  white-space: nowrap;
 }
 
 .analyze-right-stack {
@@ -4295,6 +4296,7 @@ select {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .parameter-hint-icon {
@@ -5542,8 +5544,16 @@ select {
 
 .analysis-action-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(112px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 9px;
+}
+
+.analysis-action-row .neon-button {
+  min-height: 42px;
+  gap: 8px;
+  padding: 0 10px;
+  font-size: 15px;
+  white-space: nowrap;
 }
 
 .start-analysis-button.compact {
@@ -5551,6 +5561,7 @@ select {
   min-height: 42px;
   margin-top: 0;
   font-size: 15px;
+  overflow: hidden;
 }
 
 .analyze-status-panel {
@@ -11415,6 +11426,7 @@ select {
   justify-content: center;
   gap: 7px;
   padding: 0 10px;
+  white-space: nowrap;
   color: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(236, 78, 216, 0.28);
   border-radius: 8px;
@@ -12076,6 +12088,7 @@ select {
   height: 32px;
   padding: 0 8px;
   font-size: 14px;
+  white-space: nowrap;
 }
 
 .pagination-row .page-jump-control {

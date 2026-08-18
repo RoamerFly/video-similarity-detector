@@ -388,8 +388,7 @@ class DynamicFrameSampler:
                     if self._retained_callback_failed or self.retained_count > 0:
                         raise
                     print(
-                        f"Warning: OpenCV sequential frame reader failed for {video_path.resolve()}; "
-                        f"falling back to Decord: {opencv_error}"
+                        f"警告(Warning): OpenCV 顺序帧读取器读取失败 {video_path.resolve()}，改用 Decord: {opencv_error}"
                     )
                     self._sample_with_decord(
                         video_path, progress_callback, retained_frames, retained_callback
@@ -403,8 +402,7 @@ class DynamicFrameSampler:
                     if self._retained_callback_failed or self.retained_count > 0:
                         raise
                     print(
-                        f"Warning: Decord frame reader failed for {video_path.resolve()}; "
-                        f"falling back to OpenCV: {decord_error}"
+                        f"警告(Warning): Decord 帧读取器读取失败 {video_path.resolve()}，改用 OpenCV: {decord_error}"
                     )
                     self._sample_with_opencv(
                         video_path, progress_callback, retained_frames, retained_callback

@@ -777,11 +777,11 @@ def load_resume_state(state_path: Path, signature: dict) -> dict:
     )
     source_path = state.pop("_source_path", "")
     if source_path and Path(source_path) != state_path and state["pairs"]:
-        log(f"Migrating {len(state['pairs'])} legacy resume pairs to incremental SQLite checkpoint...")
+        log(f"正在迁移 {len(state['pairs'])} 条旧断点续跑记录到增量 SQLite 检查点(Migrating legacy resume pairs to incremental SQLite checkpoint)...")
         try:
             save_resume_pairs(state_path, signature, state["pairs"])
         except OSError as migration_error:
-            log(f"Warning: Failed to migrate resume pairs: {compact_error(migration_error)}")
+            log(f"警告(Warning): 迁移断点续跑记录失败: {compact_error(migration_error)}")
     return state
 
 
@@ -988,10 +988,10 @@ def load_video_list(video_list_path: str, input_dir: Path, error_video_dir: Path
     try:
         payload = json.loads(Path(video_list_path).read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
-        log(f"Error: Failed to read selected video list: {exc}")
+        log(f"错误(Error): 读取指定视频列表失败: {exc}")
         sys.exit(1)
     if not isinstance(payload, list):
-        log("Error: Selected video list must be a JSON array")
+        log("错误(Error): 指定视频列表必须是 JSON 数组")
         sys.exit(1)
 
     videos: list[Path] = []
@@ -1158,7 +1158,7 @@ def update_task_manifest(**patch) -> None:
         try:
             write_json_atomic(ACTIVE_TASK_MANIFEST_PATH, ACTIVE_TASK_MANIFEST)
         except OSError as error:
-            log(f"Warning: Failed to update task history: {compact_error(error)}")
+            log(f"警告(Warning): 更新任务历史失败: {compact_error(error)}")
 
 
 def resume_pair_database_path(state_path: Path, signature: dict) -> Path:
@@ -1275,14 +1275,14 @@ def ensure_video_indexed(
             embedding_runtime=embedding_runtime_fingerprint(device),
         )
         if cache is not None:
-            log(f"  Cache hit: {video_path.name}")
-            log(f"  Cache file: {cache_path}")
+            log(f"  缓存命中(Cache hit): {video_path.name}")
+            log(f"  缓存文件(Cache file): {cache_path}")
             if metrics is not None:
                 metrics.count("cache_hits")
                 metrics.count("embeddings", len(cache.embeddings))
             return cache, embedder, True
         if cache_path.exists():
-            log(f"  Cache stale, rebuilding: {cache_path}")
+            log(f"  缓存已过期，重新构建(Cache stale, rebuilding): {cache_path}")
         else:
             legacy_path = FrameEmbeddingCache.get_legacy_cache_path(
                 video_path,
@@ -1290,10 +1290,10 @@ def ensure_video_indexed(
                 preprocess_config,
             )
             if legacy_path.exists():
-                log(f"  Legacy cache lacks validation metadata and will be rebuilt: {legacy_path}")
+                log(f"  旧缓存缺少校验元数据，将重新构建(Legacy cache lacks validation metadata, rebuilding): {legacy_path}")
 
     if force and cache_path.exists():
-        log(f"  Force enabled, regenerating: {video_path.name}")
+        log(f"  已启用强制重建，重新生成(Force enabled, regenerating): {video_path.name}")
 
     sampler = DynamicFrameSampler(
         skip_threshold=skip_threshold,
@@ -1304,12 +1304,12 @@ def ensure_video_indexed(
         metrics=metrics,
     )
     if embedder is None:
-        log("Initializing embedder...")
+        log("正在初始化嵌入器(Initializing embedder)...")
         embedder = VideoEmbedder(device=device, preprocess_config=preprocess_config, metrics=metrics)
     elif metrics is not None:
         embedder.metrics = metrics
 
-    log(f"  Extracting embeddings: {video_path.name}")
+    log(f"  正在提取特征向量(Extracting embeddings): {video_path.name}")
     streaming_enabled = os.environ.get("VIDEO_SIM_STREAMING_PIPELINE", "1").strip().lower() not in {
         "0", "false", "no", "off"
     }
@@ -1351,7 +1351,7 @@ def ensure_video_indexed(
         )
     if metrics is not None:
         metrics.count("embeddings", len(cache.embeddings))
-    log(f"  Saved cache: {cache_path}")
+    log(f"  已保存缓存(Saved cache): {cache_path}")
 
     return cache, embedder, False
 
@@ -1555,23 +1555,23 @@ def main():
     try:
         task_config = load_task_config(args.task_config_json, args.task_config_file)
     except (OSError, json.JSONDecodeError) as exc:
-        log(f"Error: Failed to read task configuration: {exc}")
+        log(f"错误(Error): 读取任务配置失败: {exc}")
         sys.exit(1)
 
     if not input_dir.exists():
-        log(f"Error: Input directory not found: {input_dir}")
+        log(f"错误(Error): 输入目录不存在: {input_dir}")
         sys.exit(1)
 
     # Scan and validate videos before Decord opens them. Native decoder errors
     # are captured here so a damaged file can be quarantined after the first
     # error instead of flooding the desktop stderr log.
     emit_progress("scan", 0, 1, "扫描视频目录")
-    log(f"Scanning for videos in: {input_dir}")
+    log(f"正在扫描视频目录(Scanning for videos in): {input_dir}")
     project_root = Path.cwd().resolve()
     error_video_dir = project_root / "data" / "error_videos"
     if args.video_list:
         scanned_videos = load_video_list(args.video_list, input_dir, error_video_dir)
-        log(f"Using selected video list: {args.video_list}")
+        log(f"使用指定视频列表(Using selected video list): {args.video_list}")
     else:
         scanned_videos = [
             path
@@ -1581,10 +1581,10 @@ def main():
     raise_if_cancelled(cancel_file)
 
     if len(scanned_videos) < 2:
-        log(f"Error: Need at least 2 videos for comparison, found {len(scanned_videos)}")
+        log(f"错误(Error): 至少需要 2 个视频才能比较，当前有 {len(scanned_videos)} 个")
         sys.exit(1)
 
-    log(f"Found {len(scanned_videos)} videos")
+    log(f"发现 {len(scanned_videos)} 个视频(Found {len(scanned_videos)} videos)")
     task_id = args.task_id or f"analysis-{int(time.time() * 1000)}"
     activate_task_manifest(
         cache_dir,
@@ -1620,7 +1620,7 @@ def main():
             original_video_count,
             "跳过 FFmpeg 码流校验",
         )
-        log("Scan preflight already completed for unchanged input; skipping FFmpeg stream validation.")
+        log("输入目录未变化，扫描预检已完成；跳过 FFmpeg 流校验(Scan preflight already completed for unchanged input; skipping FFmpeg stream validation).")
     else:
         ffmpeg = resolve_ffmpeg(project_root)
 
@@ -1729,7 +1729,7 @@ def main():
         resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         resolved_device = args.device
-    log(f"Device: {resolved_device}")
+    log(f"设备(Device): {resolved_device}")
     raise_if_cancelled(cancel_file)
 
     # Print preprocessing settings if non-default
@@ -1801,12 +1801,12 @@ def main():
             f"可复用 {cache_hits} 个，需处理 {len(cache_misses)} 个",
         )
     update_task_manifest(reusedVideoCaches=cache_hits)
-    log(f"Cache audit: {cache_hits} reusable, {len(cache_misses)} require extraction.")
+    log(f"缓存审计(Cache audit): {cache_hits} 个可复用，{len(cache_misses)} 个需重新提取。")
     if finish_stage_only("cache"):
         return
 
     # Index all videos
-    log("\nIndexing videos...")
+    log("\n正在索引视频(Indexing videos)...")
     embedder = None
     cache_rebuilds = 0
     warnings = []
@@ -1848,7 +1848,7 @@ def main():
             1,
             f"当前视频：{video_path.name}",
         )
-        log(f"  Indexing video {index}/{len(videos)}: {display_path(video_path)}")
+        log(f"  正在索引视频(Indexing video) {index}/{len(videos)}: {display_path(video_path)}")
         emit_video_context(video_path, "index")
 
         def emit_sample_log(success: bool, reason: str = ""):
@@ -2025,7 +2025,7 @@ def main():
     if index_quarantined:
         videos = [video_path for video_path in videos if video_path not in index_quarantined]
 
-    log(f"\nSuccessfully indexed {len(candidate_summaries)}/{len(videos)} videos")
+    log(f"\n成功索引 {len(candidate_summaries)}/{len(videos)} 个视频(Successfully indexed {len(candidate_summaries)}/{len(videos)} videos)")
     if len(candidate_summaries) < 2:
         log(
             "Error: Fewer than 2 valid videos remain after decoding and indexing; "
@@ -2053,9 +2053,9 @@ def main():
     resume_state = load_resume_state(state_path, resume_signature)
     resumed_pair_count = len(resume_state.get("pairs", {}))
     if resumed_pair_count:
-        log(f"Resume checkpoint: {resumed_pair_count} completed video pairs available")
+        log(f"断点续跑(Resume checkpoint): {resumed_pair_count} 个已完成视频对可用")
 
-    log("Loading report module...")
+    log("正在加载报告模块(Loading report module)...")
     from video_sim.reporter import BatchReportData, write_csv_report, write_html_report, write_json_report
 
     # Create report data
@@ -2072,7 +2072,7 @@ def main():
     from video_sim.indexer import configure_faiss_thread_budget
 
     candidate_faiss_threads = configure_faiss_thread_budget(compare_workers=1)
-    log(f"Candidate FAISS thread budget: {candidate_faiss_threads}")
+    log(f"候选筛选 FAISS 线程预算(Candidate FAISS thread budget): {candidate_faiss_threads}")
 
     def on_candidate_progress(done: int, total: int, label: str):
         raise_if_cancelled(cancel_file)
@@ -2129,7 +2129,7 @@ def main():
             f"({reduction:.1%} reduction)"
         )
     else:
-        log(f"Candidate screening disabled: comparing all {total_pairs} video pairs")
+        log(f"候选筛选已禁用(Candidate screening disabled): 将比较全部 {total_pairs} 对视频")
     candidate_pair_keys = {
         pair_key(video_a, video_b)
         for video_a, video_b in video_pairs
@@ -2157,8 +2157,8 @@ def main():
     )
     if finish_stage_only("candidate"):
         return
-    log(f"\nComparing {total_pairs} video pairs...")
-    log(f"Cache hits: {cache_hits}, rebuilt: {cache_rebuilds}")
+    log(f"\n正在比较 {total_pairs} 对视频(Comparing {total_pairs} video pairs)...")
+    log(f"缓存命中(Cache hits): {cache_hits}，重建(rebuilt): {cache_rebuilds}")
 
     emit_progress("compare", 0, max(total_pairs, 1), "加载视频比对模块")
     from video_sim.matcher import compare_frame_indexes_bidirectional
@@ -2197,13 +2197,13 @@ def main():
     compare_workers = max(1, min(8, int(args.compare_workers or 1)))
     early_stop_enabled = not bool(args.disable_early_stop)
     log(
-        f"Exact comparison workers: {compare_workers}; "
-        f"conservative early-stop {'enabled' if early_stop_enabled else 'disabled'}."
+        f"精确比较工作线程(Exact comparison workers): {compare_workers}；"
+        f"保守早停(conservative early-stop)已{'启用' if early_stop_enabled else '禁用'}。"
     )
     exact_faiss_threads = configure_faiss_thread_budget(
         compare_workers=compare_workers
     )
-    log(f"Exact FAISS thread budget: {exact_faiss_threads}")
+    log(f"精确比较 FAISS 线程预算(Exact FAISS thread budget): {exact_faiss_threads}")
     configured_pool_cap = os.environ.get("VIDEO_SIM_EXACT_CACHE_VIDEOS", "").strip()
     requested_pool_cap = int(configured_pool_cap) if configured_pool_cap.isdigit() else 0
     exact_pool = ExactResourcePool(
@@ -2335,7 +2335,7 @@ def main():
                         report_data.video_pairs[-1],
                     )
                 except OSError as checkpoint_error:
-                    log(f"Warning: Failed to save resume checkpoint: {compact_error(checkpoint_error)}")
+                    log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
 
         with ThreadPoolExecutor(max_workers=compare_workers) as executor:
             future_meta = {}
@@ -2520,7 +2520,7 @@ def main():
                         report_data.video_pairs[-1],
                     )
                 except OSError as checkpoint_error:
-                    log(f"Warning: Failed to save resume checkpoint: {compact_error(checkpoint_error)}")
+                    log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
             compare_units_done += current_pair_units
             completed_pair_count += 1
             processed_pair_count = completed_pair_count + failed_pair_count
@@ -2584,7 +2584,7 @@ def main():
 
     # Write reports
     emit_progress("report", 0, 1, "写入分析报告")
-    log("\nWriting reports...")
+    log("\n正在写入报告(Writing reports)...")
     for stat_name, stat_value in exact_pool.stats().items():
         metrics.set_count(f"exact_pool_{stat_name}", stat_value)
     report_data.metrics = metrics.to_dict()
@@ -2604,18 +2604,18 @@ def main():
 
     # Summary
     log("\n" + "=" * 60)
-    log("Batch Comparison Summary")
+    log("批量比较汇总(Batch Comparison Summary)")
     log("=" * 60)
-    log(f"Videos indexed: {len(candidate_summaries)}")
-    log(f"Cache hits: {cache_hits}")
-    log(f"Cache rebuilt: {cache_rebuilds}")
-    log(f"Pairs compared: {len(report_data.video_pairs)}")
+    log(f"已索引视频(Videos indexed): {len(candidate_summaries)}")
+    log(f"缓存命中(Cache hits): {cache_hits}")
+    log(f"缓存重建(Cache rebuilt): {cache_rebuilds}")
+    log(f"已比较视频对(Pairs compared): {len(report_data.video_pairs)}")
     log(
-        "Candidate pairs: "
+        "候选对(Candidate pairs): "
         f"{total_pairs}/{candidate_selection.all_pair_count} "
-        f"(limit per video: {candidate_selection.candidate_limit or 'all'})"
+        f"(单视频上限(limit per video): {candidate_selection.candidate_limit or 'all'})"
     )
-    log(f"Warnings: {len(report_data.warnings)}")
+    log(f"警告(Warnings): {len(report_data.warnings)}")
 
     # Count by relation
     relations = {}
@@ -2623,7 +2623,7 @@ def main():
         rel = pair["relation"]
         relations[rel] = relations.get(rel, 0) + 1
 
-    log("\nRelations found:")
+    log("\n发现的关系(Relations found):")
     for rel, count in sorted(relations.items(), key=lambda x: -x[1]):
         log(f"  {rel}: {count}")
 

@@ -249,7 +249,7 @@ class VideoEmbedder:
         model_source = resolve_embedding_model_source()
         local_model = isinstance(model_source, Path)
         print(
-            f"Loading CLIP model on {self.device} from "
+            f"正在 {self.device} 上加载 CLIP 模型(Loading CLIP model on {self.device})："
             f"{model_source if local_model else DEFAULT_EMBEDDING_MODEL}..."
         )
         captured_stderr = io.StringIO()
