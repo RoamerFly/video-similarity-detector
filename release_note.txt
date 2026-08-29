@@ -1,4 +1,4 @@
-## v1.2.3 新版本内容
+## v1.2.4 新版本内容
 
 本版本集中修复合并视频页面的时间线交互、播放稳定性与分辨率预览问题，并深度优化合并导出时的内存占用和流畅度。
 
@@ -41,11 +41,11 @@
 
 普通用户只需要下载一个与系统对应的应用包：
 
-- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.2.3-windows-x64-cpu-installer.exe`
-- Windows GPU 安装版：`Video_Similarity-v1.2.3-windows-x64-gpu-installer.exe`
-- macOS M 系列：`Video_Similarity-v1.2.3-macos-arm64-installer.dmg`
-- macOS Intel：`Video_Similarity-v1.2.3-macos-x64-installer.dmg`
-- Linux Debian/Ubuntu：`Video_Similarity-v1.2.3-linux-x64-installer.deb`
-- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.2.3-linux-x64-installer.rpm`
+- Windows CPU 安装版（推荐大多数用户）：`Video_Similarity-v1.2.4-windows-x64-cpu-installer.exe`
+- Windows GPU 安装版：`Video_Similarity-v1.2.4-windows-x64-gpu-installer.exe`
+- macOS M 系列：`Video_Similarity-v1.2.4-macos-arm64-installer.dmg`
+- macOS Intel：`Video_Similarity-v1.2.4-macos-x64-installer.dmg`
+- Linux Debian/Ubuntu：`Video_Similarity-v1.2.4-linux-x64-installer.deb`
+- Linux Fedora/openSUSE/RHEL：`Video_Similarity-v1.2.4-linux-x64-installer.rpm`
 
 不想安装时，可以选择同平台文件名中带 `portable` 的便携包，解压后直接运行。

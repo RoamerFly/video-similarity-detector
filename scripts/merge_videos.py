@@ -490,8 +490,8 @@ def build_timeline_filter_graph(
     if not linear_non_overlapping and not static_custom_composition and dynamic_compositor_segments > dynamic_budget:
         raise RuntimeError(
             "多轨时间线过于复杂，预计需要处理 "
-            f"{dynamic_compositor_segments} 个画面区间，已超过当前分辨率的安全上限 "
-            f"{dynamic_budget}。请拆分项目导出，或为持续画中画改用固定自定义布局。"
+            f"{dynamic_compositor_segments} 个画面区间，已超过安全上限（当前分辨率上限 "
+            f"{dynamic_budget}）。请拆分项目导出，或为持续画中画改用固定自定义布局。"
         )
 
     if linear_non_overlapping:
