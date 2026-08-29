@@ -16,6 +16,10 @@ import {
   timelineVisibleRange,
   timelineTimeFromClientX,
   timeTicks,
+  timelineExchangeUpdates,
+  timelineExchangeOrder,
+  globalVideoTimelineGaps,
+  timelineGapPositionUpdates,
 } from './timelineModel'
 
 function clip(
@@ -192,5 +196,129 @@ describe('timeline layout behavior', () => {
     expect(canSplitClipAt(layout, 2.01, rows)).toBe(false)
     expect(canSplitClipAt(layout, 4, rows)).toBe(true)
     expect(canSplitClipAt(layout, layout.end - 0.01, rows)).toBe(false)
+  })
+
+  it('reflows different-length clips over the complete track', () => {
+    const make = (id: string, start: number, duration: number) => ({
+      item: { id }, trackId: 'track-1', start, duration, end: start + duration,
+    })
+    expect(timelineExchangeUpdates([
+      make('a', 0, 2), make('b', 2, 5), make('c', 7, 1),
+    ], 'a', 'track-1', 3, 2, 'b')).toEqual([
+      { id: 'b', startTime: 0 }, { id: 'a', startTime: 5 },
+    ])
+  })
+
+  it('exchanges non-adjacent clips and compacts the complete track', () => {
+    const make = (id: string, start: number, duration: number) => ({
+      item: { id }, trackId: 'track-1', start, duration, end: start + duration,
+    })
+    expect(timelineExchangeUpdates([
+      make('a', 0, 1), make('b', 1, 2), make('c', 3, 3), make('d', 6, 1),
+    ], 'd', 'track-1', 4, 1, 'c')).toEqual([
+      { id: 'd', startTime: 3 }, { id: 'c', startTime: 4 },
+    ])
+  })
+
+  it('does not exchange when dropping on another track', () => {
+    const make = (id: string, trackId: string) => ({
+      item: { id }, trackId, start: 0, duration: 2, end: 2,
+    })
+    expect(timelineExchangeUpdates([
+      make('a', 'track-1'), make('b', 'track-2'),
+    ], 'a', 'track-2', 0, 2)).toBeNull()
+  })
+
+  it('applies the same exchange rule to audio layouts', () => {
+    const audio = [
+      { item: { id: 'music-a' }, trackId: 'audio-1', start: 0, duration: 3, end: 3 },
+      { item: { id: 'music-b' }, trackId: 'audio-1', start: 3, duration: 1, end: 4 },
+    ]
+    expect(timelineExchangeUpdates(audio, 'music-a', 'audio-1', 3.2, 3, 'music-b')).toEqual([
+      { id: 'music-b', startTime: 0 }, { id: 'music-a', startTime: 1 },
+    ])
+  })
+
+  it('reflows A to C and C to A into a zero-based compact track', () => {
+    const make = (id: string, start: number, duration: number) => ({
+      item: { id }, trackId: 'track-1', start, duration, end: start + duration,
+    })
+    const layouts = [make('a', 2, 2), make('b', 4, 3), make('c', 7, 1), make('d', 11, 2)]
+    expect(timelineExchangeUpdates(layouts, 'a', 'track-1', 7, 2, 'c')).toEqual([
+      { id: 'c', startTime: 0 }, { id: 'b', startTime: 1 }, { id: 'a', startTime: 4 }, { id: 'd', startTime: 6 },
+    ])
+    expect(timelineExchangeUpdates(layouts, 'c', 'track-1', 2, 1, 'a')).toEqual([
+      { id: 'c', startTime: 0 }, { id: 'b', startTime: 1 }, { id: 'a', startTime: 4 }, { id: 'd', startTime: 6 },
+    ])
+  })
+
+  it('exchanges only the clip explicitly hit by the pointer', () => {
+    const make = (id: string, start: number, duration: number) => ({
+      item: { id }, trackId: 'track-1', start, duration, end: start + duration,
+    })
+    expect(timelineExchangeUpdates([
+      make('a', 0, 5), make('b', 5, 2), make('c', 7, 1),
+    ], 'a', 'track-1', 5, 5, 'c')).toEqual([
+      { id: 'c', startTime: 0 }, { id: 'b', startTime: 1 }, { id: 'a', startTime: 3 },
+    ])
+  })
+
+  it('changes persistent order when equal-duration clips exchange positions', () => {
+    const make = (id: string, start: number) => ({
+      item: { id }, trackId: 'track-1', start, duration: 2, end: start + 2,
+    })
+    const layouts = [make('a', 0), make('b', 2), make('c', 4)]
+    expect(timelineExchangeUpdates(layouts, 'a', 'track-1', 2, 2, 'b')).toEqual([
+      { id: 'b', startTime: 0 }, { id: 'a', startTime: 2 },
+    ])
+    expect(timelineExchangeOrder(layouts, 'a', 'track-1', 'b')?.map((layout) => layout.item.id)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('finds leading and multiple gaps in the union of all video tracks', () => {
+    expect(globalVideoTimelineGaps([
+      { trackId: 'v1', start: 2, end: 4 },
+      { trackId: 'v2', start: 3, end: 5 },
+      { trackId: 'v1', start: 8, end: 9 },
+      { trackId: 'v2', start: 10, end: 12 },
+    ])).toEqual([
+      { start: 0, end: 2, duration: 2 },
+      { start: 5, end: 8, duration: 3 },
+      { start: 9, end: 10, duration: 1 },
+    ])
+  })
+
+  it('does not remove a gap covered by another video track and shifts all media equally', () => {
+    const gaps = globalVideoTimelineGaps([
+      { trackId: 'v1', start: 0, end: 4 },
+      { trackId: 'v1', start: 8, end: 10 },
+      { trackId: 'v2', start: 4, end: 8 },
+    ])
+    expect(gaps).toEqual([])
+
+    const actualGaps = globalVideoTimelineGaps([
+      { trackId: 'v1', start: 0, end: 2 },
+      { trackId: 'v2', start: 0, end: 2 },
+      { trackId: 'v1', start: 5, end: 7 },
+      { trackId: 'v2', start: 5, end: 7 },
+    ])
+    expect(timelineGapPositionUpdates(actualGaps, [
+      { id: 'video-after', start: 9 },
+      { id: 'audio-after', start: 9 },
+      { id: 'text-after', start: 9 },
+      { id: 'audio-crossing', start: 4 },
+    ])).toEqual([
+      { id: 'video-after', startTime: 6 },
+      { id: 'audio-after', startTime: 6 },
+      { id: 'text-after', startTime: 6 },
+    ])
+  })
+
+  it('returns no updates when the global video union has no empty interval', () => {
+    const gaps = globalVideoTimelineGaps([
+      { start: 0, end: 3 },
+      { start: 2.9999, end: 8 },
+    ])
+    expect(gaps).toEqual([])
+    expect(timelineGapPositionUpdates(gaps, [{ id: 'a', start: 4 }])).toEqual([])
   })
 })

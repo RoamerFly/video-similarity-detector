@@ -1829,6 +1829,8 @@ function NumberSetting({
   disabled?: boolean
   onChange: (value: number) => void
 }) {
+  const [draft, setDraft] = useState<string | null>(null)
+
   return (
     <Translated>
     <label className="param-input-row">
@@ -1838,15 +1840,35 @@ function NumberSetting({
           type="number"
           min={min}
           max={max}
-          value={value}
+          value={draft ?? formatNumberSettingValue(value)}
           disabled={disabled}
-          onChange={(event) => onChange(clampNumber(event.target.value, min, max, value))}
+          onFocus={() => setDraft(formatNumberSettingValue(value))}
+          onChange={(event) => {
+            const raw = event.target.value
+            setDraft(raw)
+            if (raw.trim() === '') return
+            const numeric = Number(raw)
+            if (Number.isFinite(numeric)) onChange(clampNumber(raw, min, max, value))
+          }}
+          onBlur={() => {
+            const raw = draft ?? formatNumberSettingValue(value)
+            setDraft(null)
+            if (raw.trim() === '') return
+            const numeric = Number(raw)
+            if (!Number.isFinite(numeric)) return
+            const next = clampNumber(raw, min, max, value)
+            onChange(next)
+          }}
         />
         {suffix && <span>{suffix}</span>}
       </div>
     </label>
     </Translated>
   )
+}
+
+function formatNumberSettingValue(value: number | undefined) {
+  return Number.isFinite(value) ? String(value) : ''
 }
 
 function VideoScanUnitSelect<T extends string>({

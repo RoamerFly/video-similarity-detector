@@ -20,9 +20,12 @@ import {
   revealInFolder,
   setCloseBehavior,
   type FileMoveStatus,
+  type MergeProgressPayload,
 } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
+import type { AnalysisLog } from '@/stores/analysisStore'
+import { shouldAcceptMergeProgress } from '@/components/merge/mergeEventPolicy'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { CloseBehavior } from '@/types/config'
 import appIcon from '../../icon.png'
@@ -185,15 +188,72 @@ export function AppLayout() {
   useEffect(() => {
     let dispose = () => undefined
     let disposed = false
+    let progressTimer: number | null = null
+    let logTimer: number | null = null
+    let pendingProgress: MergeProgressPayload | null = null
+    let pendingLogs: AnalysisLog[] = []
+    let lastProgressAt = 0
+    let terminal = false
+    const cancelPendingProgress = () => {
+      if (progressTimer !== null) window.clearTimeout(progressTimer)
+      progressTimer = null
+      pendingProgress = null
+    }
+    const markTerminal = () => {
+      terminal = true
+      cancelPendingProgress()
+    }
+    const flushProgress = () => {
+      progressTimer = null
+      if (!pendingProgress || disposed) return
+      const payload = pendingProgress
+      pendingProgress = null
+      lastProgressAt = performance.now()
+      const store = useMergeStore.getState()
+      if (payload.progress < 100 && !store.running) store.setRunning(true)
+      store.setProgress(payload.progress, payload.stage)
+    }
+    const queueProgress = (payload: MergeProgressPayload) => {
+      const running = useMergeStore.getState().running
+      if (!shouldAcceptMergeProgress(terminal, running)) return
+      // `startMerge` sets running before invoking the backend. That transition
+      // is the explicit boundary which permits a new task after a terminal
+      // event; stale bridge events while idle remain ignored.
+      if (terminal && running) terminal = false
+      pendingProgress = payload
+      const elapsed = performance.now() - lastProgressAt
+      if (elapsed >= 80) {
+        if (progressTimer !== null) window.clearTimeout(progressTimer)
+        flushProgress()
+      } else if (progressTimer === null) {
+        progressTimer = window.setTimeout(flushProgress, Math.max(0, 80 - elapsed))
+      }
+    }
+    const flushLogs = () => {
+      logTimer = null
+      if (disposed || pendingLogs.length === 0) return
+      const logs = pendingLogs
+      pendingLogs = []
+      useMergeStore.getState().appendLogs(logs)
+    }
+    const queueLog = (payload: AnalysisLog) => {
+      pendingLogs.push(payload)
+      // A bounded batch prevents one Zustand array copy per ffmpeg line while
+      // retaining the latest 1000 lines in the store.
+      if (pendingLogs.length >= 24) {
+        if (logTimer !== null) window.clearTimeout(logTimer)
+        flushLogs()
+      } else if (logTimer === null) {
+        logTimer = window.setTimeout(flushLogs, 100)
+      }
+    }
 
     listenMergeEvents({
-      onLog: (payload) => useMergeStore.getState().appendLog(payload),
-      onProgress: (payload) => {
-        const store = useMergeStore.getState()
-        if (payload.progress < 100 && !store.running) store.setRunning(true)
-        store.setProgress(payload.progress, payload.stage)
-      },
+      onLog: queueLog,
+      onProgress: queueProgress,
       onFinished: (payload) => {
+        markTerminal()
+        flushLogs()
         const store = useMergeStore.getState()
         store.setRunning(false)
         store.setProgress(100, payload.message)
@@ -201,6 +261,8 @@ export function AppLayout() {
         store.setError('')
       },
       onError: (payload) => {
+        markTerminal()
+        flushLogs()
         const store = useMergeStore.getState()
         store.setRunning(false)
         store.setError(normalizeBackendError(payload.message))
@@ -214,6 +276,11 @@ export function AppLayout() {
 
     return () => {
       disposed = true
+      if (progressTimer !== null) window.clearTimeout(progressTimer)
+      if (logTimer !== null) window.clearTimeout(logTimer)
+      progressTimer = null
+      logTimer = null
+      pendingProgress = null
       dispose()
     }
   }, [])

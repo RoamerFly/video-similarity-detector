@@ -13,12 +13,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 
 ACTIVE_PROCESS: subprocess.Popen | None = None
+MAX_DYNAMIC_COMPOSITOR_SEGMENTS = 1600
+MIN_DYNAMIC_COMPOSITOR_SEGMENTS = 120
+REFERENCE_COMPOSITOR_PIXELS = 1920 * 1080
 
 
 def log(message: str) -> None:
@@ -28,6 +32,41 @@ def log(message: str) -> None:
 def emit_progress(progress: float, stage: str) -> None:
     safe_stage = str(stage).replace("|", "／").replace("\r", " ").replace("\n", " ")
     print(f"MERGE_PROGRESS|{max(0.0, min(100.0, progress)):.2f}|{safe_stage}", flush=True)
+
+
+def dynamic_compositor_budget(width: int, height: int, metadata: list[dict]) -> int:
+    """Scale graph complexity to the largest frame that FFmpeg must retain."""
+    largest_pixels = max(
+        width * height,
+        *(max(1, int(info.get("width", 0))) * max(1, int(info.get("height", 0))) for info in metadata),
+    )
+    return max(
+        MIN_DYNAMIC_COMPOSITOR_SEGMENTS,
+        min(MAX_DYNAMIC_COMPOSITOR_SEGMENTS, int(MAX_DYNAMIC_COMPOSITOR_SEGMENTS * REFERENCE_COMPOSITOR_PIXELS / largest_pixels)),
+    )
+
+
+def merge_thread_limits(input_count: int) -> tuple[int, int]:
+    """Bound FFmpeg workers while reserving CPU time for the desktop UI."""
+    cores = max(1, os.cpu_count() or 1)
+    reserved_cores = 2 if cores >= 4 else 1
+    available_cores = max(1, cores - reserved_cores)
+    decoder_threads = 1 if input_count >= 2 else min(2, available_cores)
+    active_decoder_budget = max(1, min(input_count, 4)) * decoder_threads
+    pipeline_budget = max(1, available_cores - active_decoder_budget)
+    # Filtering and encoding run concurrently, so each receives only half of
+    # the remaining budget rather than independently saturating every core.
+    filter_threads = max(1, min(4, pipeline_budget // 2))
+    return decoder_threads, filter_threads
+
+
+def ffmpeg_creation_flags() -> int:
+    if os.name != "nt":
+        return 0
+    return (
+        subprocess.CREATE_NO_WINDOW
+        | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+    )
 
 
 def resolve_ffmpeg(project_root: Path) -> str:
@@ -69,7 +108,7 @@ def probe_video(ffmpeg: str, path: Path) -> dict:
         text=True,
         encoding="utf-8",
         errors="replace",
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        creationflags=ffmpeg_creation_flags(),
     )
     text = process.stderr or ""
     duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
@@ -98,7 +137,7 @@ def probe_audio(ffmpeg: str, path: Path) -> dict:
         text=True,
         encoding="utf-8",
         errors="replace",
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        creationflags=ffmpeg_creation_flags(),
     )
     text = process.stderr or ""
     duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
@@ -402,7 +441,22 @@ def build_timeline_filter_graph(
             if str(item.get("text", "")).strip()
         ]
     )
-    total_duration = max(max(clip["timeline_end"] for clip in prepared), text_end)
+    audio_end = max(
+        [0.0]
+        + [
+            max(0.0, number(item.get("startTime")))
+            + max(
+                0.01,
+                (
+                    info["duration"] if number(item.get("trimEnd")) <= number(item.get("trimStart"))
+                    else min(number(item.get("trimEnd")), info["duration"])
+                ) - max(0.0, min(number(item.get("trimStart")), info["duration"] - 0.01)),
+            )
+            for item, info in zip(audio_tracks, audio_metadata)
+            if not bool(item.get("muted", False))
+        ]
+    ) if bool(config.get("includeAudio", True)) else 0.0
+    total_duration = max(max(clip["timeline_end"] for clip in prepared), text_end, audio_end)
     intervals = timeline_intervals(prepared)
     width = even(int(number(config.get("width"), 1920)))
     height = even(int(number(config.get("height"), 1080)))
@@ -410,32 +464,72 @@ def build_timeline_filter_graph(
     background = "white" if config.get("canvasBackground") == "white" else "black"
     filters: list[str] = []
 
-    branch_counts = {
-        clip["input_index"]: sum(clip in interval["active"] for interval in intervals)
-        for clip in prepared
-    }
-    source_labels: dict[int, deque[str]] = {}
-    for clip in prepared:
-        index = clip["input_index"]
-        count = branch_counts[index]
-        if count <= 1:
-            source_labels[index] = deque([f"[{index}:v:0]"])
-            continue
-        labels = [f"vsrc{index}_{branch}" for branch in range(count)]
-        filters.append(f"[{index}:v:0]split={count}{''.join(f'[{label}]' for label in labels)}")
-        source_labels[index] = deque(f"[{label}]" for label in labels)
+    # A non-overlapping edit can be represented as clips plus cheap color gap
+    # sources.  The generic compositor below splits every input once per active
+    # interval and retains a growing chain of full-resolution canvases; using a
+    # concat graph here keeps only the current decoded streams alive.
+    ordered_prepared = sorted(prepared, key=lambda clip: (clip["timeline_start"], clip["input_index"]))
+    cursor = 0.0
+    linear_non_overlapping = True
+    for clip in ordered_prepared:
+        if clip["timeline_start"] < cursor - 0.0005:
+            linear_non_overlapping = False
+            break
+        cursor = max(cursor, clip["timeline_end"])
+    # A multi-camera composition with custom cells that are present throughout
+    # the timeline has a fixed geometry.  It can be overlaid once per input
+    # instead of splitting every source at every interval boundary.
+    static_custom_composition = (
+        len(prepared) > 1
+        and all(bool(clip["item"].get("layoutCustom")) for clip in prepared)
+        and bool(intervals)
+        and all(len(interval["active"]) > 1 for interval in intervals)
+    )
+    dynamic_compositor_segments = sum(len(interval["active"]) for interval in intervals)
+    dynamic_budget = dynamic_compositor_budget(width, height, metadata)
+    if not linear_non_overlapping and not static_custom_composition and dynamic_compositor_segments > dynamic_budget:
+        raise RuntimeError(
+            "多轨时间线过于复杂，预计需要处理 "
+            f"{dynamic_compositor_segments} 个画面区间，已超过当前分辨率的安全上限 "
+            f"{dynamic_budget}。请拆分项目导出，或为持续画中画改用固定自定义布局。"
+        )
 
-    filters.append(f"color=c={background}:s={width}x{height}:r={fps}:d={total_duration:.6f}[canvas0]")
-    overlay_index = 0
-    segment_index = 0
-    for interval in intervals:
-        cells = layout_cells(interval["active"], width, height)
-        for clip, (x, y, cell_width, cell_height) in zip(interval["active"], cells):
-            source_offset = interval["start"] - clip["timeline_start"]
-            source_start = clip["source_start"] + source_offset
-            source_end = source_start + (interval["end"] - interval["start"])
+    if linear_non_overlapping:
+        labels = []
+        cursor = 0.0
+        gap_index = 0
+        for clip in ordered_prepared:
+            gap_duration = clip["timeline_start"] - cursor
+            if gap_duration > 0.0005:
+                gap_label = f"vgap{gap_index}"
+                filters.append(
+                    f"color=c={background}:s={width}x{height}:r={fps}:d={gap_duration:.6f},"
+                    f"setsar=1,format=yuv420p[{gap_label}]"
+                )
+                labels.append(f"[{gap_label}]")
+                gap_index += 1
+            index = clip["input_index"]
+            filter_text, _, _, _ = build_video_filter(index, clip["metadata"], clip["item"], config)
+            filters.append(filter_text)
+            labels.append(f"[v{index}]")
+            cursor = clip["timeline_end"]
+        if len(labels) == 1:
+            filters.append(f"{labels[0]}null[vbase]")
+        else:
+            filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[vbase]")
+        if total_duration > cursor + 0.0005:
+            filters.append(
+                f"[vbase]tpad=stop_mode=add:stop_duration={total_duration - cursor:.6f}[vextended]"
+            )
+            text_input_label = "vextended"
+        else:
+            text_input_label = "vbase"
+    elif static_custom_composition:
+        cells = layout_cells(prepared, width, height)
+        filters.append(f"color=c={background}:s={width}x{height}:r={fps}:d={total_duration:.6f}[canvas0]")
+        for overlay_index, (clip, (x, y, cell_width, cell_height)) in enumerate(zip(prepared, cells)):
             chain = [
-                f"{source_labels[clip['input_index']].popleft()}trim=start={source_start:.6f}:end={source_end:.6f}",
+                f"[{clip['input_index']}:v:0]trim=start={clip['source_start']:.6f}:end={clip['source_end']:.6f}",
                 "setpts=PTS-STARTPTS",
             ]
             append_rotation_and_crop(chain, clip["metadata"], clip["item"])
@@ -444,16 +538,59 @@ def build_timeline_filter_graph(
                 f"fps={fps}",
                 "setsar=1",
                 "format=yuv420p",
-                f"setpts=PTS+{interval['start']:.6f}/TB[vseg{segment_index}]",
+                f"setpts=PTS+{clip['timeline_start']:.6f}/TB[vstatic{overlay_index}]",
             ])
             filters.append(",".join(chain))
             filters.append(
-                f"[canvas{overlay_index}][vseg{segment_index}]"
-                f"overlay=x={x}:y={y}:eof_action=pass:shortest=0[canvas{overlay_index + 1}]"
+                f"[canvas{overlay_index}][vstatic{overlay_index}]"
+                f"overlay=x={x}:y={y}:eof_action=pass:repeatlast=0:shortest=0[canvas{overlay_index + 1}]"
             )
-            overlay_index += 1
-            segment_index += 1
-    text_input_label = f"canvas{overlay_index}"
+        text_input_label = f"canvas{len(prepared)}"
+    else:
+        branch_counts = {
+            clip["input_index"]: sum(clip in interval["active"] for interval in intervals)
+            for clip in prepared
+        }
+        source_labels: dict[int, deque[str]] = {}
+        for clip in prepared:
+            index = clip["input_index"]
+            count = branch_counts[index]
+            if count <= 1:
+                source_labels[index] = deque([f"[{index}:v:0]"])
+                continue
+            labels = [f"vsrc{index}_{branch}" for branch in range(count)]
+            filters.append(f"[{index}:v:0]split={count}{''.join(f'[{label}]' for label in labels)}")
+            source_labels[index] = deque(f"[{label}]" for label in labels)
+
+        filters.append(f"color=c={background}:s={width}x{height}:r={fps}:d={total_duration:.6f}[canvas0]")
+        overlay_index = 0
+        segment_index = 0
+        for interval in intervals:
+            cells = layout_cells(interval["active"], width, height)
+            for clip, (x, y, cell_width, cell_height) in zip(interval["active"], cells):
+                source_offset = interval["start"] - clip["timeline_start"]
+                source_start = clip["source_start"] + source_offset
+                source_end = source_start + (interval["end"] - interval["start"])
+                chain = [
+                    f"{source_labels[clip['input_index']].popleft()}trim=start={source_start:.6f}:end={source_end:.6f}",
+                    "setpts=PTS-STARTPTS",
+                ]
+                append_rotation_and_crop(chain, clip["metadata"], clip["item"])
+                append_cell_fit(chain, cell_width, cell_height, config)
+                chain.extend([
+                    f"fps={fps}",
+                    "setsar=1",
+                    "format=yuv420p",
+                    f"setpts=PTS+{interval['start']:.6f}/TB[vseg{segment_index}]",
+                ])
+                filters.append(",".join(chain))
+                filters.append(
+                    f"[canvas{overlay_index}][vseg{segment_index}]"
+                    f"overlay=x={x}:y={y}:eof_action=pass:shortest=0[canvas{overlay_index + 1}]"
+                )
+                overlay_index += 1
+                segment_index += 1
+        text_input_label = f"canvas{overlay_index}"
     for text_index, item in enumerate(text_tracks):
         text = str(item.get("text", "")).strip()
         if not text:
@@ -481,12 +618,33 @@ def build_timeline_filter_graph(
             f"[{next_label}]"
         )
         text_input_label = next_label
-    filters.append(f"[{text_input_label}]trim=duration={total_duration:.6f},format=yuv420p[vout]")
+    preview_start = max(0.0, number(config.get("previewStart"), 0.0))
+    requested_preview_duration = number(config.get("previewDuration"), 0.0)
+    preview_duration = min(requested_preview_duration, max(0.0, total_duration - preview_start)) \
+        if requested_preview_duration > 0.0 else total_duration
+    if preview_duration <= 0.0:
+        raise RuntimeError("所选预览范围没有可计算的视频内容。")
+    if requested_preview_duration > 0.0:
+        filters.append(
+            f"[{text_input_label}]trim=start={preview_start:.6f}:duration={preview_duration:.6f},"
+            "setpts=PTS-STARTPTS,format=yuv420p[vout]"
+        )
+    else:
+        filters.append(f"[{text_input_label}]trim=duration={total_duration:.6f},format=yuv420p[vout]")
 
     audio_labels: list[str] = []
     if bool(config.get("includeAudio", True)):
+        extracted_clip_ids = {
+            str(item.get("sourceClipId"))
+            for item in audio_tracks
+            if item.get("sourceType") == "video" and item.get("sourceClipId")
+        }
         for clip in prepared:
-            if not clip["metadata"]["has_audio"] or bool(clip["item"].get("muted", False)):
+            if (
+                not clip["metadata"]["has_audio"]
+                or bool(clip["item"].get("muted", False))
+                or str(clip["item"].get("id", "")) in extracted_clip_ids
+            ):
                 continue
             label = f"clipa{clip['input_index']}"
             delay_ms = max(0, int(clip["timeline_start"] * 1000))
@@ -501,27 +659,37 @@ def build_timeline_filter_graph(
             )
             audio_labels.append(f"[{label}]")
 
-    for audio_index, (item, info) in enumerate(zip(audio_tracks, audio_metadata)):
-        input_index = len(inputs) + audio_index
-        source_start = max(0.0, min(number(item.get("trimStart")), info["duration"] - 0.01))
-        requested_end = number(item.get("trimEnd"))
-        source_end = info["duration"] if requested_end <= source_start else min(requested_end, info["duration"])
-        delay_ms = max(0, int(number(item.get("startTime")) * 1000))
-        label = f"externala{audio_index}"
-        filters.append(
-            f"[{input_index}:a:0]atrim=start={source_start:.6f}:end={source_end:.6f},"
-            "asetpts=PTS-STARTPTS,aresample=48000,"
-            "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"adelay={delay_ms}:all=1[{label}]"
-        )
-        audio_labels.append(f"[{label}]")
+    if bool(config.get("includeAudio", True)):
+        for audio_index, (item, info) in enumerate(zip(audio_tracks, audio_metadata)):
+            if bool(item.get("muted", False)):
+                continue
+            input_index = int(number(item.get("_inputIndex"), len(inputs) + audio_index))
+            source_start = max(0.0, min(number(item.get("trimStart")), info["duration"] - 0.01))
+            requested_end = number(item.get("trimEnd"))
+            source_end = info["duration"] if requested_end <= source_start else min(requested_end, info["duration"])
+            delay_ms = max(0, int(number(item.get("startTime")) * 1000))
+            label = f"externala{audio_index}"
+            volume = max(0.0, min(3.0, number(item.get("volume"), 1.0)))
+            volume_filter = f"volume={volume:.2f}," if volume != 1.0 else ""
+            filters.append(
+                f"[{input_index}:a:0]atrim=start={source_start:.6f}:end={source_end:.6f},"
+                "asetpts=PTS-STARTPTS,aresample=48000,"
+                "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"{volume_filter}adelay={delay_ms}:all=1[{label}]"
+            )
+            audio_labels.append(f"[{label}]")
 
     if audio_labels:
+        audio_trim = (
+            f"atrim=start={preview_start:.6f}:duration={preview_duration:.6f}"
+            if requested_preview_duration > 0.0
+            else f"atrim=duration={total_duration:.6f}"
+        )
         filters.append(
             f"{''.join(audio_labels)}amix=inputs={len(audio_labels)}:duration=longest:normalize=0,"
-            f"atrim=duration={total_duration:.6f},asetpts=PTS-STARTPTS[aout]"
+            f"{audio_trim},asetpts=PTS-STARTPTS[aout]"
         )
-    return filters, total_duration, bool(audio_labels)
+    return filters, preview_duration, bool(audio_labels)
 
 
 def drain_stderr(stream, tail: deque[str]) -> None:
@@ -566,7 +734,11 @@ def run_ffmpeg_command(
 ) -> None:
     global ACTIVE_PROCESS
 
-    log(f"FFmpeg command: {subprocess.list2cmdline(command)}")
+    input_count = sum(1 for argument in command if argument == "-i")
+    output_name = Path(command[-1]).name if command else "-"
+    log(f"启动 FFmpeg：{input_count} 个输入，输出 {output_name}")
+    if os.environ.get("VIDEO_SIM_VERBOSE_MERGE", "").strip() == "1":
+        log(f"FFmpeg command: {subprocess.list2cmdline(command)}")
     stderr_tail: deque[str] = deque(maxlen=30)
     ACTIVE_PROCESS = subprocess.Popen(
         command,
@@ -575,7 +747,7 @@ def run_ffmpeg_command(
         text=True,
         encoding="utf-8",
         errors="replace",
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        creationflags=ffmpeg_creation_flags(),
     )
     stderr_thread = threading.Thread(
         target=drain_stderr,
@@ -585,6 +757,8 @@ def run_ffmpeg_command(
     stderr_thread.start()
 
     assert ACTIVE_PROCESS.stdout is not None
+    last_progress_at = 0.0
+    last_elapsed = -1.0
     for line in iter(ACTIVE_PROCESS.stdout.readline, ""):
         key, _, value = line.strip().partition("=")
         if key in {"out_time_us", "out_time_ms"}:
@@ -592,6 +766,17 @@ def run_ffmpeg_command(
                 elapsed = float(value) / 1_000_000.0
             except ValueError:
                 continue
+            # Several FFmpeg versions emit both keys for the same timestamp.
+            # Collapse duplicates and keep bridge/UI traffic comfortably below
+            # the frame budget while the encoder is saturating the machine.
+            if elapsed <= last_elapsed + 0.000001:
+                continue
+            now = time.monotonic()
+            if now - last_progress_at < 0.2 and elapsed < total_duration - 0.02:
+                last_elapsed = elapsed
+                continue
+            last_elapsed = elapsed
+            last_progress_at = now
             progress = progress_start + min(1.0, elapsed / max(0.01, total_duration)) * progress_span
             emit_progress(progress, f"{progress_stage}：{elapsed:.1f}s / {total_duration:.1f}s")
 
@@ -603,6 +788,11 @@ def run_ffmpeg_command(
         raise RuntimeError(f"FFmpeg 合并失败，退出码 {exit_code}：{details[-1800:]}")
 
 
+def write_filter_graph(path: Path, filters: list[str]) -> None:
+    """Store large filter graphs in a file to avoid platform command limits."""
+    path.write_text(";".join(filters), encoding="utf-8")
+
+
 def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
     global ACTIVE_PROCESS
 
@@ -612,30 +802,81 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
         raise RuntimeError("时间线至少需要一个视频片段。")
 
     metadata = []
+    video_metadata_cache: dict[str, dict] = {}
     for index, item in enumerate(inputs, start=1):
         path = Path(str(item.get("path", "")))
         if not path.is_file():
             raise RuntimeError(f"视频文件不存在: {path}")
         emit_progress(index / len(inputs) * 8.0, f"读取视频信息 {index}/{len(inputs)}：{path.name}")
-        metadata.append(probe_video(ffmpeg, path))
+        cache_key = os.path.normcase(str(path.resolve()))
+        info = video_metadata_cache.get(cache_key)
+        if info is None:
+            info = probe_video(ffmpeg, path)
+            video_metadata_cache[cache_key] = info
+        metadata.append(info)
 
     output_dir = Path(str(config.get("outputDir", ""))).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_stem = safe_stem(str(config.get("outputName", "")))
     split_mode = str(config.get("splitMode", "none"))
     include_audio = bool(config.get("includeAudio", True))
-    audio_tracks = config.get("audioTracks") or []
+    audio_tracks = (config.get("audioTracks") or []) if include_audio else []
 
-    input_args = [ffmpeg, "-hide_banner", "-y"]
+    video_input_index_by_id = {
+        str(item.get("id")): index
+        for index, item in enumerate(inputs)
+        if item.get("id")
+    }
+    reusable_audio_indexes: dict[int, int] = {}
+    extra_audio_input_count = 0
+    for audio_index, item in enumerate(audio_tracks):
+        if bool(item.get("muted", False)):
+            continue
+        source_clip_id = str(item.get("sourceClipId", ""))
+        source_input_index = video_input_index_by_id.get(source_clip_id)
+        if (
+            item.get("sourceType") == "video"
+            and source_input_index is not None
+            and metadata[source_input_index].get("has_audio")
+        ):
+            reusable_audio_indexes[audio_index] = source_input_index
+        else:
+            extra_audio_input_count += 1
+
+    decoder_threads, filter_threads = merge_thread_limits(len(inputs) + extra_audio_input_count)
+    input_args = [
+        ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+        "-filter_threads", str(filter_threads),
+        "-filter_complex_threads", str(filter_threads),
+    ]
     for item in inputs:
-        input_args.extend(["-i", str(Path(str(item["path"])))])
+        input_args.extend(["-threads", str(decoder_threads), "-i", str(Path(str(item["path"])))] )
     audio_metadata = []
-    for item in audio_tracks:
+    audio_metadata_cache: dict[str, dict] = {}
+    next_audio_input_index = len(inputs)
+    for audio_index, item in enumerate(audio_tracks):
+        if bool(item.get("muted", False)):
+            item["_inputIndex"] = -1
+            audio_metadata.append({"duration": 0.01})
+            continue
+        reused_input_index = reusable_audio_indexes.get(audio_index)
+        if reused_input_index is not None:
+            item["_inputIndex"] = reused_input_index
+            audio_metadata.append({"duration": metadata[reused_input_index]["duration"]})
+            continue
         path = Path(str(item.get("path", "")))
         if not path.is_file():
             raise RuntimeError(f"音频文件不存在: {path}")
-        input_args.extend(["-i", str(path)])
-        audio_metadata.append(probe_audio(ffmpeg, path))
+        item["_inputIndex"] = next_audio_input_index
+        next_audio_input_index += 1
+        input_args.extend(["-threads", str(decoder_threads), "-i", str(path)])
+        cache_key = os.path.normcase(str(path.resolve()))
+        info = audio_metadata_cache.get(cache_key)
+        if info is None:
+            video_info = video_metadata_cache.get(cache_key)
+            info = {"duration": video_info["duration"]} if video_info and video_info["has_audio"] else probe_audio(ffmpeg, path)
+            audio_metadata_cache[cache_key] = info
+        audio_metadata.append(info)
 
     filters, total_duration, output_has_audio = build_timeline_filter_graph(
         inputs,
@@ -645,10 +886,10 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
         config,
     )
 
-    render_args = ["-filter_complex", ";".join(filters), "-map", "[vout]"]
-    if output_has_audio:
-        render_args.extend(["-map", "[aout]"])
     encoding_args = video_encoding_args(config)
+    # Encoder frame queues also scale with thread count; keep them aligned with
+    # the bounded filter pool instead of letting every codec use all cores.
+    encoding_args.extend(["-threads", str(filter_threads)])
     if output_has_audio:
         encoding_args.extend(audio_encoding_args(config))
     encoding_args.extend(["-map_metadata", "-1", "-progress", "pipe:1", "-nostats"])
@@ -680,58 +921,53 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
         str(config.get("rateControl", "quality")).lower() == "bitrate"
         and bool(config.get("twoPass", False))
     )
-    if use_two_pass:
-        with tempfile.TemporaryDirectory(prefix="video_merge_pass_") as pass_dir:
-            passlog = str(Path(pass_dir) / "ffmpeg2pass")
-            first_pass_filters = list(filters)
-            if output_has_audio:
-                first_pass_filters.append("[aout]anullsink")
-            first_pass_args = [
-                "-filter_complex", ";".join(first_pass_filters),
-                "-map", "[vout]",
-                *video_encoding_args(config),
-                "-pass", "1",
-                "-passlogfile", passlog,
-                "-an",
-                "-map_metadata", "-1",
-                "-progress", "pipe:1",
-                "-nostats",
-                *first_pass_output_args,
-                "-f", "null",
-                os.devnull,
-            ]
-            emit_progress(10.0, "第 1 遍：分析画面复杂度")
+    # Keep the potentially huge graph out of Windows' command-line limit and
+    # ensure every temporary artifact is removed after either pass completes.
+    with tempfile.TemporaryDirectory(prefix="video_merge_graph_") as graph_dir:
+        graph_path = Path(graph_dir) / "timeline.ffscript"
+        write_filter_graph(graph_path, filters)
+        render_args = ["-filter_complex_script", str(graph_path), "-map", "[vout]"]
+        if output_has_audio:
+            render_args.extend(["-map", "[aout]"])
+        if use_two_pass:
+            with tempfile.TemporaryDirectory(prefix="video_merge_pass_") as pass_dir:
+                passlog = str(Path(pass_dir) / "ffmpeg2pass")
+                first_pass_filters = list(filters)
+                if output_has_audio:
+                    first_pass_filters.append("[aout]anullsink")
+                first_graph_path = Path(pass_dir) / "first-pass.ffscript"
+                write_filter_graph(first_graph_path, first_pass_filters)
+                first_pass_args = [
+                    "-filter_complex_script", str(first_graph_path),
+                    "-map", "[vout]",
+                    *video_encoding_args(config),
+                    "-threads", str(filter_threads),
+                    "-pass", "1",
+                    "-passlogfile", passlog,
+                    "-an",
+                    "-map_metadata", "-1",
+                    "-progress", "pipe:1",
+                    "-nostats",
+                    *first_pass_output_args,
+                    "-f", "null",
+                    os.devnull,
+                ]
+                emit_progress(10.0, "第 1 遍：分析画面复杂度")
+                run_ffmpeg_command(
+                    [*input_args, *first_pass_args], total_duration, 10.0, 43.0, "第 1 遍分析",
+                )
+                emit_progress(54.0, "第 2 遍：按目标码率编码")
+                second_pass_args = [
+                    *render_args, *encoding_args, "-pass", "2", "-passlogfile", passlog, *output_args,
+                ]
+                run_ffmpeg_command(
+                    [*input_args, *second_pass_args], total_duration, 54.0, 44.0, "第 2 遍编码",
+                )
+        else:
+            emit_progress(10.0, f"开始合并 {len(inputs)} 个视频")
             run_ffmpeg_command(
-                [*input_args, *first_pass_args],
-                total_duration,
-                10.0,
-                43.0,
-                "第 1 遍分析",
+                [*input_args, *render_args, *encoding_args, *output_args], total_duration, 10.0, 88.0, "正在合并",
             )
-            emit_progress(54.0, "第 2 遍：按目标码率编码")
-            second_pass_args = [
-                *render_args,
-                *encoding_args,
-                "-pass", "2",
-                "-passlogfile", passlog,
-                *output_args,
-            ]
-            run_ffmpeg_command(
-                [*input_args, *second_pass_args],
-                total_duration,
-                54.0,
-                44.0,
-                "第 2 遍编码",
-            )
-    else:
-        emit_progress(10.0, f"开始合并 {len(inputs)} 个视频")
-        run_ffmpeg_command(
-            [*input_args, *render_args, *encoding_args, *output_args],
-            total_duration,
-            10.0,
-            88.0,
-            "正在合并",
-        )
     emit_progress(99.0, "正在整理输出文件")
 
     outputs = sorted(output_dir.glob(expected_pattern))

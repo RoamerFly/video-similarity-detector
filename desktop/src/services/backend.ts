@@ -84,6 +84,7 @@ export interface VideoMetadata {
 }
 
 export interface VideoMergeItem {
+  id: string
   path: string
   startTime: number
   trackIndex: number
@@ -109,6 +110,10 @@ export interface VideoMergeAudioItem {
   startTime: number
   trimStart?: number
   trimEnd?: number
+  volume?: number
+  muted?: boolean
+  sourceType?: 'external' | 'video'
+  sourceClipId?: string
 }
 
 export interface VideoMergeTextItem {
@@ -146,6 +151,8 @@ export interface VideoMergeConfig {
   snapToVideos: boolean
   projectRoot?: string
   pythonPath?: string
+  previewStart?: number
+  previewDuration?: number
 }
 
 export interface MergeProgressPayload {
@@ -755,6 +762,11 @@ export async function probeVideoMetadata(paths: string[], batchSize?: number, pr
 export async function runVideoMerge(config: VideoMergeConfig) {
   if (!hasTauriRuntime()) throw new Error('视频合并需要在 Tauri 应用中运行。')
   return invoke<string>('run_video_merge', { config })
+}
+
+export async function renderVideoMergePreview(config: VideoMergeConfig) {
+  if (!hasTauriRuntime()) throw new Error('真实分辨率预览需要在 Tauri 应用中运行。')
+  return invoke<string>('render_video_merge_preview', { config })
 }
 
 export async function cancelVideoMerge() {

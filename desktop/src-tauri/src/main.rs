@@ -1012,6 +1012,8 @@ struct AnalysisTaskRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MergeVideoItem {
+    #[serde(default)]
+    id: String,
     path: String,
     #[serde(default)]
     start_time: f64,
@@ -1053,6 +1055,27 @@ struct MergeAudioItem {
     start_time: f64,
     trim_start: Option<f64>,
     trim_end: Option<f64>,
+    #[serde(default)]
+    volume: Option<f64>,
+    #[serde(default)]
+    muted: bool,
+    #[serde(default)]
+    source_type: Option<String>,
+    #[serde(default)]
+    source_clip_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeTextItem {
+    text: String,
+    start_time: f64,
+    duration: f64,
+    x: f64,
+    y: f64,
+    font_size: u32,
+    color: String,
+    background_color: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1061,6 +1084,8 @@ struct VideoMergeConfig {
     inputs: Vec<MergeVideoItem>,
     #[serde(default)]
     audio_tracks: Vec<MergeAudioItem>,
+    #[serde(default)]
+    text_tracks: Vec<MergeTextItem>,
     output_dir: String,
     output_name: String,
     width: u32,
@@ -1088,6 +1113,10 @@ struct VideoMergeConfig {
     snap_to_videos: bool,
     project_root: Option<String>,
     python_path: Option<String>,
+    #[serde(default)]
+    preview_start: Option<f64>,
+    #[serde(default)]
+    preview_duration: Option<f64>,
 }
 
 fn default_canvas_background() -> String {
@@ -2912,6 +2941,7 @@ fn run_video_merge(
         .inputs
         .iter()
         .map(|item| MergeVideoItem {
+            id: item.id.clone(),
             path: path_to_string(resolve_user_path(&root, &item.path)),
             start_time: item.start_time,
             track_index: item.track_index,
@@ -2930,6 +2960,20 @@ fn run_video_merge(
             layout_y: item.layout_y,
             layout_width: item.layout_width,
             layout_height: item.layout_height,
+        })
+        .collect();
+    normalized_config.audio_tracks = config
+        .audio_tracks
+        .iter()
+        .map(|item| MergeAudioItem {
+            path: path_to_string(resolve_user_path(&root, &item.path)),
+            start_time: item.start_time,
+            trim_start: item.trim_start,
+            trim_end: item.trim_end,
+            volume: item.volume,
+            muted: item.muted,
+            source_type: item.source_type.clone(),
+            source_clip_id: item.source_clip_id.clone(),
         })
         .collect();
     for item in &normalized_config.inputs {
@@ -2973,7 +3017,15 @@ fn run_video_merge(
         command.creation_flags(0x08000000 | 0x00004000);
     }
 
-    if let Ok(mut running) = merge_state.is_running.lock() {
+    {
+        let mut running = merge_state
+            .is_running
+            .lock()
+            .map_err(|_| "合并任务状态锁定失败".to_string())?;
+        if *running {
+            let _ = fs::remove_file(&config_path);
+            return Err("已有视频合并任务正在运行".to_string());
+        }
         *running = true;
     }
     if let Ok(mut pid) = merge_state.current_pid.lock() {
@@ -2995,6 +3047,124 @@ fn run_video_merge(
         run_video_merge_process(app_for_task, command, config_path, result_path);
     });
     Ok(task_id)
+}
+
+#[tauri::command]
+async fn render_video_merge_preview(
+    app: tauri::AppHandle,
+    config: VideoMergeConfig,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || render_video_merge_preview_blocking(app, config))
+        .await
+        .map_err(|error| format!("等待真实分辨率预览计算失败: {error}"))?
+}
+
+fn render_video_merge_preview_blocking(
+    app: tauri::AppHandle,
+    config: VideoMergeConfig,
+) -> Result<String, String> {
+    if config.inputs.is_empty() {
+        return Err("时间线至少需要一个视频片段".to_string());
+    }
+    let preview_duration = config.preview_duration.unwrap_or(0.0);
+    if !preview_duration.is_finite() || preview_duration <= 0.0 {
+        return Err("预览计算时长必须大于 0 秒".to_string());
+    }
+    let root = resolve_config_project_root(&app, config.project_root.as_deref())?;
+    let script = root.join("scripts").join("merge_videos.py");
+    if !script.is_file() {
+        return Err(format!("找不到视频合并脚本: {}", script.display()));
+    }
+
+    let preview_dir = root.join("data").join("cache").join("merge-preview");
+    fs::create_dir_all(&preview_dir).map_err(|e| format!("创建预览缓存目录失败: {e}"))?;
+    if let Ok(entries) = fs::read_dir(&preview_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.file_name().and_then(|name| name.to_str()).map(|name| name.starts_with("resolution-preview-") && name.ends_with(".mp4")).unwrap_or(false)
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    let mut normalized_config = config.clone();
+    normalized_config.output_dir = path_to_string(preview_dir);
+    normalized_config.output_name = format!("resolution-preview-{}", timestamp_millis());
+    normalized_config.split_mode = "none".to_string();
+    normalized_config.two_pass = false;
+    normalized_config.inputs = config.inputs.iter().map(|item| MergeVideoItem {
+        id: item.id.clone(),
+        path: path_to_string(resolve_user_path(&root, &item.path)),
+        start_time: item.start_time,
+        track_index: item.track_index,
+        trim_start: item.trim_start,
+        trim_end: item.trim_end,
+        muted: item.muted,
+        volume: item.volume,
+        rotation: item.rotation,
+        crop_enabled: item.crop_enabled,
+        crop_x: item.crop_x,
+        crop_y: item.crop_y,
+        crop_width: item.crop_width,
+        crop_height: item.crop_height,
+        layout_custom: item.layout_custom,
+        layout_x: item.layout_x,
+        layout_y: item.layout_y,
+        layout_width: item.layout_width,
+        layout_height: item.layout_height,
+    }).collect();
+    normalized_config.audio_tracks = config.audio_tracks.iter().map(|item| MergeAudioItem {
+        path: path_to_string(resolve_user_path(&root, &item.path)),
+        start_time: item.start_time,
+        trim_start: item.trim_start,
+        trim_end: item.trim_end,
+        volume: item.volume,
+        muted: item.muted,
+        source_type: item.source_type.clone(),
+        source_clip_id: item.source_clip_id.clone(),
+    }).collect();
+    for item in &normalized_config.inputs {
+        let path = PathBuf::from(&item.path);
+        if !path.is_file() {
+            return Err(format!("视频文件不存在: {}", path.display()));
+        }
+    }
+
+    let runtime_dir = root.join("data").join(".runtime");
+    fs::create_dir_all(&runtime_dir).map_err(|e| format!("创建预览运行目录失败: {e}"))?;
+    let task_id = format!("merge-preview-{}", timestamp_millis());
+    let config_path = runtime_dir.join(format!("{task_id}.json"));
+    let result_path = runtime_dir.join(format!("{task_id}.result.json"));
+    let config_json = serde_json::to_vec_pretty(&normalized_config)
+        .map_err(|e| format!("生成预览配置失败: {e}"))?;
+    fs::write(&config_path, config_json).map_err(|e| format!("写入预览配置失败: {e}"))?;
+
+    let python = resolve_python(&app, &root, config.python_path.as_deref());
+    let mut command = Command::new(&python);
+    command.current_dir(&root).args([
+        "-u".into(), script_arg(&script), "--config".into(), script_arg(&config_path),
+        "--result".into(), script_arg(&result_path), "--project-root".into(), script_arg(&root),
+    ]).stdout(Stdio::null()).stderr(Stdio::null());
+    configure_python_command(&mut command, &root, &python);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000 | 0x00004000);
+    }
+    let output = command.output().map_err(|e| format!("无法启动真实分辨率预览计算: {e}"));
+    let outcome = output.and_then(|output| {
+        if !output.status.success() {
+            return Err(format!("真实分辨率预览计算失败，退出码: {}", output.status.code().map_or_else(|| "未知".to_string(), |code| code.to_string())));
+        }
+        let content = fs::read_to_string(&result_path).map_err(|e| format!("读取预览结果失败: {e}"))?;
+        let payload: MergeFinishedPayload = serde_json::from_str(&content)
+            .map_err(|e| format!("解析预览结果失败: {e}"))?;
+        payload.output_paths.into_iter().next().ok_or_else(|| "预览计算没有生成视频文件".to_string())
+    });
+    let _ = fs::remove_file(config_path);
+    let _ = fs::remove_file(result_path);
+    outcome
 }
 
 #[tauri::command]
@@ -3478,6 +3648,15 @@ fn run_video_merge_process(
 
     if let Ok(mut pid) = app.state::<MergeTaskState>().current_pid.lock() {
         *pid = Some(child.id());
+    }
+    let cancelled_before_pid_ready = app
+        .state::<MergeTaskState>()
+        .cancel_requested
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or(false);
+    if cancelled_before_pid_ready {
+        let _ = kill_process_tree(child.id());
     }
 
     let stdout_handle = child
@@ -5323,6 +5502,7 @@ fn main() {
             scan_analysis_task_cache,
             run_batch_compare,
             run_video_merge,
+            render_video_merge_preview,
             cancel_video_merge,
             run_duplicate_file_check,
             cancel_current_task,
@@ -7096,11 +7276,37 @@ mod tests {
         python_spawn_error_message, sha256_file, update_report_entries_for_resolved_path,
         AnalysisVideoContext, AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator,
         PythonLaunchDiagnostics, ReportPairIdentity,
+        VideoMergeConfig,
     };
     use serde_json::json;
     use std::fs;
     #[cfg(target_os = "windows")]
     use std::path::Path;
+
+    #[test]
+    fn merge_config_preserves_text_and_extracted_audio_identity() {
+        let config: VideoMergeConfig = serde_json::from_value(json!({
+            "inputs": [{
+                "id": "clip-1", "path": "D:/video.mp4", "startTime": 0, "trackIndex": 0
+            }],
+            "audioTracks": [{
+                "path": "D:/video.mp4", "startTime": 0,
+                "sourceType": "video", "sourceClipId": "clip-1"
+            }],
+            "textTracks": [{
+                "text": "字幕", "startTime": 1, "duration": 2, "x": 0.5, "y": 0.8,
+                "fontSize": 42, "color": "#fff", "backgroundColor": "#000"
+            }],
+            "outputDir": "D:/out", "outputName": "merged", "width": 1920, "height": 1080,
+            "fitMode": "contain", "splitMode": "none", "splitValue": 600, "fps": 30,
+            "crf": 23, "encoderPreset": "medium", "includeAudio": true
+        })).expect("parse merge config");
+
+        assert_eq!(config.inputs[0].id, "clip-1");
+        assert_eq!(config.audio_tracks[0].source_clip_id.as_deref(), Some("clip-1"));
+        assert_eq!(config.audio_tracks[0].source_type.as_deref(), Some("video"));
+        assert_eq!(config.text_tracks[0].text, "字幕");
+    }
 
     #[test]
     fn calculates_model_file_sha256() {

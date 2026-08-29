@@ -23,3 +23,20 @@ export function driftCorrection(
 export function targetMediaTime(trimStart: number, timelineTime: number, layoutStart: number) {
   return trimStart + Math.max(0, timelineTime - layoutStart)
 }
+
+/**
+ * A media event is allowed to resume playback only when it belongs to the
+ * latest playback session and remains active.  This is deliberately pure so
+ * delayed loadedmetadata events can be covered without browser media mocks.
+ */
+export function canResumeMedia(
+  eventGeneration: number,
+  currentGeneration: number,
+  playing: boolean,
+  activeIds: Iterable<string>,
+  mediaId: string,
+) {
+  if (!playing || eventGeneration !== currentGeneration) return false
+  for (const id of activeIds) if (id === mediaId) return true
+  return false
+}

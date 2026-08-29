@@ -10,6 +10,7 @@ import type {
 import { MergeCropMasks } from './MergeCropMasks'
 import { MergePlaybackControls } from './MergePlaybackControls'
 import { PreviewEditDraft, usePreviewEditDraft } from './PreviewEditDraft'
+import { PlaybackClock } from './PlaybackClock'
 import { clamp, normalizePath } from './mergeFormat'
 import {
   boundingLayoutRect,
@@ -26,11 +27,6 @@ interface MutableRef<T> {
   current: T
 }
 
-interface PreviewSize {
-  width: number
-  height: number
-}
-
 interface PixelRect {
   left: number
   top: number
@@ -44,9 +40,8 @@ interface MergePreviewCanvasProps {
   previewRef: MutableRef<HTMLVideoElement | null>
   editDraft: PreviewEditDraft
   previewVideoRefs: MutableRef<Map<string, HTMLVideoElement>>
-  previewSize: PreviewSize | null
   outputCanvasGeometry: PreviewCanvasGeometry | null
-  settings: Pick<MergeSettings, 'canvasBackground' | 'fitMode' | 'height' | 'width'>
+  settings: Pick<MergeSettings, 'canvasBackground' | 'fitMode' | 'height' | 'width' | 'fps'>
   previewLayouts: ClipLayout[]
   previewCells: PreviewCanvasGeometry[]
   metadata: Record<string, VideoMetadata>
@@ -61,7 +56,14 @@ interface MergePreviewCanvasProps {
   cropGeometry: CropGeometry | null
   playing: boolean
   totalDuration: number
+  clock: PlaybackClock
+  suspendMedia?: boolean
   previewStart: number | null
+  resolutionPreview?: { path: string; start: number; duration: number } | null
+  resolutionPreviewMode?: 'live' | 'computed'
+  resolutionPreviewCalculating?: boolean
+  onOpenResolutionPreview?: () => void
+  onResolutionPreviewModeChange?: (mode: 'live' | 'computed') => void
   onPreviewLayoutPointerDown: (
     event: ReactPointerEvent<HTMLDivElement>,
     layout: ClipLayout,
@@ -71,7 +73,7 @@ interface MergePreviewCanvasProps {
     event: ReactPointerEvent<HTMLDivElement>,
     item: MergeTextItem,
   ) => void
-  onEditText: (item: MergeTextItem) => void
+  onPreviewTextContextMenu: (event: React.MouseEvent<HTMLDivElement>, item: MergeTextItem) => void
   onGroupLayoutPointerDown: (
     event: ReactPointerEvent<HTMLElement>,
     handle: CropHandle,
@@ -81,11 +83,12 @@ interface MergePreviewCanvasProps {
     handle: CropHandle,
   ) => void
   onResetCropSelection: () => void
-  onPreviewResizePointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void
   onPreviewMetadataLoaded: () => void
+  onPreviewVideoReady: (layout: ClipLayout, video: HTMLVideoElement) => void
   onSeek: (time: number) => void
   onTogglePlayback: () => void
   onNudge: (direction: -1 | 1) => void
+  onFullscreenError?: (message: string) => void
 }
 
 const resizeHandles: CropHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
@@ -96,7 +99,6 @@ export function MergePreviewCanvas({
   previewRef,
   editDraft,
   previewVideoRefs,
-  previewSize,
   outputCanvasGeometry,
   settings,
   previewLayouts,
@@ -113,21 +115,36 @@ export function MergePreviewCanvas({
   cropGeometry,
   playing,
   totalDuration,
+  clock,
+  suspendMedia = false,
   previewStart,
+  resolutionPreview = null,
+  resolutionPreviewMode = 'live',
+  resolutionPreviewCalculating = false,
+  onOpenResolutionPreview,
+  onResolutionPreviewModeChange,
   onPreviewLayoutPointerDown,
   onPreviewTextPointerDown,
-  onEditText,
+  onPreviewTextContextMenu,
   onGroupLayoutPointerDown,
   onCropPointerDown,
   onResetCropSelection,
-  onPreviewResizePointerDown,
   onPreviewMetadataLoaded,
+  onPreviewVideoReady,
   onSeek,
   onTogglePlayback,
   onNudge,
+  onFullscreenError,
 }: MergePreviewCanvasProps) {
+  const fullscreenRef = useRef<HTMLDivElement | null>(null)
   const previewStageRef = useRef<HTMLDivElement | null>(null)
+  const computedPreviewRef = useRef<HTMLVideoElement | null>(null)
+  const fallbackFullscreenRef = useRef(false)
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 })
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [fallbackFullscreen, setFallbackFullscreen] = useState(false)
+  const [computedPreviewPlaying, setComputedPreviewPlaying] = useState(false)
+  const [computedPreviewTime, setComputedPreviewTime] = useState(0)
   const draft = usePreviewEditDraft(editDraft)
   useEffect(() => {
     const stage = previewStageRef.current
@@ -143,21 +160,107 @@ export function MergePreviewCanvas({
     const availableHeight = previewStageSize.height
     if (availableWidth <= 0 || availableHeight <= 0) return null
     const outputRatio = Math.max(0.01, settings.width / Math.max(1, settings.height))
-    if (previewSize) {
-      const requestedHeight = Math.min(availableHeight, Math.max(220, previewSize.height))
-      const requestedWidth = requestedHeight * outputRatio
-      if (requestedWidth <= availableWidth) return { width: requestedWidth, height: requestedHeight }
-      return { width: availableWidth, height: availableWidth / outputRatio }
-    }
     return availableWidth / availableHeight > outputRatio
       ? { width: availableHeight * outputRatio, height: availableHeight }
       : { width: availableWidth, height: availableWidth / outputRatio }
-  }, [previewSize, previewStageSize.height, previewStageSize.width, settings.height, settings.width])
+  }, [previewStageSize.height, previewStageSize.width, settings.height, settings.width])
   useEffect(() => {
     if (!previewFrameSize) return undefined
     const frame = window.requestAnimationFrame(onPreviewMetadataLoaded)
     return () => window.cancelAnimationFrame(frame)
   }, [onPreviewMetadataLoaded, previewFrameSize])
+
+  useEffect(() => {
+    const target = fullscreenRef.current
+    if (!target) return undefined
+    const onFullscreenChange = () => {
+      const active = document.fullscreenElement === target
+      if (active) {
+        fallbackFullscreenRef.current = false
+        setFallbackFullscreen(false)
+      }
+      setIsFullscreen(active || fallbackFullscreenRef.current)
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    onFullscreenChange()
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
+
+  useEffect(() => {
+    if (!fallbackFullscreen) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      fallbackFullscreenRef.current = false
+      setFallbackFullscreen(false)
+      setIsFullscreen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [fallbackFullscreen])
+
+  const toggleFullscreen = async () => {
+    const target = fullscreenRef.current
+    if (!target) return
+    if (fallbackFullscreen) {
+      fallbackFullscreenRef.current = false
+      setFallbackFullscreen(false)
+      setIsFullscreen(false)
+      return
+    }
+    if (document.fullscreenElement === target) {
+      try {
+        await document.exitFullscreen()
+      } catch {
+        setFallbackFullscreen(false)
+        setIsFullscreen(false)
+      }
+      return
+    }
+    try {
+      if (typeof target.requestFullscreen !== 'function') throw new Error('Fullscreen API unavailable')
+      await target.requestFullscreen()
+    } catch {
+      // Tauri/WebView builds may deny the standard API.  A fixed overlay keeps
+      // the interaction usable and, unlike a stale fullscreen flag, is fully
+      // reversible with the same button.
+      fallbackFullscreenRef.current = true
+      setFallbackFullscreen(true)
+      setIsFullscreen(true)
+      onFullscreenError?.('系统全屏不可用，已切换到窗口内全屏预览。')
+    }
+  }
+
+  useEffect(() => {
+    const computed = computedPreviewRef.current
+    if (!computed) return
+    if (resolutionPreviewMode === 'computed') {
+      previewVideoRefs.current.forEach((video) => video.pause())
+      if (computed.readyState >= 1) {
+        computed.currentTime = Math.min(computed.currentTime, Math.max(0, (resolutionPreview?.duration ?? 0) - 0.01))
+      }
+    } else {
+      computed.pause()
+    }
+  }, [previewVideoRefs, resolutionPreview?.duration, resolutionPreviewMode])
+  const computedOnToggle = () => {
+    const computed = computedPreviewRef.current
+    if (!computed || !resolutionPreview) return
+    if (computed.paused) {
+      if (computed.currentTime >= Math.max(0, resolutionPreview.duration - 0.02)) computed.currentTime = 0
+      void computed.play().then(() => setComputedPreviewPlaying(true)).catch(() => setComputedPreviewPlaying(false))
+    } else {
+      computed.pause()
+      setComputedPreviewPlaying(false)
+    }
+  }
+  const computedOnSeek = (time: number) => {
+    const computed = computedPreviewRef.current
+    if (!computed || !resolutionPreview) return
+    const next = clamp(time, 0, resolutionPreview.duration)
+    if (computed.readyState < 1) return
+    computed.currentTime = next
+    setComputedPreviewTime(next)
+  }
   const draftGroup = draft?.layout && outputCanvasGeometry
     ? boundingLayoutRect(previewLayouts.map((layout, index) => draft.layout?.[layout.item.id] ?? {
       x: (previewCells[index]?.left ?? 0) / Math.max(1, outputCanvasGeometry.width),
@@ -173,19 +276,15 @@ export function MergePreviewCanvas({
     height: draftGroup.height * outputCanvasGeometry.height,
   } : activeGroupPixelRect
   return (
-    <>
+    <div ref={fullscreenRef} className={`editor-preview-fullscreen-shell ${fallbackFullscreen ? 'is-fullscreen-fallback' : ''}`}>
       <div
         ref={previewStageRef}
         className="editor-preview-stage"
-        style={previewFrameSize ? {
-          width: previewFrameSize.width,
-          height: previewFrameSize.height,
-        } : undefined}
       >
         <div
           ref={previewScreenRef}
           className={`frame-image-box video-box editor-preview-screen ${cropEditing ? 'crop-editing' : ''}`}
-          style={{ width: '100%', height: '100%', minHeight: 0 }}
+          style={previewFrameSize ? { width: previewFrameSize.width, height: previewFrameSize.height, minHeight: 0 } : undefined}
         >
         <div
           ref={outputCanvasRef}
@@ -232,13 +331,14 @@ export function MergePreviewCanvas({
                 } : undefined}
                 onPointerDown={(event) => onPreviewLayoutPointerDown(event, layout, index)}
               >
-                <video
+                {!suspendMedia && <video
                   ref={(node) => {
                     if (node) {
                       previewVideoRefs.current.set(layout.item.id, node)
                       if (layout.item.id === previewClip?.id) previewRef.current = node
                     } else {
                       previewVideoRefs.current.delete(layout.item.id)
+                      if (previewRef.current?.dataset.clipId === layout.item.id) previewRef.current = null
                     }
                   }}
                   data-clip-id={layout.item.id}
@@ -253,14 +353,16 @@ export function MergePreviewCanvas({
                     cropEditing,
                   )}
                   muted={layout.item.muted}
-                  preload="auto"
+                  preload="metadata"
                   playsInline
                   onLoadedMetadata={() => {
                     if (layout.item.id === previewClip?.id) onPreviewMetadataLoaded()
+                    const video = previewVideoRefs.current.get(layout.item.id)
+                    if (video) onPreviewVideoReady(layout, video)
                   }}
                 >
                   <track kind="captions" />
-                </video>
+                </video>}
               </div>
             )
           }) : (
@@ -285,17 +387,21 @@ export function MergePreviewCanvas({
                 color: item.color,
                 backgroundColor: item.backgroundColor,
               }}
-              title="拖动调整文本位置，双击修改文本"
+              title="拖动调整文本位置，右键打开属性编辑内容和样式"
               onPointerDown={(event) => onPreviewTextPointerDown(event, item)}
-              onDoubleClick={(event) => {
-                event.preventDefault()
-                event.stopPropagation()
-                onEditText(item)
-              }}
+              onContextMenu={(event) => onPreviewTextContextMenu(event, item)}
             >
               {item.text}
             </div>
           ))}
+
+          {suspendMedia && previewLayouts.length > 0 && (
+            <div className="editor-preview-suspended" role="status">
+              <Film />
+              <strong>正在后台处理视频</strong>
+              <span>预览解码已暂停，以释放内存和处理器资源</span>
+            </div>
+          )}
 
           {groupEditing && !cropEditing && displayedGroupPixelRect && (
             <div
@@ -351,6 +457,25 @@ export function MergePreviewCanvas({
           )}
         </div>
 
+        {resolutionPreviewMode === 'computed' && resolutionPreview && outputCanvasGeometry && (
+          <>
+            <video
+              ref={computedPreviewRef}
+              className="editor-preview-computed-video"
+              src={localFileSrc(resolutionPreview.path)}
+              aria-label={`已计算真实分辨率预览，时长 ${resolutionPreview.duration.toFixed(1)} 秒`}
+              style={{ left: 0, top: 0, width: outputCanvasGeometry.width, height: outputCanvasGeometry.height }}
+              preload="auto"
+              playsInline
+              onPlay={() => setComputedPreviewPlaying(true)}
+              onPause={() => setComputedPreviewPlaying(false)}
+              onTimeUpdate={(event) => setComputedPreviewTime(event.currentTarget.currentTime)}
+              onEnded={() => { setComputedPreviewPlaying(false); setComputedPreviewTime(resolutionPreview.duration) }}
+            />
+            <span className="editor-preview-computed-label">已计算预览 · {settings.width} × {settings.height} · {resolutionPreview.duration.toFixed(1)} 秒</span>
+          </>
+        )}
+
         {previewClip && cropEditing && (
           <button
             type="button"
@@ -361,24 +486,26 @@ export function MergePreviewCanvas({
             <RotateCcw />重置裁剪框
           </button>
         )}
-        <button
-          type="button"
-          className="editor-preview-resize-handle"
-          aria-label="拖动调整播放窗口尺寸"
-          title="按住鼠标左键拖动调整播放窗口尺寸"
-          onPointerDown={onPreviewResizePointerDown}
-        />
         </div>
       </div>
 
       <MergePlaybackControls
-        playing={playing}
-        totalDuration={totalDuration}
-        previewStart={previewStart}
-        onSeek={onSeek}
-        onTogglePlayback={onTogglePlayback}
-        onNudge={onNudge}
+        clock={clock}
+        playing={resolutionPreviewMode === 'computed' ? computedPreviewPlaying : playing}
+        totalDuration={resolutionPreviewMode === 'computed' && resolutionPreview ? resolutionPreview.duration : totalDuration}
+        currentTime={resolutionPreviewMode === 'computed' ? computedPreviewTime : undefined}
+        previewStart={resolutionPreviewMode === 'computed' ? 0 : previewStart}
+        onSeek={resolutionPreviewMode === 'computed' ? computedOnSeek : onSeek}
+        onTogglePlayback={resolutionPreviewMode === 'computed' ? computedOnToggle : onTogglePlayback}
+        onNudge={resolutionPreviewMode === 'computed' ? ((direction) => computedOnSeek(computedPreviewTime + direction / Math.max(1, settings.fps || 30))) : onNudge}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={() => void toggleFullscreen()}
+        resolutionPreviewCalculating={resolutionPreviewCalculating}
+        resolutionPreviewReady={Boolean(resolutionPreview)}
+        resolutionPreviewMode={resolutionPreviewMode}
+        onOpenResolutionPreview={onOpenResolutionPreview}
+        onResolutionPreviewModeChange={onResolutionPreviewModeChange}
       />
-    </>
+    </div>
   )
 }

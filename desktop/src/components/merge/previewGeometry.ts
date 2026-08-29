@@ -138,6 +138,35 @@ export function evenDimension(value: number) {
   return rounded % 2 === 0 ? rounded : rounded - 1
 }
 
+/**
+ * Chooses the canvas backing bitmap used by full-screen quality simulation.
+ * CSS size and backing size intentionally stay separate; the latter is capped
+ * so a custom 16K output cannot allocate hundreds of megabytes at once.
+ */
+export function previewBitmapSize(
+  width: number,
+  height: number,
+  maxPixels = 8 * 1024 * 1024,
+) {
+  const outputWidth = Math.max(2, Math.round(Number.isFinite(width) ? width : 2))
+  const outputHeight = Math.max(2, Math.round(Number.isFinite(height) ? height : 2))
+  const budget = Math.max(4, Math.floor(maxPixels))
+  const scale = Math.min(1, Math.sqrt(budget / (outputWidth * outputHeight)))
+  let bitmapWidth = Math.max(2, Math.round(outputWidth * scale))
+  let bitmapHeight = Math.max(2, Math.round(outputHeight * scale))
+  // Rounding can exceed the budget by a few pixels for extreme aspect ratios.
+  if (bitmapWidth * bitmapHeight > budget) {
+    const correction = Math.sqrt(budget / (bitmapWidth * bitmapHeight))
+    bitmapWidth = Math.max(2, Math.floor(bitmapWidth * correction))
+    bitmapHeight = Math.max(2, Math.floor(bitmapHeight * correction))
+    while (bitmapWidth * bitmapHeight > budget) {
+      if (bitmapWidth >= bitmapHeight) bitmapWidth -= 1
+      else bitmapHeight -= 1
+    }
+  }
+  return { width: bitmapWidth, height: bitmapHeight }
+}
+
 export function cropSelectionStyle(rect: CropRect, geometry: CropGeometry): CSSProperties {
   return {
     left: `${rect.x / geometry.sourceWidth * 100}%`,

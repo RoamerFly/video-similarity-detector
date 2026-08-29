@@ -2205,15 +2205,33 @@ function TaskNumberField({
   integer?: boolean
   onChange: (value: number) => void
 }) {
+  const [draft, setDraft] = useState<string | null>(null)
+
   return (
     <label className="task-create-field">
       <span>{label}</span>
       <TextInput
         type="number"
-        value={Number.isFinite(Number(value)) ? String(value) : '0'}
+        value={draft ?? formatTaskNumber(value)}
         min={min}
         step={step}
-        onChange={(event) => onChange(parseTaskNumber(event.target.value, min, integer))}
+        onFocus={() => setDraft(formatTaskNumber(value))}
+        onChange={(event) => {
+          const raw = event.target.value
+          setDraft(raw)
+          if (raw.trim() === '') return
+          const numeric = Number(raw)
+          if (Number.isFinite(numeric)) onChange(parseTaskNumber(raw, min, integer))
+        }}
+        onBlur={() => {
+          const raw = draft ?? formatTaskNumber(value)
+          setDraft(null)
+          if (raw.trim() === '') return
+          const numeric = Number(raw)
+          if (!Number.isFinite(numeric)) return
+          const next = parseTaskNumber(raw, min, integer)
+          onChange(next)
+        }}
       />
     </label>
   )
@@ -2849,6 +2867,10 @@ function parseTaskNumber(value: string, min = 0, integer = false) {
   if (!Number.isFinite(numeric)) return min
   const normalized = Math.max(min, numeric)
   return integer ? Math.round(normalized) : normalized
+}
+
+function formatTaskNumber(value: number | undefined) {
+  return Number.isFinite(value) ? String(value) : ''
 }
 
 function buildTaskConfigSections(config: RunBatchCompareConfig): TaskConfigSection[] {

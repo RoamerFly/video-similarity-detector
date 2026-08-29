@@ -6,6 +6,7 @@ import {
   evenDimension,
   presetLayoutRects,
   previewExportVideoStyle,
+  previewBitmapSize,
   resizeCropRect,
   resolveDraggedLayout,
   rotatedDimensions,
@@ -37,6 +38,18 @@ function clip(patch: Partial<MergeQueueItem> = {}): MergeQueueItem {
     ...patch,
   }
 }
+
+describe('full-screen quality backing bitmap', () => {
+  it('keeps normal output at native pixels', () => {
+    expect(previewBitmapSize(1920, 1080)).toEqual({ width: 1920, height: 1080 })
+  })
+
+  it('caps huge custom output without exceeding the pixel budget', () => {
+    const bitmap = previewBitmapSize(16_384, 16_384)
+    expect(bitmap.width * bitmap.height).toBeLessThanOrEqual(8 * 1024 * 1024)
+    expect(bitmap.width).toBeLessThan(16_384)
+  })
+})
 
 const cropGeometry: CropGeometry = {
   left: 0,

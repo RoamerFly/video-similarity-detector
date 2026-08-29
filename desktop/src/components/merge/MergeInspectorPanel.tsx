@@ -2,11 +2,10 @@ import {
   useEffect,
   useState,
   type ReactNode,
-  type RefObject,
 } from 'react'
 import { Settings2, Volume2, VolumeX } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
-import { GlassPanel, TextInput } from '@/components/DesignSystem'
+import { GlassPanel } from '@/components/DesignSystem'
 import { MergeNumberField as NumberField } from '@/components/merge/MergeNumberField'
 import { Translated } from '@/i18n/Translated'
 import type { VideoMetadata } from '@/services/backend'
@@ -14,7 +13,6 @@ import {
   useMergeStore,
   type MergeAudioItem,
   type MergeQueueItem,
-  type MergeTextItem,
 } from '@/stores/mergeStore'
 
 interface MergeInspectorPanelProps {
@@ -23,8 +21,6 @@ interface MergeInspectorPanelProps {
   selectedClipMetadata?: VideoMetadata
   selectedAudio?: MergeAudioItem
   selectedAudioStart: number
-  selectedText?: MergeTextItem
-  selectedTextInputRef: RefObject<HTMLInputElement | null>
   formatTime: (seconds: number) => string
   children: ReactNode
 }
@@ -35,21 +31,17 @@ export function MergeInspectorPanel({
   selectedClipMetadata,
   selectedAudio,
   selectedAudioStart,
-  selectedText,
-  selectedTextInputRef,
   formatTime,
   children,
 }: MergeInspectorPanelProps) {
   const {
     items,
     updateAudio,
-    updateText,
     updateVideo,
     updateVideos,
   } = useMergeStore(useShallow((state) => ({
     items: state.items,
     updateAudio: state.updateAudio,
-    updateText: state.updateText,
     updateVideo: state.updateVideo,
     updateVideos: state.updateVideos,
   })))
@@ -145,27 +137,17 @@ export function MergeInspectorPanel({
           <div className="editor-time-fields">
             <NumberField label="时间线位置" value={selectedAudioStart} min={0} step={0.01} onChange={(startTime) => updateAudio(selectedAudio.id, { startTime })} />
             <NumberField label="音频入点" value={selectedAudio.trimStart} min={0} step={0.01} onChange={(trimStart) => updateAudio(selectedAudio.id, { trimStart })} />
+            <NumberField label="音频出点" value={selectedAudio.trimEnd} min={0} step={0.01} placeholder="自动" onChange={(trimEnd) => updateAudio(selectedAudio.id, { trimEnd })} />
+          </div>
+          <div className="editor-volume-control audio-volume-control">
+            <button type="button" className="icon-button" title={selectedAudio.muted ? '取消静音' : '静音'} onClick={() => updateAudio(selectedAudio.id, { muted: !selectedAudio.muted })}>
+              {selectedAudio.muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            </button>
+            <input type="range" min="0" max="3" step="0.05" value={selectedAudio.muted ? 0 : (selectedAudio.volume ?? 1)} disabled={selectedAudio.muted} onChange={(event) => updateAudio(selectedAudio.id, { volume: Number(event.target.value) })} aria-label="音频音量" />
+            <span>{selectedAudio.muted ? 0 : Math.round((selectedAudio.volume ?? 1) * 100)}%</span>
           </div>
         </div>
-      ) : selectedText ? (
-        <div className="editor-selected-media text">
-          <span>文本片段</span>
-          <TextInput ref={selectedTextInputRef} value={selectedText.text} onChange={(event) => updateText(selectedText.id, { text: event.target.value })} />
-          <div className="editor-time-fields">
-            <NumberField label="开始时间" value={selectedText.startTime} min={0} step={0.01} onChange={(startTime) => updateText(selectedText.id, { startTime })} />
-            <NumberField label="持续秒数" value={selectedText.duration} min={0.05} step={0.01} onChange={(duration) => updateText(selectedText.id, { duration })} />
-          </div>
-          <div className="editor-text-fields">
-            <NumberField label="横向位置" value={selectedText.x} min={0} max={1} step={0.01} onChange={(x) => updateText(selectedText.id, { x })} />
-            <NumberField label="纵向位置" value={selectedText.y} min={0} max={1} step={0.01} onChange={(y) => updateText(selectedText.id, { y })} />
-            <NumberField label="字号" value={selectedText.fontSize} min={8} max={240} onChange={(fontSize) => updateText(selectedText.id, { fontSize })} />
-            <label>
-              <span>颜色</span>
-              <TextInput value={selectedText.color} onChange={(event) => updateText(selectedText.id, { color: event.target.value })} />
-            </label>
-          </div>
-        </div>
-      ) : <p className="editor-no-selection">选择时间线上的视频、音频或文本片段后可调整属性。</p>}
+      ) : <p className="editor-no-selection">选择时间线上的视频或音频片段后可调整属性。文本内容和样式请右键文本片段，在“属性”中设置。</p>}
 
       {children}
     </GlassPanel>

@@ -8,16 +8,16 @@ const tracks = [
 ]
 
 describe('visibleTracks', () => {
-  it('keeps one video guide row for an empty project', () => {
-    expect(visibleTrackIds(tracks, [], true)).toEqual(['track-1'])
+  it('keeps all explicitly-created video rows for an empty project', () => {
+    expect(visibleTrackIds(tracks)).toEqual(['track-1', 'track-2', 'track-3'])
   })
 
-  it('hides empty backup tracks while preserving track order', () => {
-    expect(visibleTrackIds(tracks, [{ trackId: 'track-3' }, { trackId: 'track-1' }])).toEqual(['track-1', 'track-3'])
-    expect(visibleTracks(tracks, [{ trackId: 'track-2' }])).toEqual([tracks[1]])
+  it('preserves every track and its creation order even when it is empty', () => {
+    expect(visibleTrackIds(tracks)).toEqual(['track-1', 'track-2', 'track-3'])
+    expect(visibleTracks(tracks)).toEqual(tracks)
   })
 
-  it('does not add an empty audio or text row', () => {
-    expect(visibleTrackIds(tracks, [])).toEqual([])
+  it('keeps empty audio or text rows as usable drop targets', () => {
+    expect(visibleTrackIds(tracks)).toEqual(['track-1', 'track-2', 'track-3'])
   })
 })

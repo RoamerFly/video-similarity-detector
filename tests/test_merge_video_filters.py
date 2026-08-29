@@ -236,6 +236,180 @@ def test_custom_video_layout_is_used_for_overlay_coordinates():
     assert "overlay=x=550:y=120" in graph
 
 
+def test_fixed_custom_multitrack_layout_avoids_interval_splits():
+    inputs = [
+        {"path": "one.mp4", "startTime": 0, "trackIndex": 0, "layoutCustom": True, "layoutX": 0, "layoutY": 0, "layoutWidth": 0.5, "layoutHeight": 1},
+        {"path": "two.mp4", "startTime": 0, "trackIndex": 1, "layoutCustom": True, "layoutX": 0.5, "layoutY": 0, "layoutWidth": 0.5, "layoutHeight": 1},
+    ]
+    metadata = [
+        {"duration": 10.0, "width": 1920, "height": 1080, "has_audio": False},
+        {"duration": 10.0, "width": 1920, "height": 1080, "has_audio": False},
+    ]
+    filters, _, _ = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, [], [], {"width": 1280, "height": 720, "fps": 30, "includeAudio": False},
+    )
+    graph = ";".join(filters)
+
+    assert "split=" not in graph
+    assert "vstatic0" in graph
+    assert "repeatlast=0" in graph
+
+
+def test_gapless_single_track_uses_low_memory_concat_graph():
+    inputs = [
+        {"path": "one.mp4", "startTime": 0, "trackIndex": 0, "trimStart": 0, "trimEnd": 2},
+        {"path": "two.mp4", "startTime": 2, "trackIndex": 0, "trimStart": 0, "trimEnd": 3},
+    ]
+    metadata = [
+        {"duration": 2.0, "width": 1920, "height": 1080, "has_audio": False},
+        {"duration": 3.0, "width": 1920, "height": 1080, "has_audio": False},
+    ]
+
+    filters, duration, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, [], [],
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": False},
+    )
+    graph = ";".join(filters)
+
+    assert duration == 5.0
+    assert has_audio is False
+    assert "concat=n=2:v=1:a=0[vbase]" in graph
+    assert "overlay=" not in graph
+
+
+def test_non_overlapping_timeline_gaps_use_concat_instead_of_full_canvas_overlays():
+    inputs = [
+        {"path": "one.mp4", "startTime": 1, "trackIndex": 0, "trimStart": 0, "trimEnd": 2},
+        {"path": "two.mp4", "startTime": 5, "trackIndex": 1, "trimStart": 0, "trimEnd": 2},
+    ]
+    metadata = [
+        {"duration": 2.0, "width": 1920, "height": 1080, "has_audio": False},
+        {"duration": 2.0, "width": 1280, "height": 720, "has_audio": False},
+    ]
+
+    filters, duration, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, [], [],
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": False},
+    )
+    graph = ";".join(filters)
+
+    assert duration == 7.0
+    assert has_audio is False
+    assert "color=c=black:s=1280x720:r=30:d=1.000000" in graph
+    assert "color=c=black:s=1280x720:r=30:d=2.000000" in graph
+    assert "concat=n=4:v=1:a=0[vbase]" in graph
+    assert "overlay=" not in graph
+
+
+def test_audio_tail_extends_video_canvas_and_disable_audio_omits_all_audio():
+    inputs = [{"id": "clip-1", "path": "one.mp4", "startTime": 0, "trackIndex": 0}]
+    metadata = [{"duration": 2.0, "width": 1280, "height": 720, "has_audio": True}]
+    audio_tracks = [{"path": "music.mp3", "startTime": 1, "trimStart": 0, "trimEnd": 6}]
+    audio_metadata = [{"duration": 10.0}]
+
+    filters, duration, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, audio_tracks, audio_metadata,
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": True},
+    )
+    graph = ";".join(filters)
+    assert duration == 7.0
+    assert has_audio is True
+    assert "tpad=stop_mode=add:stop_duration=5.000000" in graph
+    assert "atrim=duration=7.000000" in graph
+
+    filters, duration, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, audio_tracks, audio_metadata,
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": False},
+    )
+    assert duration == 2.0
+    assert has_audio is False
+    assert "externala" not in ";".join(filters)
+
+
+def test_extracted_clip_audio_replaces_automatic_source_audio():
+    inputs = [{"id": "clip-1", "path": "one.mp4", "startTime": 0, "trackIndex": 0}]
+    metadata = [{"duration": 2.0, "width": 1280, "height": 720, "has_audio": True}]
+    audio_tracks = [{
+        "path": "one.mp4", "startTime": 0, "trimStart": 0, "trimEnd": 2,
+        "sourceType": "video", "sourceClipId": "clip-1",
+    }]
+
+    filters, _, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, audio_tracks, [{"duration": 2.0}],
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": True},
+    )
+    graph = ";".join(filters)
+    assert has_audio is True
+    assert "[externala0]" in graph
+    assert "[clipa0]" not in graph
+
+    audio_tracks[0]["_inputIndex"] = 0
+    filters, _, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, audio_tracks, [{"duration": 2.0}],
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": True},
+    )
+    graph = ";".join(filters)
+    assert has_audio is True
+    assert "[0:a:0]atrim=" in graph
+
+
+def test_muted_external_audio_does_not_extend_the_output_or_create_filters():
+    inputs = [{"id": "clip-1", "path": "one.mp4", "startTime": 0, "trackIndex": 0}]
+    metadata = [{"duration": 2.0, "width": 1280, "height": 720, "has_audio": False}]
+    audio_tracks = [{"path": "music.mp3", "startTime": 10, "trimStart": 0, "trimEnd": 20, "muted": True}]
+
+    filters, duration, has_audio = merge_videos.build_timeline_filter_graph(
+        inputs, metadata, audio_tracks, [{"duration": 30.0}],
+        {"width": 1280, "height": 720, "fps": 30, "includeAudio": True},
+    )
+    graph = ";".join(filters)
+
+    assert duration == 2.0
+    assert has_audio is False
+    assert "externala0" not in graph
+
+
+def test_filter_graph_is_written_to_a_file(tmp_path):
+    graph_path = tmp_path / "timeline.ffscript"
+    merge_videos.write_filter_graph(graph_path, ["[0:v]null[vout]", "[0:a]anull[aout]"])
+    assert graph_path.read_text(encoding="utf-8") == "[0:v]null[vout];[0:a]anull[aout]"
+
+
+def test_dynamic_multitrack_graph_has_a_safe_complexity_limit():
+    inputs = [
+        {
+            "path": f"clip-{index}.mp4",
+            "startTime": index * 0.01,
+            "trackIndex": index % 2,
+            "trimStart": 0,
+            "trimEnd": 20,
+        }
+        for index in range(60)
+    ]
+    metadata = [
+        {"duration": 20.0, "width": 640, "height": 360, "has_audio": False}
+        for _ in inputs
+    ]
+
+    with pytest.raises(RuntimeError, match="超过安全上限"):
+        merge_videos.build_timeline_filter_graph(
+            inputs, metadata, [], [],
+            {"width": 1280, "height": 720, "fps": 30, "includeAudio": False},
+        )
+
+
+def test_compositor_budget_and_threads_adapt_to_memory_pressure(monkeypatch):
+    hd_metadata = [{"width": 1920, "height": 1080}]
+    uhd_metadata = [{"width": 3840, "height": 2160}]
+
+    assert merge_videos.dynamic_compositor_budget(1920, 1080, hd_metadata) == 1600
+    assert merge_videos.dynamic_compositor_budget(3840, 2160, uhd_metadata) == 400
+    monkeypatch.setattr(merge_videos.os, "cpu_count", lambda: 8)
+    assert merge_videos.merge_thread_limits(8)[0] == 1
+    assert merge_videos.merge_thread_limits(1)[1] == 2
+    assert merge_videos.merge_thread_limits(8)[1] == 1
+
+
 def test_single_video_ignores_stale_multitrack_layout_and_fills_canvas():
     cells = merge_videos.layout_cells(
         [{

@@ -9,6 +9,18 @@ import type { MergeQueueItem } from '@/stores/mergeStore'
 import { normalizePath } from './mergeFormat'
 
 const metadataCache = new Map<string, VideoMetadata>()
+const metadataCacheLimit = 512
+
+function cacheMetadata(item: VideoMetadata) {
+  const key = normalizePath(item.path)
+  metadataCache.delete(key)
+  metadataCache.set(key, item)
+  while (metadataCache.size > metadataCacheLimit) {
+    const oldest = metadataCache.keys().next().value
+    if (oldest === undefined) return
+    metadataCache.delete(oldest)
+  }
+}
 
 interface UseMergeMetadataOptions {
   items: MergeQueueItem[]
@@ -39,7 +51,7 @@ export function useMergeMetadata({
     let alive = true
     probeVideoMetadata(missing, undefined, projectRoot, pythonPath)
       .then((rows) => {
-        ;(rows ?? []).forEach((row) => metadataCache.set(normalizePath(row.path), row))
+        ;(rows ?? []).forEach(cacheMetadata)
         if (alive) setMetadata(Object.fromEntries(metadataCache))
       })
       .catch((error) => {

@@ -354,7 +354,7 @@ export function ResultsPage() {
     }
 
     void initialize()
-  }, [loadReport, loadReportList, report, reportPaths, location.state])
+  }, [loadReport, loadReportList, report, reportPaths, location.state, setSelectedReportKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => resetPage(), 0)
@@ -400,6 +400,7 @@ export function ResultsPage() {
       : windowRows.length
   const pageCount = Math.max(1, Math.ceil(totalRows / pageSize))
   const safePage = Math.min(page, pageCount)
+  const [pageJumpDraft, setPageJumpDraft] = useState<string | null>(null)
   const start = (safePage - 1) * pageSize
   const visiblePairs = filteredPairs.slice(start, start + pageSize)
   const visibleSegments = segmentRows.slice(start, start + pageSize)
@@ -1062,11 +1063,24 @@ export function ResultsPage() {
                 type="number"
                 min={1}
                 max={pageCount}
-                value={safePage}
+                value={pageJumpDraft ?? String(safePage)}
                 aria-label="输入页码跳转"
+                onFocus={() => setPageJumpDraft(String(safePage))}
                 onChange={(event) => {
-                  const next = Number(event.target.value)
+                  const raw = event.target.value
+                  setPageJumpDraft(raw)
+                  if (raw.trim() === '') return
+                  const next = Number(raw)
                   if (Number.isFinite(next)) setPage(Math.max(1, Math.min(pageCount, next)))
+                }}
+                onBlur={() => {
+                  const raw = pageJumpDraft ?? String(safePage)
+                  setPageJumpDraft(null)
+                  if (raw.trim() === '') return
+                  const next = Number(raw)
+                  if (!Number.isFinite(next)) return
+                  const normalized = Math.max(1, Math.min(pageCount, Math.round(next)))
+                  setPage(normalized)
                 }}
               />
               <span>页</span>

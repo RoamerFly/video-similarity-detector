@@ -154,6 +154,143 @@ export function resolveTimelineDragStart<
   )))
 }
 
+export interface TimelinePositionUpdate {
+  id: string
+  startTime: number
+}
+
+export interface TimelineGap {
+  start: number
+  end: number
+  duration: number
+}
+
+/**
+ * Finds the gaps which are empty on every video track at the same time.
+ * Intervals are intentionally unioned across tracks: an interval covered by
+ * even one video track is not removable because removing it would break the
+ * global composition's timing.
+ */
+export function globalVideoTimelineGaps(
+  layouts: Array<{ start: number; end: number; trackId?: string }>,
+): TimelineGap[] {
+  const intervals = layouts
+    .filter((layout) => Number.isFinite(layout.start) && Number.isFinite(layout.end) && layout.end > layout.start)
+    .map((layout) => ({ start: Math.max(0, layout.start), end: Math.max(0, layout.end) }))
+    .sort((left, right) => left.start - right.start || left.end - right.end)
+  if (intervals.length === 0) return []
+
+  const epsilon = 0.0005
+  const gaps: TimelineGap[] = []
+  let cursor = 0
+  for (const interval of intervals) {
+    if (interval.start > cursor + epsilon) {
+      gaps.push({ start: cursor, end: interval.start, duration: interval.start - cursor })
+    }
+    cursor = Math.max(cursor, interval.end)
+  }
+  return gaps.filter((gap) => gap.duration > epsilon)
+}
+
+/**
+ * Maps absolute starts through global timeline gaps. A clip beginning before
+ * a gap is left intact (including clips crossing a gap); only starts at or
+ * after a gap's end move earlier. This makes the operation non-destructive
+ * and keeps all media/text tracks in sync with one shared mapping.
+ */
+export function timelineGapPositionUpdates(
+  gaps: TimelineGap[],
+  items: Array<{ id: string; start: number }>,
+): TimelinePositionUpdate[] {
+  if (gaps.length === 0 || items.length === 0) return []
+  const epsilon = 0.0005
+  return items.flatMap(({ id, start }) => {
+    const shift = gaps
+      .filter((gap) => start >= gap.end - epsilon)
+      .reduce((sum, gap) => sum + gap.duration, 0)
+    const next = Math.max(0, start - shift)
+    return Math.abs(next - start) > epsilon ? [{ id, startTime: next }] : []
+  })
+}
+
+/**
+ * Reorders and deterministically compacts the complete target track after a
+ * same-track drop. Exchanges are an explicit compact operation: the resulting
+ * track always starts at zero and contains no internal holes.
+ *
+ * The timeline intentionally stores absolute starts, so exchanging two clips
+ * is not just swapping their start values: clips with different durations
+ * must be laid out again across the full track. This pure helper
+ * keeps that rule shared by video and audio interactions and makes it possible
+ * to verify without mounting the editor.
+ */
+export function timelineExchangeUpdates<
+  T extends { item: { id: string }; trackId: string; start: number; duration: number },
+>(
+  layouts: T[],
+  movingId: string,
+  targetTrackId: string,
+  _requestedStart: number,
+  _movingDuration: number,
+  targetClipId?: string | null,
+): TimelinePositionUpdate[] | null {
+  const next = timelineExchangeOrder(layouts, movingId, targetTrackId, targetClipId)
+  if (!next) return null
+  // Reflow the entire track from zero. This removes both the old swap's large
+  // trailing hole and any pre-existing gap before the exchange point.
+  let cursor = 0
+  const updates = next.map((layout) => {
+    const update = { id: layout.item.id, startTime: cursor }
+    cursor += Math.max(0.001, layout.duration)
+    return update
+  })
+  const originalStarts = new Map(
+    layouts
+      .filter((layout) => layout.trackId === targetTrackId)
+      .map((layout) => [layout.item.id, layout.start]),
+  )
+  return updates.filter((update) => Math.abs((originalStarts.get(update.id) ?? update.startTime) - update.startTime) > 0.0005)
+}
+
+/**
+ * Returns the target track's order after exchanging the two explicitly hit
+ * clips.  Keeping this separate from the start-time calculation is important:
+ * when clips overlap or share a start, geometry alone cannot express which
+ * clip is first, so their array order must still change for the UI to show the
+ * exchange.
+ */
+export function timelineExchangeOrder<
+  T extends { item: { id: string }; trackId: string; start: number; duration: number },
+>(
+  layouts: T[],
+  movingId: string,
+  targetTrackId: string,
+  targetClipId?: string | null,
+): T[] | null {
+  const moving = layouts.find((layout) => layout.item.id === movingId)
+  if (!moving || moving.trackId !== targetTrackId || !targetClipId) return null
+  // The DOM hit id is authoritative. Never infer a target from the moving
+  // interval: a long clip may span several neighbours and the user must be
+  // able to describe the exchange as “drop on clip X”.
+  const target = layouts.find((layout) => (
+    layout.item.id === targetClipId
+      && layout.item.id !== movingId
+      && layout.trackId === targetTrackId
+  ))
+  if (!target) return null
+
+  const ordered = layouts
+    .filter((layout) => layout.trackId === targetTrackId)
+    .sort((left, right) => left.start - right.start || left.item.id.localeCompare(right.item.id))
+  const from = ordered.findIndex((layout) => layout.item.id === movingId)
+  const to = ordered.findIndex((layout) => layout.item.id === target.item.id)
+  if (from < 0 || to < 0 || from === to) return null
+
+  const next = [...ordered]
+  ;[next[from], next[to]] = [next[to], next[from]]
+  return next
+}
+
 export function nearestNonOverlappingStart(
   requestedStart: number,
   duration: number,
