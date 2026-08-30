@@ -53,7 +53,14 @@ export function MergeTextPropertiesDialog({ item, onSave, onClose }: MergeTextPr
             <span>文本内容</span>
             <textarea value={text} rows={3} maxLength={500} onChange={(event) => setText(event.target.value)} />
           </label>
-          <NumberField label="字号" value={fontSize} min={8} max={240} onChange={setFontSize} />
+          <NumberField
+            label="字号（文本大小）"
+            tip="调整预览中的文本框大小，也会同步应用到导出视频。"
+            value={fontSize}
+            min={8}
+            max={240}
+            onChange={setFontSize}
+          />
           <label>
             <span>颜色</span>
             <div className="merge-text-color-field">

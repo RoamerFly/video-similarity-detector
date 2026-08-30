@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { BarChart3, Clapperboard, Grid2X2, Images, Settings } from 'lucide-react'
+import { MergeExportStatus } from '@/components/merge/MergeExportStatus'
 import { useI18n } from '@/i18n/useI18n'
 import { getAppInfo } from '@/services/backend'
 import { cn } from '@/utils/cn'
@@ -15,6 +16,7 @@ const navItems = [
 
 export function Sidebar() {
   const { t } = useI18n()
+  const location = useLocation()
   const [version, setVersion] = useState('')
 
   useEffect(() => {
@@ -53,7 +55,14 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="version-pill">{version ? `v${version}` : 'v...'}</div>
+      <div className="sidebar-version-row">
+        <div className="version-pill">{version ? `v${version}` : 'v...'}</div>
+        {location.pathname === '/merge' && (
+          <div className="merge-export-status-anchor">
+            <MergeExportStatus />
+          </div>
+        )}
+      </div>
     </aside>
   )
 }

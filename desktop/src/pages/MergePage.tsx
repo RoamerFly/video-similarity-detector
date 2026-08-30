@@ -25,7 +25,6 @@ import {
   TextInput,
   Toggle,
 } from '@/components/DesignSystem'
-import { MergeExportStatus } from '@/components/merge/MergeExportStatus'
 import { MergeInspectorPanel } from '@/components/merge/MergeInspectorPanel'
 import { MergeNumberField as NumberField } from '@/components/merge/MergeNumberField'
 import { MergeTimeline } from '@/components/merge/MergeTimeline'
@@ -1314,6 +1313,65 @@ export function MergePage() {
     window.addEventListener('pointercancel', end, { once: true })
   }
 
+  function handlePreviewTextResizePointerDown(
+    event: React.PointerEvent<HTMLButtonElement>,
+    item: MergeTextItem,
+    handle: CropHandle,
+  ) {
+    if (event.button !== 0 || !outputCanvasRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    const canvasRect = outputCanvasRef.current.getBoundingClientRect()
+    const textElement = event.currentTarget.parentElement
+    const textRect = textElement?.getBoundingClientRect()
+    if (!textRect || textRect.width <= 0 || textRect.height <= 0) return
+
+    const directionX = handle.includes('e') ? 1 : handle.includes('w') ? -1 : 0
+    const directionY = handle.includes('s') ? 1 : handle.includes('n') ? -1 : 0
+    const initialWidth = textRect.width / Math.max(1, canvasRect.width)
+    const initialHeight = textRect.height / Math.max(1, canvasRect.height)
+    const baseExtent = directionX !== 0 && directionY !== 0
+      ? Math.max(textRect.width, textRect.height)
+      : directionX !== 0 ? textRect.width : textRect.height
+    const initialPoint = { x: event.clientX, y: event.clientY }
+    const resize = (clientX: number, clientY: number) => {
+      const signedX = directionX * (clientX - initialPoint.x)
+      const signedY = directionY * (clientY - initialPoint.y)
+      const growth = directionX !== 0 && directionY !== 0
+        ? (signedX + signedY) / 2
+        : signedX || signedY
+      const scale = clamp(1 + growth / Math.max(8, baseExtent), 0.25, 5)
+      const nextWidth = initialWidth * scale
+      const nextHeight = initialHeight * scale
+      const nextX = clamp(
+        item.x + (directionX === 1 ? (nextWidth - initialWidth) / 2 : directionX === -1 ? -(nextWidth - initialWidth) / 2 : 0),
+        0,
+        1,
+      )
+      const nextY = clamp(
+        item.y + (directionY === 1 ? (nextHeight - initialHeight) / 2 : directionY === -1 ? -(nextHeight - initialHeight) / 2 : 0),
+        0,
+        1,
+      )
+      return {
+        x: nextX,
+        y: nextY,
+        fontSize: clamp(Math.round(item.fontSize * scale), 8, 240),
+      }
+    }
+
+    merge.beginHistoryTransaction()
+    withPointerLifecycle(
+      event,
+      (pointerEvent) => previewEditDraft.set({ text: { [item.id]: resize(pointerEvent.clientX, pointerEvent.clientY) } }),
+      (pointerEvent) => {
+        merge.updateText(item.id, resize(pointerEvent.clientX, pointerEvent.clientY), false)
+        merge.endHistoryTransaction()
+      },
+      () => previewEditDraft.set(null),
+    )
+  }
+
   function applyActiveVideoLayout(mode: 'grid' | 'horizontal' | 'vertical' | 'auto') {
     if (activeLayouts.length < 2) {
       merge.setError('当前播放位置至少需要两个重叠视频才能设置画面布局。')
@@ -1800,6 +1858,7 @@ export function MergePage() {
             }}
             onPreviewLayoutPointerDown={handlePreviewLayoutPointerDown}
             onPreviewTextPointerDown={handlePreviewTextPointerDown}
+            onPreviewTextResizePointerDown={handlePreviewTextResizePointerDown}
             onPreviewTextContextMenu={openTextContextMenu}
             onGroupLayoutPointerDown={handleGroupLayoutPointerDown}
             onCropPointerDown={handleCropPointerDown}
@@ -2042,8 +2101,6 @@ export function MergePage() {
           />
         ))}
       </GlassPanel>
-
-      <MergeExportStatus />
 
       {dropActive && <div className="editor-drop-overlay"><Upload /><strong>松开以加入视频线或音频线</strong></div>}
       <MergeTimelineContextMenus

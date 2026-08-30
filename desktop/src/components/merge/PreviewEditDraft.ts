@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react'
 import type { CropRect, NormalizedLayoutRect } from './previewGeometry'
 
 export interface PreviewEditDraftValue {
-  text?: Record<string, { x: number; y: number }>
+  text?: Record<string, { x: number; y: number; fontSize?: number }>
   layout?: Record<string, NormalizedLayoutRect>
   crop?: { id: string; rect: CropRect }
 }

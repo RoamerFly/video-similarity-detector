@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -8,6 +8,7 @@ import {
   Download,
   ExternalLink,
   FileSearch,
+  Film,
   FolderOpen,
   Info,
   PackageCheck,
@@ -31,6 +32,7 @@ import {
 } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
 import { RuntimeSettingsCard } from '@/components/RuntimeSettingsCard'
+import { MergeRuntimeSettingsCard } from '@/components/MergeRuntimeSettingsCard'
 import { Translated } from '@/i18n/Translated'
 import {
   cancelUpdateDownload,
@@ -42,6 +44,8 @@ import {
   formatBytes,
   getAppInfo,
   getClipModelStatus,
+  getMergeRuntimeStatus,
+  getRuntimeStatus,
   installClipModel,
   listConfigTemplates,
   listenClipModelInstallProgress,
@@ -56,6 +60,8 @@ import {
   type AppInfo,
   type CacheScanResult,
   type ClipModelStatus,
+  type MergeRuntimeStatus,
+  type RuntimeStatus,
   type ConfigTemplateRecord,
   type UpdateDownloadProgress,
   type UpdateInfo,
@@ -597,6 +603,24 @@ function BaseSettings({
   const [modelInstalling, setModelInstalling] = useState(false)
   const [modelProgress, setModelProgress] = useState<UpdateDownloadProgress | null>(null)
   const [modelError, setModelError] = useState('')
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
+  const [runtimeLoading, setRuntimeLoading] = useState(false)
+  const [mergeRuntimeStatus, setMergeRuntimeStatus] = useState<MergeRuntimeStatus | null>(null)
+  const [mergeRuntimeLoading, setMergeRuntimeLoading] = useState(false)
+  const [resourceDialog, setResourceDialog] = useState<'about' | 'runtime' | 'clip-model' | 'merge' | null>(null)
+
+  const refreshRuntimeStatuses = useCallback(async () => {
+    setRuntimeLoading(true)
+    setMergeRuntimeLoading(true)
+    const [runtime, mergeRuntime] = await Promise.all([
+      getRuntimeStatus().catch(() => null),
+      getMergeRuntimeStatus().catch(() => null),
+    ])
+    setRuntimeStatus(runtime)
+    setMergeRuntimeStatus(mergeRuntime)
+    setRuntimeLoading(false)
+    setMergeRuntimeLoading(false)
+  }, [])
 
   const refreshClipModelStatus = useCallback(async () => {
     setModelLoading(true)
@@ -610,10 +634,21 @@ function BaseSettings({
     }
   }, [])
 
+  const closeResourceDialog = useCallback(() => {
+    setResourceDialog(null)
+    void refreshRuntimeStatuses()
+    void refreshClipModelStatus()
+  }, [refreshRuntimeStatuses, refreshClipModelStatus])
+
   useEffect(() => {
     const timer = window.setTimeout(() => void refreshClipModelStatus(), 0)
     return () => window.clearTimeout(timer)
   }, [refreshClipModelStatus])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshRuntimeStatuses(), 0)
+    return () => window.clearTimeout(timer)
+  }, [refreshRuntimeStatuses])
 
   useEffect(() => {
     let active = true
@@ -738,103 +773,157 @@ function BaseSettings({
         </label>
       </div>
 
-      <div className="settings-side-stack">
-        <RuntimeSettingsCard />
-        <div className="settings-about-card">
-          <div className="about-title">
-            <Info size={24} />
-            <h3>关于与版本</h3>
-          </div>
-          <div className="about-grid compact">
-            <div>
-              <span>应用版本</span>
-              <strong title={`v${appInfo?.version ?? '0.1.0'}`}>v{appInfo?.version ?? '0.1.0'}</strong>
-            </div>
-            <div>
-              <span>运行版本</span>
-              <strong>{appInfo?.buildFlavor === 'gpu' ? 'GPU / CUDA' : 'CPU'}</strong>
-            </div>
-            <div>
-              <span>安装方式</span>
-              <strong>{appInfo?.installType === 'installed' ? '安装版' : '便携版'}</strong>
-            </div>
-            <div>
-              <span>界面框架</span>
-              <strong title="桌面界面(Tauri + React)">桌面界面(Tauri + React)</strong>
-            </div>
-            <div>
-              <span>核心引擎</span>
-              <strong title="Python 视频相似度引擎(Python Video Similarity Engine)">Python 视频相似度引擎(Python Video Similarity Engine)</strong>
-            </div>
-          </div>
-        </div>
-        <div className="settings-about-card">
-          <div className="about-title">
-            {modelStatus?.installed ? <CheckCircle2 size={24} /> : <PackageCheck size={24} />}
-            <h3>离线 CLIP 模型</h3>
-          </div>
-          <div className="about-grid compact">
-            <div>
-              <span>安装状态</span>
-              <strong>{modelLoading ? '检测中' : modelStatus?.installed ? '已安装' : '未安装'}</strong>
-            </div>
-            <div>
-              <span>模型大小</span>
-              <strong>{modelStatus?.sizeBytes ? formatBytes(modelStatus.sizeBytes) : '未检测到'}</strong>
-            </div>
-          </div>
-          {modelStatus?.modelDir ? (
-            <p className="update-install-path" title={modelStatus.modelDir}>
-              模型目录：{modelStatus.modelDir}
-            </p>
-          ) : null}
-          <p className={modelError ? 'inline-error update-status-copy' : 'update-status-copy'}>
-            {modelError || modelStatus?.message || '正在检测离线模型状态。'}
-          </p>
-          {modelMissingFiles.length > 0 ? (
-            <p className="update-install-path">
-              缺失文件：{modelMissingFiles.join(', ')}
-            </p>
-          ) : null}
-          {modelProgress && (
-            <div className="update-progress-block">
-              <div>
-                <span>{modelProgress.stage || '正在处理模型'}</span>
-                <strong>{modelProgressValue.toFixed(0)}%</strong>
-              </div>
-              <div className="update-progress-track">
-                <span style={{ width: `${modelProgressValue}%` }} />
-              </div>
-              <small>
-                {formatBytes(modelProgress.downloadedBytes)}
-                {modelProgress.totalBytes ? ` / ${formatBytes(modelProgress.totalBytes)}` : ''}
-              </small>
-            </div>
-          )}
-          <div className="settings-path-actions">
-            <NeonButton
-              variant="outline"
-              type="button"
-              onClick={() => void refreshClipModelStatus()}
-              disabled={modelLoading || modelInstalling}
-            >
-              <RefreshCw size={17} />
-              刷新
-            </NeonButton>
-            <NeonButton
-              variant="primary"
-              type="button"
-              onClick={() => void handleInstallClipModel()}
-              disabled={modelInstalling}
-            >
-              <Download size={17} />
-              {modelStatus?.installed ? '重装模型' : '安装模型'}
-            </NeonButton>
-          </div>
-        </div>
+      <div className="settings-resource-buttons" role="group" aria-label="运行环境与版本">
+        <button className="settings-resource-button" type="button" onClick={() => setResourceDialog('about')}>
+          <Info size={21} />
+          <span><strong>关于与版本</strong><small>应用、框架与引擎信息</small></span>
+        </button>
+        <button className="settings-resource-button" type="button" onClick={() => { setResourceDialog('runtime'); void refreshRuntimeStatuses() }}>
+          <PackageCheck size={21} />
+          <span><strong>AI 运行环境</strong><small>Python / CUDA 环境</small></span>
+          <ResourceStatusBadge state={resourceStatus(runtimeStatus?.ready, runtimeLoading)} />
+        </button>
+        <button className="settings-resource-button" type="button" onClick={() => setResourceDialog('clip-model')}>
+          {modelStatus?.installed ? <CheckCircle2 size={21} /> : <PackageCheck size={21} />}
+          <span><strong>离线 CLIP 模型</strong><small>{modelLoading ? '正在检测' : modelStatus?.installed ? '已安装，可离线运行' : '未安装'}</small></span>
+          <ResourceStatusBadge state={resourceStatus(modelStatus?.installed, modelLoading || modelInstalling)} />
+        </button>
+        <button className="settings-resource-button" type="button" onClick={() => { setResourceDialog('merge'); void refreshRuntimeStatuses() }}>
+          <Film size={21} />
+          <span><strong>视频合并环境</strong><small>独立 FFmpeg / FFprobe</small></span>
+          <ResourceStatusBadge state={resourceStatus(mergeRuntimeStatus?.ready, mergeRuntimeLoading)} />
+        </button>
       </div>
+
+      <SettingsResourceDialog open={resourceDialog === 'about'} title="关于与版本" icon={<Info size={21} />} onClose={() => setResourceDialog(null)}>
+        <div className="settings-about-card">
+          <div className="about-grid compact">
+            <div><span>应用版本</span><strong title={`v${appInfo?.version ?? '0.1.0'}`}>v{appInfo?.version ?? '0.1.0'}</strong></div>
+            <div><span>运行版本</span><strong>{appInfo?.buildFlavor === 'gpu' ? 'GPU / CUDA' : 'CPU'}</strong></div>
+            <div><span>安装方式</span><strong>{appInfo?.installType === 'installed' ? '安装版' : '便携版'}</strong></div>
+            <div><span>界面框架</span><strong title="桌面界面(Tauri + React)">桌面界面(Tauri + React)</strong></div>
+            <div><span>核心引擎</span><strong title="Python 视频相似度引擎(Python Video Similarity Engine)">Python 视频相似度引擎(Python Video Similarity Engine)</strong></div>
+          </div>
+        </div>
+      </SettingsResourceDialog>
+      <SettingsResourceDialog open={resourceDialog === 'runtime'} title="AI 运行环境" icon={<PackageCheck size={21} />} onClose={closeResourceDialog}>
+        <RuntimeSettingsCard />
+      </SettingsResourceDialog>
+      <SettingsResourceDialog open={resourceDialog === 'clip-model'} title="离线 CLIP 模型" icon={modelStatus?.installed ? <CheckCircle2 size={21} /> : <PackageCheck size={21} />} onClose={closeResourceDialog}>
+        <ClipModelSettingsCard
+          status={modelStatus}
+          loading={modelLoading}
+          installing={modelInstalling}
+          progress={modelProgress}
+          error={modelError}
+          missingFiles={modelMissingFiles}
+          progressValue={modelProgressValue}
+          onRefresh={() => void refreshClipModelStatus()}
+          onInstall={() => void handleInstallClipModel()}
+        />
+      </SettingsResourceDialog>
+      <SettingsResourceDialog open={resourceDialog === 'merge'} title="视频合并环境" icon={<Film size={21} />} onClose={closeResourceDialog}>
+        <MergeRuntimeSettingsCard />
+      </SettingsResourceDialog>
     </div>
     </Translated>
+  )
+}
+
+type ResourceStatus = 'installed' | 'missing' | 'checking'
+
+function resourceStatus(ready: boolean | undefined, loading: boolean): ResourceStatus {
+  if (loading || ready === undefined) return 'checking'
+  return ready ? 'installed' : 'missing'
+}
+
+function ResourceStatusBadge({ state }: { state: ResourceStatus }) {
+  const label = state === 'installed' ? '已安装' : state === 'missing' ? '缺失' : '检测中'
+  return <span className={`settings-resource-status ${state}`}>{label}</span>
+}
+
+function ClipModelSettingsCard({
+  status,
+  loading,
+  installing,
+  progress,
+  error,
+  missingFiles,
+  progressValue,
+  onRefresh,
+  onInstall,
+}: {
+  status: ClipModelStatus | null
+  loading: boolean
+  installing: boolean
+  progress: UpdateDownloadProgress | null
+  error: string
+  missingFiles: string[]
+  progressValue: number
+  onRefresh: () => void
+  onInstall: () => void
+}) {
+  return (
+    <div className="settings-about-card">
+      <div className="about-grid compact">
+        <div><span>安装状态</span><strong>{loading ? '检测中' : status?.installed ? '已安装' : '未安装'}</strong></div>
+        <div><span>模型大小</span><strong>{status?.sizeBytes ? formatBytes(status.sizeBytes) : '未检测到'}</strong></div>
+      </div>
+      {status?.modelDir ? <p className="update-install-path" title={status.modelDir}>模型目录：{status.modelDir}</p> : null}
+      <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{error || status?.message || '正在检测离线模型状态。'}</p>
+      {missingFiles.length > 0 ? <p className="update-install-path">缺失文件：{missingFiles.join(', ')}</p> : null}
+      {progress && (
+        <div className="update-progress-block">
+          <div><span>{progress.stage || '正在处理模型'}</span><strong>{progressValue.toFixed(0)}%</strong></div>
+          <div className="update-progress-track"><span style={{ width: `${progressValue}%` }} /></div>
+          <small>{formatBytes(progress.downloadedBytes)}{progress.totalBytes ? ` / ${formatBytes(progress.totalBytes)}` : ''}</small>
+        </div>
+      )}
+      <div className="settings-path-actions">
+        <NeonButton variant="outline" type="button" onClick={onRefresh} disabled={loading || installing}>
+          <RefreshCw size={17} />刷新
+        </NeonButton>
+        <NeonButton variant="primary" type="button" onClick={onInstall} disabled={installing}>
+          <Download size={17} />{status?.installed ? '重装模型' : '安装模型'}
+        </NeonButton>
+      </div>
+    </div>
+  )
+}
+
+function SettingsResourceDialog({
+  open,
+  title,
+  icon,
+  children,
+  onClose,
+}: {
+  open: boolean
+  title: string
+  icon: ReactNode
+  children: ReactNode
+  onClose: () => void
+}) {
+  if (!open) return null
+  return createPortal(
+    <Translated>
+      <div
+        className="modal-backdrop settings-resource-dialog-backdrop"
+        role="presentation"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) onClose()
+        }}
+      >
+        <section className="settings-resource-dialog" role="dialog" aria-modal="true" aria-label={title}>
+          <div className="settings-resource-dialog-head">
+            <div className="about-title">{icon}<h3>{title}</h3></div>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+          </div>
+          <div className="settings-resource-dialog-body">{children}</div>
+        </section>
+      </div>
+    </Translated>,
+    document.body,
   )
 }
 

@@ -17,6 +17,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, Queue
 
 
 ACTIVE_PROCESS: subprocess.Popen | None = None
@@ -46,8 +47,21 @@ def dynamic_compositor_budget(width: int, height: int, metadata: list[dict]) -> 
     )
 
 
-def merge_thread_limits(input_count: int) -> tuple[int, int]:
-    """Bound FFmpeg workers while reserving CPU time for the desktop UI."""
+def merge_thread_limits(
+    input_count: int,
+    width: int = 0,
+    height: int = 0,
+    *,
+    pixel_count: int | None = None,
+) -> tuple[int, int]:
+    """Bound FFmpeg workers while reserving CPU time for the desktop UI.
+
+    A high-resolution filter graph is memory-bound long before it is CPU-bound:
+    every additional filter worker can retain another full-size frame.  Keep
+    the existing CPU-aware budget for normal exports, but deliberately reduce
+    concurrency for UHD/8K work so exporting remains responsive instead of
+    exhausting the machine.
+    """
     cores = max(1, os.cpu_count() or 1)
     reserved_cores = 2 if cores >= 4 else 1
     available_cores = max(1, cores - reserved_cores)
@@ -57,7 +71,37 @@ def merge_thread_limits(input_count: int) -> tuple[int, int]:
     # Filtering and encoding run concurrently, so each receives only half of
     # the remaining budget rather than independently saturating every core.
     filter_threads = max(1, min(4, pipeline_budget // 2))
+    pixels = max(1, int(pixel_count or max(0, width) * max(0, height)))
+    if pixels >= 3840 * 2160:
+        filter_threads = 1
+    elif pixels >= 2560 * 1440:
+        filter_threads = min(filter_threads, 2)
     return decoder_threads, filter_threads
+
+
+def merge_memory_limits(pixel_count: int) -> tuple[int, int]:
+    """Return bounded input and filter-graph queues for the output size.
+
+    FFmpeg otherwise allows several demux packets and filter frames to be in
+    flight per input.  With seven 4K inputs that multiplies into a very large
+    resident set.  Small queues intentionally trade a little throughput for a
+    predictable memory ceiling; the filter graph can still make progress as
+    frames are consumed.
+    """
+    pixels = max(1, int(pixel_count))
+    if pixels >= 7680 * 4320:
+        return 2, 16
+    if pixels >= 3840 * 2160:
+        # concat/overlay need a small amount of look-ahead; values below 14
+        # make FFmpeg abort with AVERROR(ENOMEM) even when the host still has
+        # free RAM.  Sixteen frames is the smallest reliable bound for a
+        # seven-input UHD timeline in the bundled FFmpeg.
+        return 4, 16
+    if pixels >= 2560 * 1440:
+        return 6, 12
+    if pixels >= 1920 * 1080:
+        return 8, 8
+    return 12, 12
 
 
 def ffmpeg_creation_flags() -> int:
@@ -69,11 +113,22 @@ def ffmpeg_creation_flags() -> int:
     )
 
 
+def ffmpeg_startup_info():
+    """Hide console windows even when a packaged FFmpeg briefly allocates one."""
+    if os.name != "nt":
+        return None
+    startup_info = subprocess.STARTUPINFO()
+    startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup_info.wShowWindow = subprocess.SW_HIDE
+    return startup_info
+
+
 def resolve_ffmpeg(project_root: Path) -> str:
     executable_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
     candidates = [
         os.environ.get("VIDEO_SIM_FFMPEG", "").strip(),
         str(project_root / "tools" / executable_name),
+        str(project_root / "merge-env" / executable_name),
         str(project_root / "env" / executable_name),
         str(project_root / "env" / "python" / "Scripts" / executable_name),
         str(project_root / "env" / "python" / "bin" / executable_name),
@@ -96,7 +151,7 @@ def resolve_ffmpeg(project_root: Path) -> str:
         return candidate
     raise RuntimeError(
         "未找到 FFmpeg。请重新构建带独立 FFmpeg 的运行环境，"
-        "或把 ffmpeg 放到应用 env 或 tools 目录。"
+        "或把 ffmpeg 放到应用 merge-env、env 或 tools 目录。"
     )
 
 
@@ -109,6 +164,7 @@ def probe_video(ffmpeg: str, path: Path) -> dict:
         encoding="utf-8",
         errors="replace",
         creationflags=ffmpeg_creation_flags(),
+        startupinfo=ffmpeg_startup_info(),
     )
     text = process.stderr or ""
     duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
@@ -138,6 +194,7 @@ def probe_audio(ffmpeg: str, path: Path) -> dict:
         encoding="utf-8",
         errors="replace",
         creationflags=ffmpeg_creation_flags(),
+        startupinfo=ffmpeg_startup_info(),
     )
     text = process.stderr or ""
     duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
@@ -177,6 +234,61 @@ def escape_drawtext(value: str) -> str:
         .replace("\n", "\\n")
         .replace("\r", "\\n")
     )
+
+
+def resolve_drawtext_font_file() -> str | None:
+    """Return a concrete system font so drawtext never needs fontconfig lookup.
+
+    The packaged FFmpeg runtime is intentionally self-contained and may not have
+    a Fontconfig installation.  Supplying an existing font file also makes text
+    rendering deterministic across the desktop and avoids noisy
+    ``Cannot load default config file`` diagnostics.
+    """
+    configured = os.environ.get("VIDEO_SIM_FONT_FILE", "").strip()
+    candidates = [configured] if configured else []
+    if os.name == "nt":
+        windows_root = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+        windows_fonts = Path(windows_root) / "Fonts" if windows_root else None
+        if windows_fonts:
+            candidates.extend([
+                str(windows_fonts / "msyh.ttc"),
+                str(windows_fonts / "simhei.ttf"),
+                str(windows_fonts / "segoeui.ttf"),
+                str(windows_fonts / "arial.ttf"),
+            ])
+        candidates.extend([
+            r"C:\Windows\Fonts\msyh.ttc",     # Microsoft YaHei (CJK)
+            r"C:\Windows\Fonts\simhei.ttf",   # SimHei (CJK)
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+        ])
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            # FFmpeg's filter parser accepts forward slashes on every platform;
+            # escaping the drive-letter colon is handled by escape_drawtext.
+            return path.resolve().as_posix()
+    return None
+
+
+def drawtext_fontfile_option(font_file: str | None) -> str:
+    if not font_file:
+        return ""
+    return f"fontfile='{escape_drawtext(font_file)}':"
 
 
 def ffmpeg_color(value: str, fallback: str) -> str:
@@ -463,6 +575,7 @@ def build_timeline_filter_graph(
     fps = max(1, min(120, int(number(config.get("fps"), 30))))
     background = "white" if config.get("canvasBackground") == "white" else "black"
     filters: list[str] = []
+    drawtext_font_file = resolve_drawtext_font_file()
 
     # A non-overlapping edit can be represented as clips plus cheap color gap
     # sources.  The generic compositor below splits every input once per active
@@ -606,6 +719,7 @@ def build_timeline_filter_graph(
         next_label = f"textcanvas{text_index}"
         filters.append(
             f"[{text_input_label}]drawtext="
+            f"{drawtext_fontfile_option(drawtext_font_file)}"
             f"text='{escape_drawtext(text)}':"
             f"x=min(max(0\\,w*{x_ratio:.6f}-text_w/2)\\,w-text_w):"
             f"y=min(max(0\\,h*{y_ratio:.6f}-text_h/2)\\,h-text_h):"
@@ -740,6 +854,7 @@ def run_ffmpeg_command(
     if os.environ.get("VIDEO_SIM_VERBOSE_MERGE", "").strip() == "1":
         log(f"FFmpeg command: {subprocess.list2cmdline(command)}")
     stderr_tail: deque[str] = deque(maxlen=30)
+    emit_progress(progress_start, f"{progress_stage}：正在启动 FFmpeg，准备滤镜和编码器")
     ACTIVE_PROCESS = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -748,6 +863,7 @@ def run_ffmpeg_command(
         encoding="utf-8",
         errors="replace",
         creationflags=ffmpeg_creation_flags(),
+        startupinfo=ffmpeg_startup_info(),
     )
     stderr_thread = threading.Thread(
         target=drain_stderr,
@@ -757,9 +873,55 @@ def run_ffmpeg_command(
     stderr_thread.start()
 
     assert ACTIVE_PROCESS.stdout is not None
+    progress_queue: Queue[str | None] = Queue()
+
+    def drain_progress(stream) -> None:
+        try:
+            for progress_line in iter(stream.readline, ""):
+                progress_queue.put(progress_line)
+        finally:
+            progress_queue.put(None)
+
+    progress_thread = threading.Thread(
+        target=drain_progress,
+        args=(ACTIVE_PROCESS.stdout,),
+        daemon=True,
+    )
+    progress_thread.start()
+
     last_progress_at = 0.0
     last_elapsed = -1.0
-    for line in iter(ACTIVE_PROCESS.stdout.readline, ""):
+    last_reported_progress = progress_start
+    last_heartbeat_at = 0.0
+    startup_at = time.monotonic()
+    progress_stream_closed = False
+    while not progress_stream_closed:
+        try:
+            line = progress_queue.get(timeout=0.5)
+        except Empty:
+            now = time.monotonic()
+            # FFmpeg does not emit out_time until the first decoded frame has
+            # travelled through the complete graph.  On UHD inputs this can
+            # take several seconds.  Report a bounded warm-up state so the UI
+            # does not look frozen, while never pretending that real frames
+            # have already been encoded.
+            if last_elapsed < 0 and now - startup_at >= 0.8 and now - last_heartbeat_at >= 1.0:
+                warmup_cap = min(1.5, max(0.5, progress_span * 0.03))
+                warmup_progress = min(
+                    progress_start + warmup_cap,
+                    progress_start + (now - startup_at - 0.8) * 0.15,
+                )
+                if warmup_progress > last_reported_progress:
+                    last_reported_progress = warmup_progress
+                    emit_progress(
+                        warmup_progress,
+                        f"{progress_stage}：正在初始化解码器和滤镜（高分辨率可能需要更久）",
+                    )
+                last_heartbeat_at = now
+            continue
+        if line is None:
+            progress_stream_closed = True
+            continue
         key, _, value = line.strip().partition("=")
         if key in {"out_time_us", "out_time_ms"}:
             try:
@@ -778,9 +940,12 @@ def run_ffmpeg_command(
             last_elapsed = elapsed
             last_progress_at = now
             progress = progress_start + min(1.0, elapsed / max(0.01, total_duration)) * progress_span
+            progress = max(progress, last_reported_progress)
+            last_reported_progress = progress
             emit_progress(progress, f"{progress_stage}：{elapsed:.1f}s / {total_duration:.1f}s")
 
     exit_code = ACTIVE_PROCESS.wait()
+    progress_thread.join(timeout=3)
     stderr_thread.join(timeout=3)
     ACTIVE_PROCESS = None
     if exit_code != 0:
@@ -843,14 +1008,29 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
         else:
             extra_audio_input_count += 1
 
-    decoder_threads, filter_threads = merge_thread_limits(len(inputs) + extra_audio_input_count)
+    output_width = even(int(number(config.get("width"), 1920)))
+    output_height = even(int(number(config.get("height"), 1080)))
+    largest_pixels = max(
+        output_width * output_height,
+        *(max(1, int(info.get("width", 0))) * max(1, int(info.get("height", 0))) for info in metadata),
+    )
+    decoder_threads, filter_threads = merge_thread_limits(
+        len(inputs) + extra_audio_input_count,
+        pixel_count=largest_pixels,
+    )
+    input_queue_size, filter_buffered_frames = merge_memory_limits(largest_pixels)
     input_args = [
         ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
         "-filter_threads", str(filter_threads),
         "-filter_complex_threads", str(filter_threads),
+        "-filter_buffered_frames", str(filter_buffered_frames),
     ]
     for item in inputs:
-        input_args.extend(["-threads", str(decoder_threads), "-i", str(Path(str(item["path"])))] )
+        input_args.extend([
+            "-thread_queue_size", str(input_queue_size),
+            "-threads", str(decoder_threads),
+            "-i", str(Path(str(item["path"]))),
+        ])
     audio_metadata = []
     audio_metadata_cache: dict[str, dict] = {}
     next_audio_input_index = len(inputs)
@@ -869,7 +1049,11 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
             raise RuntimeError(f"音频文件不存在: {path}")
         item["_inputIndex"] = next_audio_input_index
         next_audio_input_index += 1
-        input_args.extend(["-threads", str(decoder_threads), "-i", str(path)])
+        input_args.extend([
+            "-thread_queue_size", str(input_queue_size),
+            "-threads", str(decoder_threads),
+            "-i", str(path),
+        ])
         cache_key = os.path.normcase(str(path.resolve()))
         info = audio_metadata_cache.get(cache_key)
         if info is None:
@@ -878,12 +1062,17 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
             audio_metadata_cache[cache_key] = info
         audio_metadata.append(info)
 
+    emit_progress(8.5, "视频信息读取完成，正在准备时间线")
     filters, total_duration, output_has_audio = build_timeline_filter_graph(
         inputs,
         metadata,
         audio_tracks,
         audio_metadata,
         config,
+    )
+    emit_progress(
+        9.2,
+        f"滤镜图准备完成（{output_width}×{output_height}，已限制并行帧缓存）",
     )
 
     encoding_args = video_encoding_args(config)
@@ -926,7 +1115,10 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="video_merge_graph_") as graph_dir:
         graph_path = Path(graph_dir) / "timeline.ffscript"
         write_filter_graph(graph_path, filters)
-        render_args = ["-filter_complex_script", str(graph_path), "-map", "[vout]"]
+        # FFmpeg 8 deprecates the legacy filter-graph script flag in favour of
+        # the slash-prefixed file argument.  It keeps the graph out of the
+        # command line while avoiding a deprecation warning on every export.
+        render_args = ["-/filter_complex", str(graph_path), "-map", "[vout]"]
         if output_has_audio:
             render_args.extend(["-map", "[aout]"])
         if use_two_pass:
@@ -938,7 +1130,7 @@ def run_merge(config: dict, result_path: Path, project_root: Path) -> None:
                 first_graph_path = Path(pass_dir) / "first-pass.ffscript"
                 write_filter_graph(first_graph_path, first_pass_filters)
                 first_pass_args = [
-                    "-filter_complex_script", str(first_graph_path),
+                    "-/filter_complex", str(first_graph_path),
                     "-map", "[vout]",
                     *video_encoding_args(config),
                     "-threads", str(filter_threads),

@@ -46,13 +46,15 @@
 - Linux：下载 `.deb`、`.rpm` 或便携 `.tar.gz`。
 - 不想安装时，可以选择同平台的 `portable` 便携包，解压后直接运行。
 
-从 v1.1.0 开始，应用与 AI 运行环境分开发布。安装包和便携包本身较小；第一次启动时，应用会自动安装一次对应的 Python、PyTorch 和 FFmpeg 运行环境。CPU 环境通常为数百 MB，Windows GPU 环境接近 2 GiB，请预留足够的下载时间和磁盘空间。
+应用、AI 运行环境和 FFmpeg 视频合并环境分开管理。视频合并使用独立的 FFmpeg/FFprobe（Linux/Windows 构建固定为 FFmpeg 8.1.2，macOS 使用对应架构的稳定构建），发布包不要求系统预装 FFmpeg；设置页的“视频合并环境”入口只会下载当前平台的 `Video_Similarity-ffmpeg-runtime-*` 小型压缩包，不会回退下载包含 Python、PyTorch 或 CUDA 的大型 AI 环境。Windows x64、Linux x64、macOS Intel（x64）和 macOS Apple Silicon（arm64）均提供对应环境包；其他架构需要自行提供兼容的 FFmpeg/FFprobe 并设置 `VIDEO_SIM_FFMPEG`、`VIDEO_SIM_FFPROBE`。
 
-Windows 安装器支持自定义路径。主程序、`scripts`、`video_sim`、`env`、`models` 和 `data` 都位于用户选择的目录中；其中大型环境和模型放在独立子目录，覆盖更新不会删除或替换它们。
+设置页的“AI 运行环境”只负责 Python/PyTorch/CUDA，“重装环境”会从最新 Release 重新下载并替换当前 AI 环境，不会影响视频合并环境。CPU 环境通常为数百 MB，Windows GPU 环境接近 2 GiB，请预留足够的下载时间和磁盘空间。
+
+Windows 安装器支持自定义路径。安装包本身不内置 AI 或 FFmpeg 大型运行环境；首次使用时，AI 环境和独立 FFmpeg/FFprobe 环境会分别下载到安装目录下的 `env` 与 `merge-env`，覆盖更新不会删除或替换它们。
 
 以后如果只是新增按钮、修改合并视频页面、修复界面或业务逻辑，更新程序只下载十几至几十 MB 的应用更新，不会重复下载运行环境和模型。只有运行环境版本确实发生变化时，才会再次下载。v1.0.x 用户如果程序旁仍保留旧 `env`，新版本会自动识别并继续使用，也可在“设置”中就地登记，无需移动或重新下载。
 
-Release 中以 `Video_Similarity-runtime-` 开头的文件、`.sha256`、`*-updater`、`.sig` 和更新 JSON 均由应用自动选择和校验，普通用户不需要手动下载。Windows 安装版仍支持自定义目录、覆盖升级和卸载时选择是否保留数据、报告与界面设置。
+Release 中以 `Video_Similarity-runtime-` 开头的是 AI 环境包，以 `Video_Similarity-ffmpeg-runtime-` 开头的是只包含 FFmpeg、FFprobe 与许可证的独立视频合并环境包；两者及其 `.sha256` 均由设置页自动选择和校验，普通用户不需要手动下载。`*-updater`、`.sig` 和更新 JSON 用于应用本体更新。Windows 安装版仍支持自定义目录、覆盖升级和卸载时选择是否保留数据、报告与界面设置。
 
 ### 离线模型
 

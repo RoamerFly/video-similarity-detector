@@ -280,6 +280,7 @@ Write-Step "[4/5] Assembling lightweight test directory"
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination $outputExe -Force
 Ensure-Junction (Join-Path $outputDir "env") $gpuEnvDir
+Ensure-Junction (Join-Path $outputDir "merge-env") $gpuEnvDir
 Ensure-Junction (Join-Path $outputDir "scripts") (Join-Path $repoRoot "scripts")
 Ensure-Junction (Join-Path $outputDir "video_sim") (Join-Path $repoRoot "video_sim")
 New-Item -ItemType Directory -Path (Join-Path $outputDir "data\reports") -Force | Out-Null
@@ -291,8 +292,9 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "requirements.txt") -Destination $ou
 $launcher = @"
 @echo off
 cd /d "%~dp0"
-set "VIDEO_SIM_FFMPEG=%~dp0env\ffmpeg.exe"
-set "PATH=%~dp0env;%PATH%"
+set "VIDEO_SIM_FFMPEG=%~dp0merge-env\ffmpeg.exe"
+set "VIDEO_SIM_FFPROBE=%~dp0merge-env\ffprobe.exe"
+set "PATH=%~dp0merge-env;%~dp0env;%PATH%"
 start "" "%~dp0video-similarity-desktop.exe"
 "@
 Set-Content -LiteralPath (Join-Path $outputDir "run-gpu-test.bat") -Value $launcher -Encoding ASCII

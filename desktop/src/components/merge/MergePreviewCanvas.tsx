@@ -73,6 +73,11 @@ interface MergePreviewCanvasProps {
     event: ReactPointerEvent<HTMLDivElement>,
     item: MergeTextItem,
   ) => void
+  onPreviewTextResizePointerDown: (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    item: MergeTextItem,
+    handle: CropHandle,
+  ) => void
   onPreviewTextContextMenu: (event: React.MouseEvent<HTMLDivElement>, item: MergeTextItem) => void
   onGroupLayoutPointerDown: (
     event: ReactPointerEvent<HTMLElement>,
@@ -125,6 +130,7 @@ export function MergePreviewCanvas({
   onResolutionPreviewModeChange,
   onPreviewLayoutPointerDown,
   onPreviewTextPointerDown,
+  onPreviewTextResizePointerDown,
   onPreviewTextContextMenu,
   onGroupLayoutPointerDown,
   onCropPointerDown,
@@ -372,28 +378,41 @@ export function MergePreviewCanvas({
             </div>
           )}
 
-          {outputCanvasGeometry && activeTextItems.map((item) => (
-            <div
-              key={item.id}
-              className={`editor-preview-text ${selectedTextId === item.id ? 'selected' : ''}`}
-              style={{
-                left: (draft?.text?.[item.id]?.x ?? item.x) * outputCanvasGeometry.width,
-                top: (draft?.text?.[item.id]?.y ?? item.y) * outputCanvasGeometry.height,
-                fontSize: clamp(
-                  item.fontSize / Math.max(1, settings.width) * outputCanvasGeometry.width,
-                  10,
-                  80,
-                ),
-                color: item.color,
-                backgroundColor: item.backgroundColor,
-              }}
-              title="拖动调整文本位置，右键打开属性编辑内容和样式"
-              onPointerDown={(event) => onPreviewTextPointerDown(event, item)}
-              onContextMenu={(event) => onPreviewTextContextMenu(event, item)}
-            >
-              {item.text}
-            </div>
-          ))}
+          {outputCanvasGeometry && activeTextItems.map((item) => {
+            const textDraft = draft?.text?.[item.id]
+            const textFontSize = textDraft?.fontSize ?? item.fontSize
+            return (
+              <div
+                key={item.id}
+                className={`editor-preview-text ${selectedTextId === item.id ? 'selected' : ''}`}
+                style={{
+                  left: (textDraft?.x ?? item.x) * outputCanvasGeometry.width,
+                  top: (textDraft?.y ?? item.y) * outputCanvasGeometry.height,
+                  fontSize: clamp(
+                    textFontSize / Math.max(1, settings.width) * outputCanvasGeometry.width,
+                    10,
+                    240,
+                  ),
+                  color: item.color,
+                  backgroundColor: item.backgroundColor,
+                }}
+                title="拖动调整文本位置，右键打开属性编辑内容和样式"
+                onPointerDown={(event) => onPreviewTextPointerDown(event, item)}
+                onContextMenu={(event) => onPreviewTextContextMenu(event, item)}
+              >
+                {item.text}
+                {selectedTextId === item.id && resizeHandles.map((handle) => (
+                  <button
+                    type="button"
+                    key={handle}
+                    className={`editor-preview-text-resize-handle ${handle}`}
+                    aria-label={`调整文本大小 ${handle}`}
+                    onPointerDown={(event) => onPreviewTextResizePointerDown(event, item, handle)}
+                  />
+                ))}
+              </div>
+            )
+          })}
 
           {suspendMedia && previewLayouts.length > 0 && (
             <div className="editor-preview-suspended" role="status">

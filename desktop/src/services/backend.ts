@@ -63,6 +63,20 @@ export interface RuntimeStatus {
   message: string
 }
 
+export interface MergeRuntimeStatus {
+  ready: boolean
+  managed: boolean
+  legacyFallback: boolean
+  expectedVersion: string
+  installedVersion?: string
+  platform: string
+  runtimeDir: string
+  ffmpegPath: string
+  ffprobePath: string
+  assetName: string
+  message: string
+}
+
 export interface VideoFile {
   path: string
   name: string
@@ -543,6 +557,34 @@ export async function removeLegacyRuntime() {
 export async function cancelRuntimeInstall() {
   if (!hasTauriRuntime()) return
   return invoke<void>('cancel_runtime_install')
+}
+
+export async function getMergeRuntimeStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      ready: true,
+      managed: false,
+      legacyFallback: false,
+      expectedVersion: '1',
+      platform: 'browser',
+      runtimeDir: '',
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      assetName: '',
+      message: '浏览器预览模式使用系统 FFmpeg。'
+    } satisfies MergeRuntimeStatus
+  }
+  return invoke<MergeRuntimeStatus>('get_merge_runtime_status')
+}
+
+export async function installMergeRuntime(proxyUrl?: string) {
+  if (!hasTauriRuntime()) throw new Error('视频合并环境安装需要在桌面应用中运行。')
+  return invoke<MergeRuntimeStatus>('install_merge_runtime', { proxyUrl: proxyUrl?.trim() || null })
+}
+
+export async function cancelMergeRuntimeInstall() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('cancel_merge_runtime_install')
 }
 
 export async function getClipModelStatus() {
@@ -1194,6 +1236,19 @@ export async function listenClipModelInstallProgress(
 }
 
 export async function listenRuntimeInstallProgress(
+  handler: (payload: UpdateDownloadProgress) => void,
+) {
+  if (!hasTauriRuntime()) return () => undefined
+  const unlisten = await listen<UpdateDownloadProgress>(
+    'runtime-install-progress',
+    (event) => handler(event.payload),
+  )
+  return () => {
+    unlisten()
+  }
+}
+
+export async function listenMergeRuntimeInstallProgress(
   handler: (payload: UpdateDownloadProgress) => void,
 ) {
   if (!hasTauriRuntime()) return () => undefined

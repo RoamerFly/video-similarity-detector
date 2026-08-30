@@ -58,6 +58,7 @@ DESKTOP_DIR="$SCRIPT_DIR"
 REPO_ROOT="$(cd "$DESKTOP_DIR/.." && pwd)"
 DIST_DIR="$DESKTOP_DIR/$DIST_NAME"
 ENV_DIR="$DESKTOP_DIR/env"
+MERGE_ENV_DIR="$DESKTOP_DIR/merge-env"
 PYTHON_ENV_DIR="$ENV_DIR/python"
 VENV_PYTHON="$PYTHON_ENV_DIR/bin/python"
 RELEASE_DIR="$DESKTOP_DIR/src-tauri/target/release"
@@ -65,9 +66,11 @@ APP_BINARY="$RELEASE_DIR/video-similarity-desktop"
 REQUIREMENTS="$REPO_ROOT/requirements.txt"
 DEFAULT_RUNTIME_REQUIREMENTS="$DESKTOP_DIR/requirements-runtime.txt"
 RUNTIME_VERSION_FILE="$DESKTOP_DIR/runtime-version.txt"
+MERGE_RUNTIME_VERSION_FILE="$DESKTOP_DIR/ffmpeg-runtime-version.txt"
 RUNTIME_REQUIREMENTS="${RUNTIME_REQUIREMENTS:-$DEFAULT_RUNTIME_REQUIREMENTS}"
 [[ -f "$RUNTIME_REQUIREMENTS" ]] || RUNTIME_REQUIREMENTS="$REQUIREMENTS"
 [[ -s "$RUNTIME_VERSION_FILE" ]] || { echo "[ERROR] Missing runtime version file: $RUNTIME_VERSION_FILE" >&2; exit 1; }
+[[ -s "$MERGE_RUNTIME_VERSION_FILE" ]] || { echo "[ERROR] Missing merge runtime version file: $MERGE_RUNTIME_VERSION_FILE" >&2; exit 1; }
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "[ERROR] Linux builds must be run on Linux." >&2
@@ -254,9 +257,13 @@ copy_runtime_tree() {
   cp "$REQUIREMENTS" "$DIST_DIR/requirements.txt"
   cp "$RUNTIME_REQUIREMENTS" "$DIST_DIR/requirements-runtime.txt"
   cp "$RUNTIME_VERSION_FILE" "$DIST_DIR/runtime-version.txt"
+  cp "$MERGE_RUNTIME_VERSION_FILE" "$DIST_DIR/ffmpeg-runtime-version.txt"
   printf 'cpu\n' > "$DIST_DIR/BUILD_FLAVOR.txt"
   cp -R "$ENV_DIR" "$DIST_DIR/env"
-  chmod +x "$DIST_DIR/env/ffmpeg" "$DIST_DIR/env/ffprobe"
+  # Keep FFmpeg out of the AI archive even when an older local env still has
+  # the legacy binaries; the dedicated FFmpeg archive owns those tools now.
+  rm -f "$DIST_DIR/env/ffmpeg" "$DIST_DIR/env/ffprobe" \
+    "$DIST_DIR/env/FFmpeg-LICENSE.txt" "$DIST_DIR/env/FFmpeg-GPL-3.0.txt"
 }
 
 copy_linux_artifact() {
@@ -289,22 +296,22 @@ Video Similarity - Linux portable package
 Output structure:
 - video-similarity-desktop: executable app.
 - scripts/ and video_sim/: analysis engine copied next to the executable.
-- runtime-version.txt and BUILD_FLAVOR.txt: runtime compatibility markers.
+- runtime-version.txt, ffmpeg-runtime-version.txt and BUILD_FLAVOR.txt: runtime compatibility markers.
 
 Run:
   ./run-video-similarity.sh
 
 The release package keeps the app lightweight. On first launch, install the
-versioned runtime into the writable app data directory when prompted. Future app
-updates reuse that runtime instead of downloading it again.
+versioned AI and FFmpeg runtimes into the writable app data directory when
+prompted. They are downloaded as separate Release assets and future app updates
+reuse each runtime instead of downloading it again.
 EOF
 }
 
 assert_portable_package() {
   [[ -x "$DIST_DIR/video-similarity-desktop" ]] || { echo "[ERROR] Missing executable"; exit 1; }
   [[ -d "$DIST_DIR/env/python" ]] || { echo "[ERROR] Missing env/python"; exit 1; }
-  [[ -x "$DIST_DIR/env/ffmpeg" ]] || { echo "[ERROR] Missing env/ffmpeg"; exit 1; }
-  [[ -x "$DIST_DIR/env/ffprobe" ]] || { echo "[ERROR] Missing env/ffprobe"; exit 1; }
+  [[ ! -e "$DIST_DIR/merge-env" ]] || { echo "[ERROR] Portable package unexpectedly contains merge-env"; exit 1; }
   [[ -d "$DIST_DIR/data/reports" ]] || { echo "[ERROR] Missing data/reports"; exit 1; }
   [[ -d "$DIST_DIR/models" ]] || { echo "[ERROR] Missing models directory"; exit 1; }
   [[ -f "$DIST_DIR/scripts/batch_compare.py" ]] || { echo "[ERROR] Missing scripts/batch_compare.py"; exit 1; }
@@ -315,8 +322,6 @@ assert_portable_package() {
 
   local dist_python="$DIST_DIR/env/python/bin/python"
   [[ -x "$dist_python" ]] || dist_python="$DIST_DIR/env/python/bin/python3"
-  "$DIST_DIR/env/ffmpeg" -version >/dev/null
-  "$DIST_DIR/env/ffprobe" -version >/dev/null
   verify_python_env "$dist_python"
   "$dist_python" -m py_compile \
     "$DIST_DIR/scripts/batch_compare.py" \
@@ -336,14 +341,16 @@ echo "Project root : $REPO_ROOT"
 echo "Desktop dir  : $DESKTOP_DIR"
 echo "Output dir   : $DIST_DIR"
 echo "Env dir      : $ENV_DIR"
+echo "Merge env    : $MERGE_ENV_DIR"
 echo "Runtime reqs : $RUNTIME_REQUIREMENTS"
 
 cd "$DESKTOP_DIR"
 
-if [[ ! -x "$ENV_DIR/ffmpeg" || ! -x "$ENV_DIR/ffprobe" ]]; then
+if [[ ! -x "$MERGE_ENV_DIR/ffmpeg" || ! -x "$MERGE_ENV_DIR/ffprobe" ]]; then
   step "[0/9] Downloading standalone FFmpeg runtime..."
   chmod +x "$REPO_ROOT/scripts/prepare-ffmpeg-runtime.sh"
-  "$REPO_ROOT/scripts/prepare-ffmpeg-runtime.sh" linux-x64
+  VIDEO_SIM_RUNTIME_DIR="$MERGE_ENV_DIR" \
+    "$REPO_ROOT/scripts/prepare-ffmpeg-runtime.sh" linux-x64
 fi
 
 step "[1/9] Checking build tools..."

@@ -59,7 +59,7 @@ export function RuntimeSettingsCard() {
 
   async function handleInstall() {
     const canMigrate = status?.legacyFallback && status.legacyMigrationAvailable
-    const action = status?.managed ? '重新安装' : canMigrate ? '就地登记现有环境' : '下载'
+    const action = status?.managed ? '从最新 Release 重新下载并更新' : canMigrate ? '就地登记现有环境' : '下载'
     if (!window.confirm(`${action} ${status?.flavor === 'gpu' ? 'GPU / CUDA' : 'CPU'} 运行环境？`)) return
     setInstalling(true)
     setError('')
@@ -160,7 +160,7 @@ export function RuntimeSettingsCard() {
           {installing
             ? '处理中'
             : status?.managed
-              ? '重装环境'
+              ? '更新/重装最新环境'
               : status?.legacyFallback && status.legacyMigrationAvailable
                 ? '就地登记'
                 : status?.legacyFallback

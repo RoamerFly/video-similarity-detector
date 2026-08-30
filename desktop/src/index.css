@@ -8662,6 +8662,29 @@ select {
   box-shadow: 0 0 0 2px rgba(255, 216, 107, 0.22);
 }
 
+.editor-preview-text-resize-handle {
+  position: absolute;
+  z-index: 2;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid #fff;
+  border-radius: 2px;
+  background: #ffd65a;
+  box-shadow: 0 0 0 1px rgba(37, 25, 0, 0.42);
+  transform: translate(-50%, -50%);
+  touch-action: none;
+}
+
+.editor-preview-text-resize-handle.nw { top: 0; left: 0; cursor: nwse-resize; }
+.editor-preview-text-resize-handle.n { top: 0; left: 50%; cursor: ns-resize; }
+.editor-preview-text-resize-handle.ne { top: 0; left: 100%; cursor: nesw-resize; }
+.editor-preview-text-resize-handle.e { top: 50%; left: 100%; cursor: ew-resize; }
+.editor-preview-text-resize-handle.se { top: 100%; left: 100%; cursor: nwse-resize; }
+.editor-preview-text-resize-handle.s { top: 100%; left: 50%; cursor: ns-resize; }
+.editor-preview-text-resize-handle.sw { top: 100%; left: 0; cursor: nesw-resize; }
+.editor-preview-text-resize-handle.w { top: 50%; left: 0; cursor: ew-resize; }
+
 .editor-export-status {
   display: grid;
   min-width: 0;
@@ -9060,6 +9083,9 @@ select {
 
 .merge-editor-page .editor-player-progress {
   min-width: 120px;
+  /* Keep the transport controls together on the left and place the seek bar
+     at the far right of the merge editor control row. */
+  order: 2;
 }
 
 .merge-editor-page .editor-player-controls button {
@@ -12378,6 +12404,180 @@ select {
   display: grid;
 }
 
+/* Resource cards are opened on demand so the base settings form stays compact. */
+.settings-resource-buttons {
+  display: grid;
+  grid-column: 1 / -1;
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-resource-button {
+  display: flex;
+  position: relative;
+  min-width: 0;
+  min-height: 68px;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  color: rgba(228, 238, 255, 0.9);
+  text-align: left;
+  border: 1px solid rgba(116, 145, 255, 0.24);
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(21, 48, 101, 0.44), rgba(7, 18, 45, 0.5));
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.settings-resource-status {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.settings-resource-status.installed {
+  color: #b6ffd9;
+  border-color: rgba(71, 224, 145, 0.4);
+  background: rgba(28, 170, 103, 0.22);
+}
+
+.settings-resource-status.missing {
+  color: #ffd0d9;
+  border-color: rgba(255, 89, 122, 0.44);
+  background: rgba(206, 46, 78, 0.23);
+}
+
+.settings-resource-status.checking {
+  color: rgba(223, 235, 255, 0.74);
+  border-color: rgba(143, 176, 238, 0.3);
+  background: rgba(94, 126, 188, 0.2);
+}
+
+.settings-resource-button:hover,
+.settings-resource-button:focus-visible {
+  border-color: rgba(111, 190, 255, 0.72);
+  background: linear-gradient(145deg, rgba(30, 74, 145, 0.58), rgba(8, 22, 54, 0.62));
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.settings-resource-button > svg {
+  flex: 0 0 auto;
+  color: rgba(116, 203, 255, 0.96);
+}
+
+.settings-resource-button > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding-right: 66px;
+}
+
+.settings-resource-button strong,
+.settings-resource-button small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-resource-button strong {
+  color: rgba(244, 248, 255, 0.96);
+  font-size: 13px;
+}
+
+.settings-resource-button small {
+  color: rgba(211, 225, 255, 0.62);
+  font-size: 11px;
+}
+
+.settings-resource-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 7, 20, 0.62);
+  backdrop-filter: blur(12px);
+  isolation: isolate;
+}
+
+.settings-resource-dialog {
+  display: grid;
+  width: min(760px, calc(100vw - 40px));
+  max-height: min(820px, calc(100vh - 40px));
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(116, 145, 255, 0.34);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(13, 30, 69, 0.99), rgba(5, 14, 35, 0.99));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
+}
+
+.settings-resource-dialog-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-resource-dialog-head .about-title {
+  min-width: 0;
+}
+
+.settings-resource-dialog-head .icon-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: rgba(228, 238, 255, 0.92);
+  border: 1px solid rgba(116, 145, 255, 0.26);
+  border-radius: 8px;
+  background: rgba(10, 24, 58, 0.72);
+  cursor: pointer;
+}
+
+.settings-resource-dialog-body {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.settings-resource-dialog .settings-about-card {
+  display: grid;
+}
+
+@media (max-width: 900px) {
+  .settings-resource-buttons {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 540px) {
+  .settings-resource-buttons {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-resource-dialog {
+    width: min(760px, calc(100vw - 20px));
+    max-height: calc(100vh - 20px);
+    padding: 12px;
+  }
+}
+
 @media (max-width: 1450px), (max-height: 900px) {
   .settings-panel-grid.base {
     grid-template-columns: minmax(0, 1fr);
@@ -12867,5 +13067,330 @@ select {
     flex: 1 1 auto;
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+}
+
+/* Compact export pill modeled after bilibili-box's download status tray. */
+.merge-editor-page {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.app-frame .app-sidebar {
+  z-index: 500;
+  overflow: visible;
+}
+
+.sidebar-version-row {
+  position: relative;
+  z-index: 510;
+  display: flex;
+  margin: auto 0 0 8px;
+  align-items: center;
+  gap: 5px;
+}
+
+.sidebar-version-row > .version-pill {
+  width: 70px;
+  min-width: 70px;
+  margin: 0;
+  padding: 5px 0;
+  flex: 0 0 70px;
+  font-size: 11px;
+}
+
+.merge-export-status-anchor {
+  position: relative;
+  z-index: 520;
+  width: 92px;
+  min-width: 92px;
+  height: 32px;
+  flex: 0 0 92px;
+  overflow: visible;
+}
+
+.merge-export-status-anchor > .editor-export-status {
+  position: absolute;
+  z-index: 2147483000;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  width: 92px;
+  height: 32px;
+  min-width: 0;
+  max-height: calc(100vh - 24px);
+  padding: 0;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  border-color: rgba(116, 175, 255, 0.42);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(8, 25, 61, 0.94), rgba(5, 13, 33, 0.92));
+  box-shadow: 0 22px 64px rgba(0, 0, 0, 0.56), inset 0 0 24px rgba(73, 125, 255, 0.1);
+  backdrop-filter: blur(14px);
+  isolation: isolate;
+  transform-origin: bottom left;
+  transition: width 220ms ease, height 220ms ease, border-color 180ms ease, border-radius 180ms ease;
+}
+
+.merge-export-status-anchor > .editor-export-status.is-expanded {
+  width: min(340px, calc(100vw - 118px));
+  height: min(286px, calc(100vh - 32px));
+  border-color: rgba(104, 190, 255, 0.66);
+  border-radius: 14px;
+}
+
+.merge-export-pill-head {
+  display: grid;
+  width: 100%;
+  height: 32px;
+  min-height: 32px;
+  min-width: 0;
+  grid-template-columns: 15px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: rgba(226, 236, 255, 0.76);
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+}
+
+.editor-export-status.is-expanded .merge-export-pill-head {
+  grid-template-columns: 16px max-content minmax(0, 1fr) max-content 16px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(116, 175, 255, 0.2);
+}
+
+.merge-export-pill-head:hover,
+.merge-export-pill-head:focus-visible {
+  color: rgba(247, 250, 255, 0.98);
+  outline: none;
+}
+
+.merge-export-pill-head > svg:first-child {
+  width: 15px;
+  height: 15px;
+  color: rgba(113, 202, 255, 0.96);
+}
+
+.merge-export-pill-head > span,
+.merge-export-pill-head > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-export-pill-head > span {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.merge-export-pill-head > strong {
+  color: rgba(220, 231, 255, 0.62);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.merge-export-pill-head > b {
+  color: rgba(123, 220, 255, 0.96);
+  font-size: 11px;
+}
+
+.merge-export-pill-chevron {
+  width: 14px;
+  height: 14px;
+  color: rgba(184, 211, 255, 0.66);
+  transition: transform 180ms ease;
+}
+
+.editor-export-status.is-expanded .merge-export-pill-chevron {
+  transform: rotate(180deg);
+}
+
+.merge-export-pill-progress {
+  position: absolute;
+  right: 7px;
+  bottom: 2px;
+  left: 7px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(74, 104, 167, 0.26);
+  pointer-events: none;
+}
+
+.editor-export-status.is-expanded .merge-export-pill-progress {
+  display: none;
+}
+
+.merge-export-pill-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2b7fff, #9a4dff, #ff4f9a);
+  transition: width 180ms ease;
+}
+
+.merge-export-pill-body {
+  display: grid;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.merge-export-pill-tabs {
+  display: inline-flex;
+  width: max-content;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(108, 139, 205, 0.12);
+}
+
+.merge-export-pill-tabs button {
+  display: inline-flex;
+  height: 27px;
+  min-width: 64px;
+  padding: 0 10px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: rgba(204, 218, 246, 0.62);
+  font-size: 11px;
+  font-weight: 800;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.merge-export-pill-tabs button.active {
+  color: rgba(245, 249, 255, 0.96);
+  background: rgba(86, 132, 226, 0.3);
+}
+
+.merge-export-pill-tabs button span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: rgba(185, 211, 255, 0.82);
+  background: rgba(10, 23, 54, 0.55);
+  font-size: 9px;
+}
+
+.merge-export-progress-tab {
+  display: grid;
+  min-height: 0;
+  align-content: start;
+  gap: 9px;
+  overflow-y: auto;
+}
+
+.merge-export-progress-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  background: rgba(70, 105, 176, 0.12);
+}
+
+.merge-export-progress-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.merge-export-progress-summary span {
+  color: rgba(203, 218, 247, 0.5);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.merge-export-progress-summary strong {
+  overflow: hidden;
+  color: rgba(241, 246, 255, 0.92);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-export-progress-summary > b {
+  flex: 0 0 auto;
+  color: rgba(123, 220, 255, 0.96);
+  font-size: 15px;
+}
+
+.merge-export-logs-tab {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.merge-export-log-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.merge-export-log-tools button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  place-items: center;
+  color: rgba(213, 228, 255, 0.78);
+  border: 1px solid rgba(116, 145, 255, 0.18);
+  border-radius: 7px;
+  background: rgba(78, 112, 183, 0.13);
+  cursor: pointer;
+}
+
+.merge-export-log-tools svg {
+  width: 13px;
+  height: 13px;
+}
+
+.merge-export-logs-tab .merge-log-view {
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.merge-export-log-more,
+.merge-export-pill-empty {
+  display: grid;
+  min-height: 72px;
+  place-items: center;
+  color: rgba(203, 218, 255, 0.48);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.merge-export-logs-tab .merge-log-view time {
+  margin-right: 7px;
+  color: rgba(176, 197, 235, 0.4);
+}
+
+@media (max-width: 900px) {
+  .merge-export-status-anchor > .editor-export-status.is-expanded {
+    width: min(330px, calc(100vw - 106px));
+  }
+}
+
+@media (max-width: 560px) {
+  .merge-export-status-anchor > .editor-export-status.is-expanded {
+    width: min(310px, calc(100vw - 96px));
+    height: min(270px, calc(100vh - 24px));
   }
 }

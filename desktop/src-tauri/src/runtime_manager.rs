@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 
 const RUNTIME_VERSION: &str = include_str!("../../runtime-version.txt");
+const FFMPEG_RUNTIME_VERSION: &str = include_str!("../../ffmpeg-runtime-version.txt");
 const RELEASE_DOWNLOAD_ROOT: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download";
 
@@ -44,6 +45,22 @@ pub struct RuntimeInstallProgress {
     total_bytes: u64,
     progress: f64,
     stage: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeRuntimeStatus {
+    ready: bool,
+    managed: bool,
+    legacy_fallback: bool,
+    expected_version: String,
+    installed_version: Option<String>,
+    platform: String,
+    runtime_dir: String,
+    ffmpeg_path: String,
+    ffprobe_path: String,
+    asset_name: String,
+    message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,6 +124,38 @@ pub async fn install_runtime(
 
 #[tauri::command]
 pub fn cancel_runtime_install(state: State<'_, RuntimeManagerState>) {
+    state.cancel_requested.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn get_merge_runtime_status(app: tauri::AppHandle) -> Result<MergeRuntimeStatus, String> {
+    merge_runtime_status(&app)
+}
+
+#[tauri::command]
+pub async fn install_merge_runtime(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeManagerState>,
+    proxy_url: Option<String>,
+) -> Result<MergeRuntimeStatus, String> {
+    if state
+        .installing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("运行环境安装任务已经在执行。".to_string());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let result = install_merge_runtime_impl(&app, &state, proxy_url.as_deref()).await;
+    state.installing.store(false, Ordering::SeqCst);
+    result?;
+    configure_environment(&app)?;
+    merge_runtime_status(&app)
+}
+
+#[tauri::command]
+pub fn cancel_merge_runtime_install(state: State<'_, RuntimeManagerState>) {
     state.cancel_requested.store(true, Ordering::SeqCst);
 }
 
@@ -181,24 +230,36 @@ pub fn configure_environment(app: &tauri::AppHandle) -> Result<(), String> {
         let python = PathBuf::from(&runtime.python_path);
         if let Some(env_dir) = python_runtime_env_dir(&python) {
             std::env::set_var("VIDEO_SIM_RUNTIME_DIR", &env_dir);
-            if std::env::var_os("VIDEO_SIM_FFMPEG").is_none() {
-                if let Some(ffmpeg) = executable_in_env(&env_dir, "ffmpeg") {
-                    std::env::set_var("VIDEO_SIM_FFMPEG", ffmpeg);
-                }
-            }
-            if std::env::var_os("VIDEO_SIM_FFPROBE").is_none() {
-                if let Some(ffprobe) = executable_in_env(&env_dir, "ffprobe") {
-                    std::env::set_var("VIDEO_SIM_FFPROBE", ffprobe);
-                }
-            }
         }
     }
+
+    configure_merge_environment(app)?;
 
     if std::env::var_os("VIDEO_SIM_CLIP_MODEL_DIR").is_none() {
         let model_dir = asset_root(app)?
             .join("models")
             .join("clip-vit-base-patch32");
         std::env::set_var("VIDEO_SIM_CLIP_MODEL_DIR", model_dir);
+    }
+    Ok(())
+}
+
+pub fn configure_merge_environment(app: &tauri::AppHandle) -> Result<(), String> {
+    let root = storage_root(app)?;
+    let mut roots = vec![root];
+    roots.extend(legacy_runtime_roots(app));
+    for base in deduplicate_paths(roots) {
+        let merge_dir = base.join("merge-env");
+        let legacy_dir = base.join("env");
+        let ffmpeg = executable_in_env(&merge_dir, "ffmpeg")
+            .or_else(|| executable_in_env(&legacy_dir, "ffmpeg"));
+        let ffprobe = executable_in_env(&merge_dir, "ffprobe")
+            .or_else(|| executable_in_env(&legacy_dir, "ffprobe"));
+        if let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg, ffprobe) {
+            std::env::set_var("VIDEO_SIM_FFMPEG", ffmpeg);
+            std::env::set_var("VIDEO_SIM_FFPROBE", ffprobe);
+            break;
+        }
     }
     Ok(())
 }
@@ -296,6 +357,90 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
         python_path: String::new(),
         asset_name,
         message: "尚未安装 AI 运行环境。应用本体保持轻量，首次使用前需下载一次。".to_string(),
+    })
+}
+
+fn merge_runtime_status(app: &tauri::AppHandle) -> Result<MergeRuntimeStatus, String> {
+    let expected_version = merge_expected_version();
+    let platform = runtime_platform().to_string();
+    let root = storage_root(app)?;
+    let asset_name = ffmpeg_runtime_asset_name(&expected_version, &platform);
+    let runtime_dir = root.join("merge-env");
+    let mut roots = vec![root.clone()];
+    roots.extend(legacy_runtime_roots(app));
+    let roots = deduplicate_paths(roots);
+    for base in &roots {
+        let candidate = base.join("merge-env");
+        let (Some(ffmpeg_path), Some(ffprobe_path)) = (
+            executable_in_env(&candidate, "ffmpeg"),
+            executable_in_env(&candidate, "ffprobe"),
+        ) else {
+            continue;
+        };
+        let manifest = read_manifest(&candidate.join(".runtime.json"));
+        let managed = manifest.is_some() && paths_equivalent(&candidate, &runtime_dir);
+        let bundled = is_bundled_runtime_root(base);
+        let version_matches = manifest
+            .as_ref()
+            .is_some_and(|entry| entry.version == expected_version)
+            || (!managed && (candidate != runtime_dir || bundled));
+        return Ok(MergeRuntimeStatus {
+            ready: version_matches,
+            managed,
+            legacy_fallback: !managed,
+            expected_version,
+            installed_version: manifest.map(|entry| entry.version),
+            platform,
+            runtime_dir: display_path(&candidate),
+            ffmpeg_path: display_path(&ffmpeg_path),
+            ffprobe_path: display_path(&ffprobe_path),
+            asset_name,
+            message: if managed && version_matches {
+                "视频合并环境已就绪，可更新到最新 Release 环境。".to_string()
+            } else if managed {
+                "检测到视频合并环境，但版本清单不匹配，请重装最新环境。".to_string()
+            } else if bundled {
+                "已使用随应用提供的视频合并环境（FFmpeg / FFprobe）。可在此更新到最新 Release。".to_string()
+            } else {
+                "检测到未登记的视频合并环境；建议安装最新 Release 环境以启用版本管理。".to_string()
+            },
+        });
+    }
+
+    for base in roots {
+        let legacy_dir = base.join("env");
+        if let (Some(ffmpeg_path), Some(ffprobe_path)) = (
+            executable_in_env(&legacy_dir, "ffmpeg"),
+            executable_in_env(&legacy_dir, "ffprobe"),
+        ) {
+            return Ok(MergeRuntimeStatus {
+                ready: true,
+                managed: false,
+                legacy_fallback: true,
+                expected_version,
+                installed_version: None,
+                platform,
+                runtime_dir: display_path(&runtime_dir),
+                ffmpeg_path: display_path(&ffmpeg_path),
+                ffprobe_path: display_path(&ffprobe_path),
+                asset_name,
+                message: "正在使用旧版 env 中的 FFmpeg；建议安装独立的视频合并环境。".to_string(),
+            });
+        }
+    }
+
+    Ok(MergeRuntimeStatus {
+        ready: false,
+        managed: false,
+        legacy_fallback: false,
+        expected_version,
+        installed_version: None,
+        platform,
+        runtime_dir: display_path(&runtime_dir),
+        ffmpeg_path: String::new(),
+        ffprobe_path: String::new(),
+        asset_name,
+        message: "尚未安装视频合并环境，请下载安装最新 Release 环境。".to_string(),
     })
 }
 
@@ -475,6 +620,98 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
     })?;
     fs::set_permissions(destination, metadata.permissions())
         .map_err(|error| format!("保留文件权限 {} 失败: {error}", display_path(destination)))?;
+    Ok(())
+}
+
+async fn install_merge_runtime_impl(
+    app: &tauri::AppHandle,
+    state: &RuntimeManagerState,
+    proxy_url: Option<&str>,
+) -> Result<(), String> {
+    let version = merge_expected_version();
+    let platform = runtime_platform().to_string();
+    if platform == "unsupported" {
+        return Err("当前平台没有可用的视频合并环境包。".to_string());
+    }
+    let asset_name = ffmpeg_runtime_asset_name(&version, &platform);
+    let download_root = storage_root(app)?
+        .join("data")
+        .join(".downloads")
+        .join("ffmpeg-runtime");
+    fs::create_dir_all(&download_root)
+        .map_err(|error| format!("创建视频合并环境下载目录失败: {error}"))?;
+    let archive_path = download_root.join(&asset_name);
+    let checksum_path = download_root.join(format!("{asset_name}.sha256"));
+    let client = build_client(proxy_url)?;
+    let asset_url = format!("{RELEASE_DOWNLOAD_ROOT}/{asset_name}");
+    emit_progress(app, 0, 0, 1.0, "正在获取独立 FFmpeg 环境校验文件");
+    download_small_file(&client, &format!("{asset_url}.sha256"), &checksum_path)
+        .await
+        .map_err(|error| {
+            if error.contains("HTTP 404") {
+                format!(
+                    "最新 Release 尚未提供当前平台的独立 FFmpeg 环境：{asset_name}。不会回退下载大型 AI 运行环境。"
+                )
+            } else {
+                error
+            }
+        })?;
+    let expected_hash = parse_checksum(&checksum_path)?;
+    download_archive(
+        app,
+        state,
+        &client,
+        &asset_url,
+        &archive_path,
+        DownloadProgress {
+            start: 5.0,
+            span: 70.0,
+            stage: "正在下载视频合并环境",
+        },
+    )
+    .await?;
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Err("视频合并环境下载已取消，已保留断点文件。".to_string());
+    }
+
+    emit_progress(app, 0, 0, 78.0, "正在校验视频合并环境");
+    let archive_for_hash = archive_path.clone();
+    let actual_hash = tauri::async_runtime::spawn_blocking(move || sha256_file(&archive_for_hash))
+        .await
+        .map_err(|error| format!("视频合并环境校验任务异常: {error}"))??;
+    if actual_hash != expected_hash {
+        let _ = fs::remove_file(&archive_path);
+        return Err("视频合并环境 SHA-256 校验失败，已删除损坏文件。".to_string());
+    }
+
+    emit_progress(app, 0, 0, 84.0, "正在解压视频合并环境");
+    let install_root = storage_root(app)?;
+    let target = install_root.join("merge-env");
+    let archive_for_install = archive_path.clone();
+    let asset_for_manifest = asset_name.clone();
+    let version_for_manifest = version.clone();
+    let hash_for_manifest = expected_hash.clone();
+    let platform_for_manifest = platform.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        install_merge_archive(
+            &archive_for_install,
+            &install_root,
+            &target,
+            RuntimeManifest {
+                version: version_for_manifest,
+                flavor: platform_for_manifest,
+                asset_name: asset_for_manifest,
+                sha256: hash_for_manifest,
+                installed_at_ms: timestamp_millis(),
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("视频合并环境安装任务异常: {error}"))??;
+
+    let _ = fs::remove_file(archive_path);
+    let _ = fs::remove_file(checksum_path);
+    emit_progress(app, 0, 0, 100.0, "视频合并环境已安装");
     Ok(())
 }
 
@@ -749,7 +986,7 @@ async fn download_archive(
             total_bytes,
             progress_value.min(progress.start + progress.span),
             if resumed {
-                "正在续传 AI 运行环境"
+                "正在续传运行环境"
             } else {
                 progress.stage
             },
@@ -905,6 +1142,94 @@ fn install_archive(
     result
 }
 
+fn install_merge_archive(
+    archive_path: &Path,
+    runtime_root: &Path,
+    target: &Path,
+    manifest: RuntimeManifest,
+) -> Result<(), String> {
+    fs::create_dir_all(runtime_root).map_err(|error| format!("创建安装目录失败: {error}"))?;
+    let staging = runtime_root.join(format!(".merge-runtime-install-{}", timestamp_millis()));
+    let staging_env = staging.join("merge-env");
+    fs::create_dir_all(&staging_env)
+        .map_err(|error| format!("创建视频合并环境临时目录失败: {error}"))?;
+
+    let result = (|| {
+        let archive_file =
+            File::open(archive_path).map_err(|error| format!("打开视频合并环境压缩包失败: {error}"))?;
+        let mut archive = zip::ZipArchive::new(archive_file)
+            .map_err(|error| format!("读取视频合并环境压缩包失败: {error}"))?;
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| format!("读取视频合并环境条目失败: {error}"))?;
+            let relative = entry
+                .enclosed_name()
+                .ok_or_else(|| format!("视频合并环境压缩包包含不安全路径: {}", entry.name()))?;
+            let relative_path = relative.as_path();
+            let relative_path = relative_path
+                .strip_prefix("ffmpeg-env")
+                .or_else(|_| relative_path.strip_prefix("merge-env"))
+                .or_else(|_| relative_path.strip_prefix("env"))
+                .unwrap_or(relative_path);
+            let file_name = relative_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            let is_tool = matches!(
+                file_name.to_ascii_lowercase().as_str(),
+                "ffmpeg" | "ffmpeg.exe" | "ffprobe" | "ffprobe.exe"
+            );
+            let is_license = file_name.to_ascii_lowercase().starts_with("ffmpeg-")
+                || file_name.eq_ignore_ascii_case("license")
+                || file_name.eq_ignore_ascii_case("license.txt");
+            if !is_tool && !is_license {
+                continue;
+            }
+            let destination = staging_env.join(file_name);
+            if entry.is_dir() {
+                continue;
+            }
+            let mut output = File::create(&destination)
+                .map_err(|error| format!("创建视频合并环境文件失败: {error}"))?;
+            std::io::copy(&mut entry, &mut output)
+                .map_err(|error| format!("解压视频合并环境文件失败: {error}"))?;
+            drop(output);
+            restore_zip_permissions(&destination, entry.unix_mode())?;
+        }
+
+        if executable_in_env(&staging_env, "ffmpeg").is_none()
+            || executable_in_env(&staging_env, "ffprobe").is_none()
+        {
+            return Err("视频合并环境包校验失败：未找到 FFmpeg/FFprobe。".to_string());
+        }
+        write_runtime_manifest(&staging_env, manifest)?;
+
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("创建视频合并环境目标目录失败: {error}"))?;
+        }
+        let backup = runtime_root.join(format!(".merge-env-old-{}", timestamp_millis()));
+        if target.exists() {
+            fs::rename(target, &backup)
+                .map_err(|error| format!("备份旧视频合并环境失败: {error}"))?;
+        }
+        if let Err(error) = fs::rename(&staging_env, target) {
+            if backup.exists() {
+                let _ = fs::rename(&backup, target);
+            }
+            return Err(format!("启用新视频合并环境失败: {error}"));
+        }
+        if backup.exists() {
+            fs::remove_dir_all(backup)
+                .map_err(|error| format!("清理旧视频合并环境失败: {error}"))?;
+        }
+        Ok(())
+    })();
+
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
 #[cfg(unix)]
 fn restore_zip_permissions(path: &Path, mode: Option<u32>) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -995,6 +1320,10 @@ fn write_runtime_manifest(directory: &Path, manifest: RuntimeManifest) -> Result
 
 fn expected_version() -> String {
     RUNTIME_VERSION.trim().to_string()
+}
+
+fn merge_expected_version() -> String {
+    FFMPEG_RUNTIME_VERSION.trim().to_string()
 }
 
 fn detect_build_flavor() -> String {
@@ -1092,6 +1421,16 @@ fn runtime_asset_name_for_platform(version: &str, platform: &str, flavor: &str) 
     } else {
         format!("Video_Similarity-runtime-v{version}-{platform}.zip")
     }
+}
+
+fn ffmpeg_runtime_asset_name(version: &str, platform: &str) -> String {
+    format!("Video_Similarity-ffmpeg-runtime-v{version}-{platform}.zip")
+}
+
+fn is_bundled_runtime_root(root: &Path) -> bool {
+    root.join("BUILD_FLAVOR.txt").is_file()
+        && root.join("scripts").is_dir()
+        && root.join("video_sim").is_dir()
 }
 
 fn runtime_platform() -> &'static str {
@@ -1283,8 +1622,10 @@ mod tests {
     use super::windows_install_root_for_executable;
     use super::{
         copy_dir_recursive, cuda_13_compatibility_issue_from_output, install_archive,
+        install_merge_archive,
         parse_checksum, parse_parts_manifest, partial_download_path, python_candidates_below,
-        runtime_asset_name, runtime_asset_name_for_platform, RuntimeManifest,
+        ffmpeg_runtime_asset_name, runtime_asset_name, runtime_asset_name_for_platform,
+        RuntimeManifest,
     };
     use std::fs;
     use std::io::Write as _;
@@ -1309,6 +1650,14 @@ mod tests {
         assert_eq!(
             runtime_asset_name_for_platform("1", "linux-x64", "cpu"),
             "Video_Similarity-runtime-v1-linux-x64.zip"
+        );
+    }
+
+    #[test]
+    fn ffmpeg_runtime_asset_name_is_platform_specific() {
+        assert_eq!(
+            ffmpeg_runtime_asset_name("3", "linux-x64"),
+            "Video_Similarity-ffmpeg-runtime-v3-linux-x64.zip"
         );
     }
 
@@ -1442,6 +1791,74 @@ mod tests {
         assert!(!target.join("env").exists());
         assert!(!target.join("old-runtime.txt").exists());
         assert!(root.join(python_path).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn standalone_ffmpeg_archive_installs_only_tools_and_licenses() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-ffmpeg-runtime-install-{}",
+            super::timestamp_millis()
+        ));
+        let archive_path = root.join("ffmpeg-runtime.zip");
+        let target = root.join("merge-env");
+        fs::create_dir_all(&root).unwrap();
+        let ffmpeg_name = if cfg!(target_os = "windows") {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
+        let ffprobe_name = if cfg!(target_os = "windows") {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        };
+
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (path, content) in [
+            (
+                format!("ffmpeg-env/{ffmpeg_name}"),
+                b"ffmpeg".as_slice(),
+            ),
+            (
+                format!("ffmpeg-env/{ffprobe_name}"),
+                b"ffprobe".as_slice(),
+            ),
+            (
+                "ffmpeg-env/FFmpeg-GPL-3.0.txt".to_string(),
+                b"license".as_slice(),
+            ),
+            (
+                "ffmpeg-env/python".to_string(),
+                b"must not install".as_slice(),
+            ),
+        ] {
+            archive.start_file(path, options).unwrap();
+            archive.write_all(content).unwrap();
+        }
+        archive.finish().unwrap();
+
+        install_merge_archive(
+            &archive_path,
+            &root,
+            &target,
+            RuntimeManifest {
+                version: "1".to_string(),
+                flavor: "linux-x64".to_string(),
+                asset_name: "ffmpeg-runtime.zip".to_string(),
+                sha256: "test".to_string(),
+                installed_at_ms: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(target.join(ffmpeg_name)).unwrap(), b"ffmpeg");
+        assert_eq!(fs::read(target.join(ffprobe_name)).unwrap(), b"ffprobe");
+        assert!(target.join("FFmpeg-GPL-3.0.txt").is_file());
+        assert!(!target.join("python").exists());
+        assert!(target.join(".runtime.json").is_file());
         let _ = fs::remove_dir_all(root);
     }
 

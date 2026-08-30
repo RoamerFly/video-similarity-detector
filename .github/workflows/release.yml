@@ -55,11 +55,11 @@ env:
     - Linux Fedora/openSUSE/RHEL：下载 `Video_Similarity-v*-linux-x64-installer.rpm`
     - Linux 免安装版：下载 `Video_Similarity-v*-linux-x64-portable.tar.gz`
 
-    从 v1.1.0 开始，应用安装包不再包含庞大的 Python/FFmpeg 运行环境。首次启动时，程序会自动下载一次与设备匹配的运行环境：CPU 版通常为几百 MB，Windows GPU 版接近 2 GiB。首次进行 AI 分析时，还可能单独下载约 600 MB 的 CLIP 模型。
+    应用本体、AI 运行环境、FFmpeg 环境和 CLIP 模型分别发布。视频合并只下载对应平台的 `Video_Similarity-ffmpeg-runtime-*` 小型压缩包，不会为了 FFmpeg 下载数百 MB 至 2 GiB 的 Python/PyTorch/CUDA 环境。首次进行 AI 分析时，才按需下载 AI 环境和约 600 MB 的 CLIP 模型。
 
     以后如果只是更新界面、编辑器、按钮、样式、Rust 或 Python 业务逻辑，用户通常只需下载几十 MB 的应用更新；已经安装的运行环境和模型会继续复用，只有它们自身升级时才重新下载。v1.0.x 用户若程序旁仍有旧 `env` 目录，可在“设置”中迁移，避免重复下载。
 
-    每个平台和运行模式都只提供一个支持断点续传的运行环境 ZIP，并附带一个 `.sha256` 校验文件，不会出现同一模块拆成多个 part 压缩包的情况。离线模型文件名为 `clip-vit-base-patch32.zip`。
+    每个平台的 AI 运行环境和 FFmpeg 视频合并环境都分别提供一个支持断点续传的 ZIP，并各自附带一个 `.sha256` 校验文件，不会出现同一模块拆成多个 part 压缩包的情况。离线模型文件名为 `clip-vit-base-patch32.zip`。
 
     `*-updater.exe`、`.sig`、运行环境 `.sha256`，以及 `latest.json`、`windows.json`、`darwin.json`、`linux.json` 主要供程序自动安装、更新和校验使用，普通用户无需手动下载。
 jobs:
@@ -118,7 +118,8 @@ jobs:
       - name: Prepare standalone FFmpeg runtime
         run: |
           chmod +x scripts/prepare-ffmpeg-runtime.sh
-          ./scripts/prepare-ffmpeg-runtime.sh linux-x64
+          VIDEO_SIM_RUNTIME_DIR="desktop/merge-env" \
+            ./scripts/prepare-ffmpeg-runtime.sh linux-x64
 
       - name: Set up updater signing key
         shell: bash
@@ -152,10 +153,11 @@ jobs:
 
       - name: Verify bundled Linux runtime
         run: |
-          test -x desktop/dist_linux/env/ffmpeg
-          test -x desktop/dist_linux/env/ffprobe
-          desktop/dist_linux/env/ffmpeg -version
-          desktop/dist_linux/env/ffprobe -version
+          test -x desktop/merge-env/ffmpeg
+          test -x desktop/merge-env/ffprobe
+          test ! -e desktop/dist_linux/merge-env
+          desktop/merge-env/ffmpeg -version
+          desktop/merge-env/ffprobe -version
 
       - name: Package Linux assets
         shell: bash
@@ -181,9 +183,29 @@ jobs:
             sha256sum "${runtime_base}.zip" > "${runtime_base}.zip.sha256"
           )
 
+          merge_runtime_version="$(tr -d '[:space:]' < desktop/ffmpeg-runtime-version.txt)"
+          test -n "$merge_runtime_version"
+          merge_runtime_base="${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-linux-x64"
+          merge_runtime_root="$(mktemp -d)"
+          mkdir -p "$merge_runtime_root/ffmpeg-env"
+          cp desktop/merge-env/ffmpeg desktop/merge-env/ffprobe \
+            desktop/merge-env/FFmpeg-GPL-3.0.txt "$merge_runtime_root/ffmpeg-env/"
+          if [ -f desktop/merge-env/FFmpeg-LICENSE.txt ]; then
+            cp desktop/merge-env/FFmpeg-LICENSE.txt "$merge_runtime_root/ffmpeg-env/"
+          fi
+          (
+            cd "$merge_runtime_root"
+            zip -r -9 "$GITHUB_WORKSPACE/release-assets/${merge_runtime_base}.zip" ffmpeg-env
+          )
+          (
+            cd release-assets
+            sha256sum "${merge_runtime_base}.zip" > "${merge_runtime_base}.zip.sha256"
+          )
+
           light_dist="$(mktemp -d)"
           find "$dist_dir" -mindepth 1 -maxdepth 1 \
             ! -name env \
+            ! -name merge-env \
             ! -name installer \
             ! -name models \
             ! -name data \
@@ -338,7 +360,7 @@ jobs:
         shell: pwsh
         run: |
           .\scripts\prepare-ffmpeg-runtime.ps1 `
-            -DestinationDir "desktop\${{ matrix.env_dir }}"
+            -DestinationDir "desktop\merge-env"
 
       - name: Set up updater signing key
         shell: pwsh
@@ -398,8 +420,11 @@ jobs:
         shell: pwsh
         run: |
           $dist = "desktop\${{ matrix.dist_dir }}"
+          if (Test-Path (Join-Path $dist "merge-env")) {
+            throw "Portable Windows package unexpectedly contains merge-env. FFmpeg is a separate download."
+          }
           foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
-            $path = Join-Path $dist "env\$tool"
+            $path = Join-Path "desktop\merge-env" $tool
             if (!(Test-Path $path) -or (Get-Item $path).Length -lt 5MB) {
               throw "$tool is missing or is not a standalone runtime."
             }
@@ -444,9 +469,38 @@ jobs:
           "$runtimeHash  $runtimeBase.zip" |
             Set-Content -LiteralPath "$runtimeZip.sha256" -Encoding ASCII
 
+          # CPU and GPU jobs share the same platform-independent merge package.
+          # Generate it once to avoid duplicate artifact names when the matrix
+          # outputs are merged by the release job.
+          if ("${{ matrix.flavor }}" -eq "cpu") {
+            $mergeRuntimeVersion = (Get-Content -Raw "desktop\ffmpeg-runtime-version.txt").Trim()
+            if (-not $mergeRuntimeVersion) {
+              throw "desktop/ffmpeg-runtime-version.txt is empty."
+            }
+            $mergeRuntimeBase = "${env:APP_NAME}-ffmpeg-runtime-v${mergeRuntimeVersion}-windows-x64"
+            $mergeRuntimeRoot = Join-Path $env:RUNNER_TEMP $mergeRuntimeBase
+            $ffmpegAssetDir = Join-Path $mergeRuntimeRoot "ffmpeg-env"
+            New-Item -ItemType Directory -Force $ffmpegAssetDir | Out-Null
+            foreach ($file in @("ffmpeg.exe", "ffprobe.exe", "FFmpeg-GPL-3.0.txt")) {
+              Copy-Item (Join-Path "desktop\merge-env" $file) $ffmpegAssetDir -Force
+            }
+            $optionalLicense = Join-Path "desktop\merge-env" "FFmpeg-LICENSE.txt"
+            if (Test-Path $optionalLicense) {
+              Copy-Item $optionalLicense $ffmpegAssetDir -Force
+            }
+            $mergeRuntimeZip = "release-assets\$mergeRuntimeBase.zip"
+            & 7z a -tzip -mx=7 $mergeRuntimeZip (Join-Path $mergeRuntimeRoot "*")
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path $mergeRuntimeZip)) {
+              throw "Standalone Windows merge runtime ZIP was not generated."
+            }
+            $mergeRuntimeHash = (Get-FileHash -LiteralPath $mergeRuntimeZip -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$mergeRuntimeHash  $mergeRuntimeBase.zip" |
+              Set-Content -LiteralPath "$mergeRuntimeZip.sha256" -Encoding ASCII
+          }
+
           $portableRoot = Join-Path $env:RUNNER_TEMP "video-similarity-portable"
           New-Item -ItemType Directory -Force $portableRoot | Out-Null
-          $excludedDirectories = @("env", "installer", "models", "data")
+          $excludedDirectories = @("env", "merge-env", "installer", "models", "data")
           Get-ChildItem -LiteralPath $dist | Where-Object {
             $excludedDirectories -notcontains $_.Name
           } | Copy-Item -Destination $portableRoot -Recurse
@@ -544,7 +598,8 @@ jobs:
       - name: Prepare standalone FFmpeg runtime
         run: |
           chmod +x scripts/prepare-ffmpeg-runtime.sh
-          ./scripts/prepare-ffmpeg-runtime.sh macos-${{ matrix.arch }}
+          VIDEO_SIM_RUNTIME_DIR="desktop/merge-env" \
+            ./scripts/prepare-ffmpeg-runtime.sh macos-${{ matrix.arch }}
 
       - name: Set up updater signing key
         shell: bash
@@ -575,10 +630,11 @@ jobs:
 
       - name: Verify bundled macOS runtime
         run: |
-          test -x desktop/dist_macos/env/ffmpeg
-          test -x desktop/dist_macos/env/ffprobe
-          desktop/dist_macos/env/ffmpeg -version
-          desktop/dist_macos/env/ffprobe -version
+          test -x desktop/merge-env/ffmpeg
+          test -x desktop/merge-env/ffprobe
+          test ! -e desktop/dist_macos/merge-env
+          desktop/merge-env/ffmpeg -version
+          desktop/merge-env/ffprobe -version
 
       - name: Package macOS assets
         shell: bash
@@ -611,9 +667,29 @@ jobs:
             shasum -a 256 "${runtime_base}.zip" > "${runtime_base}.zip.sha256"
           )
 
+          merge_runtime_version="$(tr -d '[:space:]' < desktop/ffmpeg-runtime-version.txt)"
+          test -n "$merge_runtime_version"
+          merge_runtime_base="${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-${{ matrix.arch }}"
+          merge_runtime_root="$(mktemp -d)"
+          mkdir -p "$merge_runtime_root/ffmpeg-env"
+          cp desktop/merge-env/ffmpeg desktop/merge-env/ffprobe \
+            desktop/merge-env/FFmpeg-GPL-3.0.txt "$merge_runtime_root/ffmpeg-env/"
+          if [ -f desktop/merge-env/FFmpeg-LICENSE.txt ]; then
+            cp desktop/merge-env/FFmpeg-LICENSE.txt "$merge_runtime_root/ffmpeg-env/"
+          fi
+          (
+            cd "$merge_runtime_root"
+            zip -r -9 "$GITHUB_WORKSPACE/release-assets/${merge_runtime_base}.zip" ffmpeg-env
+          )
+          (
+            cd release-assets
+            shasum -a 256 "${merge_runtime_base}.zip" > "${merge_runtime_base}.zip.sha256"
+          )
+
           light_dist="$(mktemp -d)"
           find "$dist_dir" -mindepth 1 -maxdepth 1 \
             ! -name env \
+            ! -name merge-env \
             ! -name installer \
             ! -name models \
             ! -name data \
@@ -842,6 +918,8 @@ jobs:
           set -euo pipefail
           runtime_version="$(tr -d '[:space:]' < desktop/runtime-version.txt)"
           test -n "$runtime_version"
+          merge_runtime_version="$(tr -d '[:space:]' < desktop/ffmpeg-runtime-version.txt)"
+          test -n "$merge_runtime_version"
           expected=(
             "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb"
             "${APP_NAME}-${TAG_NAME}-linux-x64-installer.deb.sig"
@@ -873,6 +951,14 @@ jobs:
             "${APP_NAME}-runtime-v${runtime_version}-macos-x64.zip.sha256"
             "${APP_NAME}-runtime-v${runtime_version}-linux-x64.zip"
             "${APP_NAME}-runtime-v${runtime_version}-linux-x64.zip.sha256"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-windows-x64.zip"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-windows-x64.zip.sha256"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-arm64.zip"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-arm64.zip.sha256"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-x64.zip"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-x64.zip.sha256"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-linux-x64.zip"
+            "${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-linux-x64.zip.sha256"
           )
           test -f "model-assets/clip-vit-base-patch32.zip" || {
             echo "Missing model asset: clip-vit-base-patch32.zip" >&2
@@ -908,6 +994,43 @@ jobs:
           } > release_body.md
           printf '%s\n' "$RELEASE_NOTES" > release_notes.md
           cat release_body.md
+      - name: Verify standalone FFmpeg asset contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(release-assets/*-ffmpeg-runtime-*.zip)
+          test "${#archives[@]}" -eq 4 || {
+            echo "Expected four standalone FFmpeg runtime ZIPs, found ${#archives[@]}" >&2
+            exit 1
+          }
+          for archive in "${archives[@]}"; do
+            archive_name="$(basename "$archive")"
+            checksum="${archive}.sha256"
+            test -s "$checksum" || { echo "Missing checksum: $checksum" >&2; exit 1; }
+            (
+              cd release-assets
+              sha256sum -c "${archive_name}.sha256"
+            )
+            while IFS= read -r entry; do
+              case "$entry" in
+                ffmpeg-env/|ffmpeg-env/ffmpeg|ffmpeg-env/ffprobe|ffmpeg-env/ffmpeg.exe|ffmpeg-env/ffprobe.exe|ffmpeg-env/FFmpeg-LICENSE.txt|ffmpeg-env/FFmpeg-GPL-3.0.txt) ;;
+                *)
+                  echo "Unexpected entry in standalone FFmpeg asset $archive_name: $entry" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(unzip -Z1 "$archive")
+            entries="$(unzip -Z1 "$archive")"
+            if [[ "$entries" != *"ffmpeg-env/ffmpeg"* && "$entries" != *"ffmpeg-env/ffmpeg.exe"* ]]; then
+              echo "FFmpeg executable missing from $archive_name" >&2
+              exit 1
+            fi
+            if [[ "$entries" != *"ffmpeg-env/ffprobe"* && "$entries" != *"ffmpeg-env/ffprobe.exe"* ]]; then
+              echo "FFprobe executable missing from $archive_name" >&2
+              exit 1
+            fi
+          done
       - name: Generate updater metadata
         shell: bash
         env:

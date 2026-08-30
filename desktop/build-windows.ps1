@@ -593,8 +593,6 @@ function Assert-PortablePackage([string]$DistDir, [bool]$RequireCuda = $false) {
     $required = @(
         "video-similarity-desktop.exe",
         "env\python\python.exe",
-        "env\ffmpeg.exe",
-        "env\ffprobe.exe",
         "data",
         "data\reports",
         "models",
@@ -612,16 +610,8 @@ function Assert-PortablePackage([string]$DistDir, [bool]$RequireCuda = $false) {
         }
     }
 
-    foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
-        $toolPath = Join-Path $DistDir "env\$tool"
-        if ((Get-Item -LiteralPath $toolPath).Length -lt 5MB) {
-            throw "$tool is too small to be the bundled standalone runtime."
-        }
-        $versionOutput = & $toolPath -version 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "$tool failed its portable package version check."
-        }
-        Write-Host ($versionOutput | Select-Object -First 1)
+    if (Test-Path -LiteralPath (Join-Path $DistDir "merge-env")) {
+        throw "Portable package unexpectedly contains merge-env. FFmpeg is a separate download."
     }
 
     $distPython = Join-Path $DistDir "env\python\python.exe"
@@ -814,6 +804,7 @@ if (-not $EnvName.Trim()) {
 
 $distDir = Join-Path $desktopDir $DistName
 $envDir = Join-Path $desktopDir $EnvName
+$mergeEnvDir = Join-Path $desktopDir "merge-env"
 $legacyRuntimeDir = Join-Path $desktopDir "runtime"
 $legacyPythonEnvDir = Join-Path $legacyRuntimeDir "python"
 $pythonEnvDir = Join-Path $envDir "python"
@@ -822,6 +813,7 @@ $portablePythonExe = Join-Path $pythonEnvDir "python.exe"
 $releaseDir = Join-Path $desktopDir "src-tauri\target\release"
 $bundleDir = Join-Path $releaseDir "bundle"
 $appExe = Join-Path $releaseDir "video-similarity-desktop.exe"
+$mergeRuntimeVersionFile = Join-Path $desktopDir "ffmpeg-runtime-version.txt"
 $requirements = Join-Path $repoRoot "requirements.txt"
 $defaultRuntimeRequirements = Join-Path $desktopDir "requirements-runtime.txt"
 $runtimeRequirements = if ($RuntimeRequirements.Trim()) {
@@ -830,6 +822,9 @@ $runtimeRequirements = if ($RuntimeRequirements.Trim()) {
     $defaultRuntimeRequirements
 } else {
     $requirements
+}
+if (-not (Test-Path -LiteralPath $mergeRuntimeVersionFile) -or [string]::IsNullOrWhiteSpace((Get-Content -Raw -LiteralPath $mergeRuntimeVersionFile))) {
+    throw "Missing merge runtime version file: $mergeRuntimeVersionFile"
 }
 
 Write-Host ""
@@ -840,19 +835,20 @@ Write-Host "Project root : $repoRoot"
 Write-Host "Desktop dir  : $desktopDir"
 Write-Host "Output dir   : $distDir"
 Write-Host "Env dir      : $envDir"
+Write-Host "Merge env    : $mergeEnvDir"
 Write-Host "Runtime reqs : $runtimeRequirements"
 Write-Host "Build flavor : $(if ($GpuBuild) { "GPU / CUDA" } else { "CPU" })"
 Write-Host "Torch index  : $TorchIndexUrl"
 
 Set-Location $desktopDir
 
-if (-not (Test-Path (Join-Path $envDir "ffmpeg.exe")) -or -not (Test-Path (Join-Path $envDir "ffprobe.exe"))) {
+if (-not (Test-Path (Join-Path $mergeEnvDir "ffmpeg.exe")) -or -not (Test-Path (Join-Path $mergeEnvDir "ffprobe.exe"))) {
     Write-Step "[0/9] Downloading standalone FFmpeg runtime..."
     $prepareFfmpeg = Join-Path $repoRoot "scripts\prepare-ffmpeg-runtime.ps1"
     if (-not (Test-Path $prepareFfmpeg)) {
         throw "FFmpeg preparation script was not found: $prepareFfmpeg"
     }
-    & $prepareFfmpeg -DestinationDir $envDir
+    & $prepareFfmpeg -DestinationDir $mergeEnvDir
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to prepare the standalone FFmpeg runtime."
     }
@@ -1073,9 +1069,16 @@ Remove-PortableSourceWaste $distDir
 Copy-Item -LiteralPath $requirements -Destination (Join-Path $distDir "requirements.txt") -Force
 Copy-Item -LiteralPath $runtimeRequirements -Destination (Join-Path $distDir "requirements-runtime.txt") -Force
 Copy-Item -LiteralPath (Join-Path $desktopDir "runtime-version.txt") -Destination (Join-Path $distDir "runtime-version.txt") -Force
+Copy-Item -LiteralPath (Join-Path $desktopDir "ffmpeg-runtime-version.txt") -Destination (Join-Path $distDir "ffmpeg-runtime-version.txt") -Force
 Set-Content -LiteralPath (Join-Path $distDir "BUILD_FLAVOR.txt") -Value $(if ($GpuBuild) { "gpu" } else { "cpu" }) -Encoding ASCII
 
 Copy-Directory $envDir (Join-Path $distDir "env")
+foreach ($legacyFfmpeg in @("ffmpeg.exe", "ffprobe.exe", "FFmpeg-LICENSE.txt", "FFmpeg-GPL-3.0.txt")) {
+    $legacyPath = Join-Path $distDir "env\$legacyFfmpeg"
+    if (Test-Path $legacyPath) {
+        Remove-Item -LiteralPath $legacyPath -Force
+    }
+}
 
 New-Item -ItemType Directory -Path (Join-Path $distDir "data\reports") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $distDir "data\cache") -Force | Out-Null
@@ -1100,11 +1103,11 @@ Video Similarity - Windows portable package
 Output structure:
 - video-similarity-desktop.exe: executable app.
 - scripts\ and video_sim\: analysis engine copied next to the executable.
-- runtime-version.txt and BUILD_FLAVOR.txt: runtime compatibility markers.
+- runtime-version.txt, ffmpeg-runtime-version.txt and BUILD_FLAVOR.txt: runtime compatibility markers.
 
 Run:
 1. Double-click run-video-similarity.bat or video-similarity-desktop.exe.
-2. On first launch, install the runtime into env\ beside the executable when prompted.
+2. On first launch, install the AI and video merge runtimes into the writable app data directory when prompted.
 3. Future app updates reuse that runtime instead of downloading it again.
 
 Acceptance:
