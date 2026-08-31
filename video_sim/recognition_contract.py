@@ -32,6 +32,7 @@ PAIR_PARAMETER_KEYS = (
     "min_segment_matches",
     "offset_tolerance",
     "early_stop",
+    "segment_refinement_config",
 )
 
 

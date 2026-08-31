@@ -759,7 +759,7 @@ def build_resume_signature(videos: list[Path], args, preprocess_config, resolved
     # identity.  They are deliberately omitted from the global checkpoint
     # namespace so changing one source/cache does not invalidate unrelated
     # completed pairs.  The pair key below binds the audited cache identity.
-    return {
+    signature = {
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "containment_scoring_version": CONTAINMENT_SCORING_VERSION,
         "feature_extractor_id": FEATURE_EXTRACTOR_ID,
@@ -774,6 +774,10 @@ def build_resume_signature(videos: list[Path], args, preprocess_config, resolved
         "offset_tolerance": args.offset_tolerance,
         "early_stop": not bool(args.disable_early_stop),
     }
+    refinement_config = getattr(args, "_segment_refinement_config", None)
+    if refinement_config is not None and getattr(refinement_config, "mode", "off") != "off":
+        signature["segment_refinement_config"] = refinement_config.to_dict()
+    return signature
 
 
 def pair_key(video_a: Path, video_b: Path) -> str:
@@ -1462,6 +1466,77 @@ def add_preprocess_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def segment_refinement_config_from_args(args):
+    """Build the optional local verifier config without importing media libs."""
+
+    from video_sim.segment_refiner import RefinementConfig
+
+    return RefinementConfig(
+        mode=args.segment_refinement_mode,
+        sample_step_sec=args.segment_refinement_sample_step_sec,
+        padding_sec=args.segment_refinement_padding_sec,
+        search_radius_sec=args.segment_refinement_search_radius_sec,
+        max_segments=args.segment_refinement_max_segments,
+        max_frames=args.segment_refinement_max_frames,
+        max_wall_sec=args.segment_refinement_max_wall_sec,
+        max_frame_pixels=args.segment_refinement_max_frame_pixels,
+        pixel_threshold=args.segment_refinement_pixel_threshold,
+        min_support=args.segment_refinement_min_support,
+        min_temporal_change=args.segment_refinement_min_temporal_change,
+    )
+
+
+def refine_pair_segments_with_fallback(
+    video_a,
+    video_b,
+    segments,
+    *,
+    config,
+    preprocess_config=None,
+    cancel_check=None,
+):
+    """Run optional local refinement and convert ordinary runtime errors.
+
+    Local decode evidence is additive to the coarse matcher result. Keeping
+    this small seam outside ``main`` makes that guarantee explicit and lets
+    the CLI's error policy be tested without constructing an embedder or a
+    full pair scheduler. Cancellation remains authoritative and propagates
+    to the task pause path.
+
+    Returns ``(payload, error)``. ``error`` is ``None`` on success; an
+    ordinary refinement error is represented by a structured payload plus the
+    original exception for logging and metrics by the caller.
+    """
+
+    from video_sim.segment_refiner import refinement_failure_payload, refine_segments
+
+    if getattr(config, "mode", "off") == "off":
+        return None, None
+    try:
+        return (
+            refine_segments(
+                video_a,
+                video_b,
+                segments,
+                config=config,
+                preprocess_config=preprocess_config,
+                cancel_check=cancel_check,
+            ),
+            None,
+        )
+    except AnalysisCancelled:
+        raise
+    except Exception as refinement_error:
+        return (
+            refinement_failure_payload(
+                segments,
+                config=config,
+                reason=f"{type(refinement_error).__name__}:{compact_error(refinement_error)}",
+            ),
+            refinement_error,
+        )
+
+
 def ensure_video_indexed(
     video_path: Path,
     cache_dir: Path,
@@ -1754,6 +1829,73 @@ def main():
         help="Maximum offset difference to consider matches as same segment (default: 3)",
     )
     parser.add_argument(
+        "--segment-refinement-mode",
+        type=str,
+        default="off",
+        choices=["off", "copy", "copy-mirror"],
+        help="Optional decode-only local segment evidence (default: off)",
+    )
+    parser.add_argument(
+        "--segment-refinement-sample-step-sec",
+        type=float,
+        default=0.25,
+        help="Local refinement sample step in seconds (default: 0.25)",
+    )
+    parser.add_argument(
+        "--segment-refinement-padding-sec",
+        type=float,
+        default=1.0,
+        help="Local refinement padding around a coarse segment (default: 1.0)",
+    )
+    parser.add_argument(
+        "--segment-refinement-search-radius-sec",
+        type=float,
+        default=0.5,
+        help="Local target search radius in seconds (default: 0.5)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-segments",
+        type=int,
+        default=4,
+        help="Maximum coarse segments refined per pair (default: 4)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-frames",
+        type=int,
+        default=256,
+        help="Pair-wide raw frame read-attempt budget (default: 256)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-wall-sec",
+        type=float,
+        default=5.0,
+        help="Soft wall-clock budget per pair refinement (default: 5)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-frame-pixels",
+        type=int,
+        default=8_294_400,
+        help="Maximum pixels in one raw decoded refinement frame (default: 8294400)",
+    )
+    parser.add_argument(
+        "--segment-refinement-pixel-threshold",
+        type=float,
+        default=0.92,
+        help="Minimum local pixel/structure score (default: 0.92)",
+    )
+    parser.add_argument(
+        "--segment-refinement-min-support",
+        type=int,
+        default=3,
+        help="Minimum continuous supporting frames (default: 3)",
+    )
+    parser.add_argument(
+        "--segment-refinement-min-temporal-change",
+        type=float,
+        default=0.02,
+        help="Minimum per-side temporal descriptor change (default: 0.02)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -1850,6 +1992,13 @@ def main():
 
     # Create preprocess config
     preprocess_config = PreprocessConfig.from_args(args)
+    try:
+        segment_refinement_config = segment_refinement_config_from_args(args)
+    except (TypeError, ValueError) as exc:
+        parser.error(f"invalid segment refinement configuration: {exc}")
+    # Keep this private runtime object off argparse/task JSON serialization;
+    # build_resume_signature only adds its complete versioned dict when on.
+    args._segment_refinement_config = segment_refinement_config
     metrics = RecognitionMetrics()
     cancel_file = Path(args.cancel_file) if args.cancel_file else None
 
@@ -2731,6 +2880,43 @@ def main():
 
     def materialize_pair_result(item: PairWorkItem, payload) -> dict:
         result, segments, windows_a_to_b, windows_b_to_a = payload
+        segment_refinement = None
+        if segment_refinement_config.mode != "off":
+            with metrics.stage(
+                "segment_refinement",
+                items=min(
+                    len(segments),
+                    segment_refinement_config.max_segments,
+                ),
+            ):
+                segment_refinement, refinement_error = refine_pair_segments_with_fallback(
+                    item.video_a,
+                    item.video_b,
+                    segments,
+                    config=segment_refinement_config,
+                    preprocess_config=preprocess_config,
+                    cancel_check=lambda: raise_if_cancelled(cancel_file),
+                )
+            if refinement_error is None:
+                metrics.count("segment_refinement_pairs")
+                if segment_refinement is not None:
+                    metrics.count(
+                        "segment_refinement_verified_segments",
+                        sum(
+                            1
+                            for segment in segment_refinement.get("segments", [])
+                            if segment.get("status") == "verified"
+                        ),
+                    )
+            else:
+                # Local evidence is additive. A decoder or optional dependency
+                # problem must preserve the coarse matcher result and pair
+                # checkpoint, while cancellation remains authoritative above.
+                log(
+                    "警告(Warning): 局部片段验证失败，将保留粗片段: "
+                    f"{compact_error(refinement_error)}"
+                )
+                metrics.count("segment_refinement_errors")
         before = len(report_data.video_pairs)
         report_data.add_pair_result(
             result=result,
@@ -2743,6 +2929,8 @@ def main():
         pair_data = report_data.video_pairs.pop()
         pair_data["preprocess_config"] = preprocess_config.to_dict()
         pair_data["match_threshold"] = args.match_threshold
+        if segment_refinement is not None:
+            pair_data["segment_refinement"] = segment_refinement
         result_by_ordinal[item.report_ordinal] = pair_data
         checkpoint_pair(item, pair_data)
         return pair_data

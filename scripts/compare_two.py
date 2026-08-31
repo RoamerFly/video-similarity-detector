@@ -35,6 +35,61 @@ from video_sim.recognition_contract import (
     REPORT_SCHEMA_VERSION,
 )
 from video_sim.segmenter import aggregate_bidirectional_segments
+from video_sim.segment_refiner import (
+    RefinementConfig,
+    refinement_failure_payload,
+    refine_segments,
+)
+
+
+def _segment_refinement_config_from_args(args) -> RefinementConfig:
+    return RefinementConfig(
+        mode=args.segment_refinement_mode,
+        sample_step_sec=args.segment_refinement_sample_step_sec,
+        padding_sec=args.segment_refinement_padding_sec,
+        search_radius_sec=args.segment_refinement_search_radius_sec,
+        max_segments=args.segment_refinement_max_segments,
+        max_frames=args.segment_refinement_max_frames,
+        max_wall_sec=args.segment_refinement_max_wall_sec,
+        max_frame_pixels=args.segment_refinement_max_frame_pixels,
+        pixel_threshold=args.segment_refinement_pixel_threshold,
+        min_support=args.segment_refinement_min_support,
+        min_temporal_change=args.segment_refinement_min_temporal_change,
+    )
+
+
+def refine_pair_segments_with_fallback(
+    video_a,
+    video_b,
+    segments,
+    *,
+    config,
+    preprocess_config=None,
+):
+    """Run optional local refinement while preserving coarse report data."""
+
+    if config.mode == "off":
+        return None, None
+    try:
+        return (
+            refine_segments(
+                video_a,
+                video_b,
+                segments,
+                config=config,
+                preprocess_config=preprocess_config,
+            ),
+            None,
+        )
+    except Exception as refinement_error:
+        return (
+            refinement_failure_payload(
+                segments,
+                config=config,
+                reason=f"{type(refinement_error).__name__}:{refinement_error}",
+            ),
+            refinement_error,
+        )
 
 
 def ensure_video_indexed(
@@ -183,6 +238,73 @@ def main():
         help="Maximum temporal offset drift for verified matches (default: 3.0s)",
     )
     parser.add_argument(
+        "--segment-refinement-mode",
+        type=str,
+        default="off",
+        choices=["off", "copy", "copy-mirror"],
+        help="Optional decode-only local segment evidence (default: off)",
+    )
+    parser.add_argument(
+        "--segment-refinement-sample-step-sec",
+        type=float,
+        default=0.25,
+        help="Local refinement sample step in seconds (default: 0.25)",
+    )
+    parser.add_argument(
+        "--segment-refinement-padding-sec",
+        type=float,
+        default=1.0,
+        help="Local refinement padding around a coarse segment (default: 1.0)",
+    )
+    parser.add_argument(
+        "--segment-refinement-search-radius-sec",
+        type=float,
+        default=0.5,
+        help="Local target search radius in seconds (default: 0.5)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-segments",
+        type=int,
+        default=4,
+        help="Maximum coarse segments refined per pair (default: 4)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-frames",
+        type=int,
+        default=256,
+        help="Pair-wide raw frame read-attempt budget (default: 256)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-wall-sec",
+        type=float,
+        default=5.0,
+        help="Soft wall-clock budget per pair refinement (default: 5)",
+    )
+    parser.add_argument(
+        "--segment-refinement-max-frame-pixels",
+        type=int,
+        default=8_294_400,
+        help="Maximum pixels in one raw decoded refinement frame (default: 8294400)",
+    )
+    parser.add_argument(
+        "--segment-refinement-pixel-threshold",
+        type=float,
+        default=0.92,
+        help="Minimum local pixel/structure score (default: 0.92)",
+    )
+    parser.add_argument(
+        "--segment-refinement-min-support",
+        type=int,
+        default=3,
+        help="Minimum continuous supporting frames (default: 3)",
+    )
+    parser.add_argument(
+        "--segment-refinement-min-temporal-change",
+        type=float,
+        default=0.02,
+        help="Minimum per-side temporal descriptor change (default: 0.02)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -206,6 +328,10 @@ def main():
 
     # Create preprocess config
     preprocess_config = PreprocessConfig.from_args(args)
+    try:
+        segment_refinement_config = _segment_refinement_config_from_args(args)
+    except (TypeError, ValueError) as exc:
+        parser.error(f"invalid segment refinement configuration: {exc}")
 
     video_a_path = Path(args.video_a)
     video_b_path = Path(args.video_b)
@@ -282,6 +408,25 @@ def main():
         total_source_duration_a=result.duration_a,
         total_source_duration_b=result.duration_b,
     )
+    segment_refinement = None
+    if segment_refinement_config.mode != "off":
+        segment_refinement, refinement_error = refine_pair_segments_with_fallback(
+            video_a_path,
+            video_b_path,
+            segments,
+            config=segment_refinement_config,
+            preprocess_config=preprocess_config,
+        )
+        if refinement_error is not None:
+            print(
+                "Warning: local segment refinement failed; preserving coarse segments: "
+                f"{type(refinement_error).__name__}: {refinement_error}"
+            )
+        if segment_refinement is not None:
+            segment_refinement = {
+                **segment_refinement,
+                "preprocess_config": preprocess_config.to_dict(),
+            }
 
     # Print summary to console
     print("\n" + "=" * 60)
@@ -323,6 +468,8 @@ def main():
             }
         )
         report["segments"] = [segment.to_dict() for segment in segments]
+        if segment_refinement is not None:
+            report["segment_refinement"] = segment_refinement
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         print(f"\nSaved report to: {output_path}")
