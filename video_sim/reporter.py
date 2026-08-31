@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from video_sim.config import Config
+from video_sim.recognition_contract import (
+    CONTAINMENT_SCORING_VERSION,
+    FEATURE_EXTRACTOR_ID,
+    REPORT_SCHEMA_VERSION,
+)
 
 if TYPE_CHECKING:
     from video_sim.matcher import ContainmentResult, SearchResult
@@ -31,6 +36,9 @@ class BatchReportData:
     candidate_pairs: int = 0
     skipped_by_candidate_screening: int = 0
     metrics: Optional[Dict[str, Any]] = None
+    report_schema_version: int = REPORT_SCHEMA_VERSION
+    containment_scoring_version: int = CONTAINMENT_SCORING_VERSION
+    feature_extractor_id: str = FEATURE_EXTRACTOR_ID
 
     def add_pair_result(
         self,
@@ -50,6 +58,9 @@ class BatchReportData:
                 directional_windows.append({**item, "direction": direction})
 
         pair_data = {
+            "report_schema_version": int(self.report_schema_version),
+            "containment_scoring_version": int(self.containment_scoring_version),
+            "feature_extractor_id": self.feature_extractor_id,
             "completed_at": datetime.now().isoformat(timespec="seconds"),
             "video_a": Path(result.video_a).name,
             "video_b": Path(result.video_b).name,
@@ -79,6 +90,33 @@ class BatchReportData:
             "matches_a_to_b": _serialize_frame_matches(result.matches_a_to_b),
             "matches_b_to_a": _serialize_frame_matches(result.matches_b_to_a),
         }
+        # Raw matches remain available for diagnostics, while the verified
+        # collections are the authoritative evidence used by the temporal
+        # scorer.  Keep these as lists in the report: converting a list to an
+        # integer used to fail at runtime and would also lose the evidence
+        # needed by the desktop report reader.
+        for field_name in (
+            "verified_matches_a_to_b",
+            "verified_matches_b_to_a",
+        ):
+            if hasattr(result, field_name):
+                verified_matches = getattr(result, field_name)
+                if verified_matches is None:
+                    verified_matches = []
+                if not isinstance(verified_matches, (list, tuple)):
+                    raise TypeError(f"{field_name} must be a list of FrameMatch values")
+                pair_data[field_name] = _serialize_frame_matches(list(verified_matches))
+                pair_data[f"{field_name}_total"] = len(verified_matches)
+        if hasattr(result, "alignment_computed"):
+            pair_data["alignment_computed"] = bool(
+                getattr(result, "alignment_computed")
+            )
+        if hasattr(result, "temporal_evidence"):
+            evidence = getattr(result, "temporal_evidence")
+            if evidence is not None:
+                if not isinstance(evidence, dict):
+                    raise TypeError("temporal_evidence must be a dictionary")
+                pair_data["temporal_evidence"] = dict(evidence)
         self.video_pairs.append(pair_data)
 
     def add_warning(self, message: str):
@@ -88,6 +126,9 @@ class BatchReportData:
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         return {
+            "report_schema_version": int(self.report_schema_version),
+            "containment_scoring_version": int(self.containment_scoring_version),
+            "feature_extractor_id": self.feature_extractor_id,
             "timestamp": self.timestamp,
             "num_pairs": len(self.video_pairs),
             "total_possible_pairs": self.total_possible_pairs,
@@ -134,6 +175,9 @@ def write_csv_report(data: BatchReportData, output_path: Union[str, Path]) -> Pa
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
+        "report_schema_version",
+        "containment_scoring_version",
+        "feature_extractor_id",
         "completed_at",
         "video_a",
         "video_b",
@@ -150,6 +194,8 @@ def write_csv_report(data: BatchReportData, output_path: Union[str, Path]) -> Pa
         "raw_similarity_max",
         "raw_similarity_p95",
         "matched_segment_count",
+        "verified_matches_a_to_b_total",
+        "verified_matches_b_to_a_total",
     ]
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:

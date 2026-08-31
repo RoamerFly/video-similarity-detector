@@ -9,6 +9,7 @@ Uses artificial FrameMatch lists to verify:
 
 import numpy as np
 import pytest
+from typing import Optional
 
 from video_sim.matcher import FrameMatch
 from video_sim.segmenter import (
@@ -24,10 +25,19 @@ def create_match(
     source_timestamp: float,
     target_timestamp: float,
     similarity: float = 0.9,
-    source_frame_index: int = 0,
-    target_frame_index: int = 0,
+    source_frame_index: Optional[int] = None,
+    target_frame_index: Optional[int] = None,
 ) -> FrameMatch:
-    """Create a FrameMatch with specified timestamps and similarity."""
+    """Create a match, deriving distinct ids from timestamps by default.
+
+    Explicit zero remains valid for tests that model repeated frame evidence;
+    the old default of zero for every timestamp accidentally made ordinary
+    time-series fixtures look like one retained frame.
+    """
+    if source_frame_index is None:
+        source_frame_index = int(round(float(source_timestamp) * 1000.0))
+    if target_frame_index is None:
+        target_frame_index = int(round(float(target_timestamp) * 1000.0))
     return FrameMatch(
         source_video="source.mp4",
         target_video="target.mp4",

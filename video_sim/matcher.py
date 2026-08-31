@@ -7,7 +7,6 @@ Supports both video-level search and frame-level bidirectional containment detec
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from statistics import median
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import faiss
@@ -17,16 +16,17 @@ from video_sim.config import Config
 from video_sim.embedder import FrameEmbeddingCache, VideoEmbedder, get_embedder
 from video_sim.frame_sampler import sample_frames
 from video_sim.indexer import FrameIndexResult, build_frame_index
+from video_sim.recognition_contract import (
+    CONTAINMENT_SCORING_VERSION,
+    REPORT_SCHEMA_VERSION,
+)
+from video_sim.temporal_alignment import (
+    align_matches,
+)
 
 # Type alias for search results
 SearchResult = Tuple[str, float]
 TEMPORAL_OFFSET_TOLERANCE_SEC = 3.0
-TEMPORAL_DEFAULT_GAP_SEC = 10.0
-TEMPORAL_GAP_MULTIPLIER = 3.0
-TEMPORAL_TARGET_JITTER_SEC = 1.0
-TEMPORAL_MIN_SLOPE = 0.65
-TEMPORAL_MAX_SLOPE = 1.5
-TEMPORAL_RESIDUAL_TOLERANCE_SEC = 2.0
 
 
 @dataclass
@@ -116,10 +116,19 @@ class ContainmentResult:
     raw_similarity_mean: float = 0.0
     raw_similarity_p95: float = 0.0
     raw_similarity_p99: float = 0.0
+    # Raw matches remain available for legacy display and diagnostics.  These
+    # lists contain only matches accepted by the bounded temporal alignment
+    # used for coverage and segment/window consumers.
+    verified_matches_a_to_b: List[FrameMatch] = field(default_factory=list)
+    verified_matches_b_to_a: List[FrameMatch] = field(default_factory=list)
+    alignment_computed: bool = False
+    temporal_evidence: Dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         return {
+            "report_schema_version": REPORT_SCHEMA_VERSION,
+            "containment_scoring_version": CONTAINMENT_SCORING_VERSION,
             "video_a": self.video_a,
             "video_b": self.video_b,
             "total_frames_a": self.total_frames_a,
@@ -138,6 +147,10 @@ class ContainmentResult:
             "raw_similarity_mean": self.raw_similarity_mean,
             "raw_similarity_p95": self.raw_similarity_p95,
             "raw_similarity_p99": self.raw_similarity_p99,
+            "verified_matches_a_to_b": [m.to_dict() for m in self.verified_matches_a_to_b],
+            "verified_matches_b_to_a": [m.to_dict() for m in self.verified_matches_b_to_a],
+            "alignment_computed": bool(self.alignment_computed),
+            "temporal_evidence": dict(self.temporal_evidence),
         }
 
 
@@ -311,17 +324,33 @@ def _determine_relation(
     duration_ratio = 1.35
     frame_ratio = 1.35
 
-    a_longer_by_duration = duration_a > 0 and duration_b > 0 and duration_a >= duration_b * duration_ratio
-    b_longer_by_duration = duration_a > 0 and duration_b > 0 and duration_b >= duration_a * duration_ratio
-    a_longer_by_frames = total_frames_a > 0 and total_frames_b > 0 and total_frames_a >= total_frames_b * frame_ratio
-    b_longer_by_frames = total_frames_a > 0 and total_frames_b > 0 and total_frames_b >= total_frames_a * frame_ratio
+    durations_reliable = duration_a > 0 and duration_b > 0
+    if durations_reliable:
+        # A cache may retain a different number of frames because of sampling,
+        # so frame counts must not override reliable media durations.
+        a_longer = duration_a >= duration_b * duration_ratio
+        b_longer = duration_b >= duration_a * duration_ratio
+    else:
+        # Legacy caches without duration metadata retain the old frame-count
+        # fallback.  The fallback is deliberately unavailable once both
+        # durations are known.
+        a_longer = (
+            total_frames_a > 0
+            and total_frames_b > 0
+            and total_frames_a >= total_frames_b * frame_ratio
+        )
+        b_longer = (
+            total_frames_a > 0
+            and total_frames_b > 0
+            and total_frames_b >= total_frames_a * frame_ratio
+        )
 
     # If the original media lengths are clearly different, prefer a containment
     # label over "near duplicate" even when sparse dynamic sampling makes both
     # directional ratios look high.
-    if (a_longer_by_duration or a_longer_by_frames) and b_in_a >= clip_threshold:
+    if a_longer and b_in_a >= clip_threshold:
         return "B_is_likely_clip_of_A"
-    if (b_longer_by_duration or b_longer_by_frames) and a_in_b >= clip_threshold:
+    if b_longer and a_in_b >= clip_threshold:
         return "A_is_likely_clip_of_B"
 
     directional_clip_threshold = 0.85
@@ -357,219 +386,20 @@ def _temporal_consistent_coverage(
     if total_source_frames <= 0 or not matches:
         return 0.0
 
-    sorted_matches = sorted(
+    # Keep one alignment implementation for the matcher and segmenter.  The
+    # old single-cluster pass let a second valid offset interrupt the first and
+    # silently returned zero coverage for both.  align_matches keeps bounded
+    # active tracks and counts source time cells only after track validation.
+    alignment = align_matches(
         matches,
-        key=lambda match: (match.source_timestamp, match.target_timestamp),
+        total_source_frames=total_source_frames,
+        source_timestamps=source_timestamps,
+        total_source_duration=total_source_duration,
+        target_timestamps=target_timestamps,
+        total_target_duration=total_target_duration,
+        offset_tolerance_sec=offset_tolerance_sec,
     )
-    if not sorted_matches:
-        return 0.0
-
-    min_cluster_matches = min(3, len(sorted_matches), total_source_frames)
-    covered_source_frames = set()
-    current_cluster: List[FrameMatch] = []
-    current_offset_sum = 0.0
-    current_offset_count = 0
-    first_source = None
-    first_target = None
-    regression = _OnlineAffineTrend()
-    previous_source = None
-    previous_target = None
-
-    max_source_gap = _temporal_gap_limit(source_timestamps, sorted_matches, "source")
-    max_target_gap = _temporal_gap_limit(target_timestamps, sorted_matches, "target")
-
-    def commit_cluster(cluster: List[FrameMatch]) -> None:
-        if len(cluster) < min_cluster_matches:
-            return
-        source_times = [match.source_timestamp for match in cluster]
-        target_times = [match.target_timestamp for match in cluster]
-        source_span = max(source_times) - min(source_times)
-        target_span = max(target_times) - min(target_times)
-        # Very short clusters are allowed only when the source itself has very
-        # few retained frames. Otherwise require a little temporal extent.
-        if total_source_frames > 3 and max(source_span, target_span) < 1.0:
-            return
-
-        # All valid, temporally ordered clusters contribute.  Keeping only the
-        # single best offset cluster under-counted videos that reuse the same
-        # source in multiple disjoint portions.
-        covered_source_frames.update(match.source_frame_index for match in cluster)
-
-    for match in sorted_matches:
-        offset = match.target_timestamp - match.source_timestamp
-        if not current_cluster:
-            current_cluster = [match]
-            current_offset_sum = offset
-            current_offset_count = 1
-            first_source = match.source_timestamp
-            first_target = match.target_timestamp
-            regression = _OnlineAffineTrend()
-            regression.add(match.source_timestamp, match.target_timestamp)
-            previous_source = match.source_timestamp
-            previous_target = match.target_timestamp
-            continue
-
-        source_delta = match.source_timestamp - float(previous_source)
-        target_delta = match.target_timestamp - float(previous_target)
-        current_offset = current_offset_sum / max(1, current_offset_count)
-        contiguous = (
-            (current_offset_count < 2 or abs(offset - current_offset) <= offset_tolerance_sec)
-            and 0.0 <= source_delta <= max_source_gap
-            and -TEMPORAL_TARGET_JITTER_SEC <= target_delta <= max_target_gap
-        )
-        # Dynamic sampling may map several source samples to the same target
-        # sample (static shots, or a shorter clip with fewer retained frames).
-        # Non-decreasing target time is still required above, but an affine
-        # slope check on a repeated/one-second target step would split an
-        # otherwise valid containment cluster.  Enforce the slope/residual
-        # guard once the target has made a material (>1s) advance.
-        if contiguous and source_delta > 1e-6:
-            if target_delta <= TEMPORAL_TARGET_JITTER_SEC:
-                # A repeated target sample is valid, but a much larger source
-                # jump paired with a one-second target step is characteristic
-                # of a shuffled target timeline rather than static content.
-                contiguous = source_delta <= max(1.5, target_delta * 1.5)
-            else:
-                candidate_slope = (match.target_timestamp - float(first_target)) / (
-                    match.source_timestamp - float(first_source)
-                )
-                contiguous = (
-                    TEMPORAL_MIN_SLOPE <= candidate_slope <= TEMPORAL_MAX_SLOPE
-                    and abs(regression.residual(match.source_timestamp, match.target_timestamp))
-                    <= TEMPORAL_RESIDUAL_TOLERANCE_SEC
-                )
-        if contiguous:
-            current_cluster.append(match)
-            current_offset_sum += offset
-            current_offset_count += 1
-            regression.add(match.source_timestamp, match.target_timestamp)
-        else:
-            commit_cluster(current_cluster)
-            current_cluster = [match]
-            current_offset_sum = offset
-            current_offset_count = 1
-            first_source = match.source_timestamp
-            first_target = match.target_timestamp
-            regression = _OnlineAffineTrend()
-            regression.add(match.source_timestamp, match.target_timestamp)
-        previous_source = match.source_timestamp
-        previous_target = match.target_timestamp
-
-    commit_cluster(current_cluster)
-    if source_timestamps is not None and total_source_duration and total_source_duration > 0:
-        timeline = _timeline_cells(source_timestamps, total_source_duration)
-        matched_timestamps = [
-            match.source_timestamp
-            for match in matches
-            if match.source_frame_index in covered_source_frames
-        ]
-        covered_duration = _covered_duration(
-            matched_timestamps,
-            timeline,
-            0.0,
-            float(total_source_duration),
-        )
-        return min(1.0, covered_duration / float(total_source_duration))
-    return min(1.0, len(covered_source_frames) / total_source_frames)
-
-
-class _OnlineAffineTrend:
-    """O(1)-state running affine fit used for temporal consistency."""
-
-    def __init__(self) -> None:
-        self.count = 0
-        self.sum_x = 0.0
-        self.sum_y = 0.0
-        self.sum_xx = 0.0
-        self.sum_xy = 0.0
-
-    def add(self, x: float, y: float) -> None:
-        self.count += 1
-        self.sum_x += x
-        self.sum_y += y
-        self.sum_xx += x * x
-        self.sum_xy += x * y
-
-    def parameters(self) -> Tuple[float, float]:
-        denominator = self.count * self.sum_xx - self.sum_x * self.sum_x
-        if self.count < 2 or abs(denominator) < 1e-9:
-            return 1.0, self.sum_y / max(1, self.count) - self.sum_x / max(1, self.count)
-        slope = (self.count * self.sum_xy - self.sum_x * self.sum_y) / denominator
-        intercept = (self.sum_y - slope * self.sum_x) / self.count
-        return slope, intercept
-
-    def residual(self, x: float, y: float) -> float:
-        slope, intercept = self.parameters()
-        return y - (slope * x + intercept)
-
-
-def _temporal_gap_limit(
-    timeline: Optional[Sequence[float]],
-    sorted_matches: Sequence[FrameMatch],
-    axis: str,
-) -> float:
-    """Derive continuity from the complete timeline when available."""
-    values = timeline
-    if values is None:
-        values = [
-            getattr(match, f"{axis}_timestamp")
-            for match in sorted_matches
-        ]
-    finite = sorted(
-        float(value)
-        for value in values
-        if np.isfinite(float(value))
-    )
-    gaps = [right - left for left, right in zip(finite, finite[1:]) if right > left]
-    return max(
-        TEMPORAL_DEFAULT_GAP_SEC,
-        TEMPORAL_GAP_MULTIPLIER * (median(gaps) if gaps else 0.0),
-    )
-
-
-def _timeline_cells(
-    timestamps: Sequence[float],
-    total_duration: float,
-) -> Dict[float, Tuple[float, float]]:
-    values = sorted({float(value) for value in timestamps if np.isfinite(float(value))})
-    if not values or total_duration <= 0:
-        return {}
-    cells: Dict[float, Tuple[float, float]] = {}
-    for index, value in enumerate(values):
-        left = 0.0 if index == 0 else (values[index - 1] + value) / 2
-        right = float(total_duration) if index == len(values) - 1 else (value + values[index + 1]) / 2
-        cells[value] = (max(0.0, left), min(float(total_duration), max(left, right)))
-    return cells
-
-
-def _covered_duration(
-    timestamps: Sequence[float],
-    timeline: Dict[float, Tuple[float, float]],
-    start: float,
-    end: float,
-) -> float:
-    intervals = []
-    for value in {float(timestamp) for timestamp in timestamps if np.isfinite(float(timestamp))}:
-        cell = timeline.get(value)
-        if cell is not None:
-            left, right = max(start, cell[0]), min(end, cell[1])
-            if right > left:
-                intervals.append((left, right))
-    intervals.sort()
-    covered = 0.0
-    current_start = current_end = None
-    for left, right in intervals:
-        if current_start is None:
-            current_start, current_end = left, right
-        elif left <= current_end:
-            current_end = max(current_end, right)
-        else:
-            covered += current_end - current_start
-            current_start, current_end = left, right
-    if current_start is not None:
-        covered += current_end - current_start
-    return covered
-
+    return alignment.source_coverage
 
 def _cache_duration_seconds(cache: FrameEmbeddingCache) -> float:
     """Best-effort media duration estimate carried with a frame cache."""
@@ -594,6 +424,7 @@ def compare_videos_bidirectional(
     match_threshold: float = 0.65,
     top_k: int = 10,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    offset_tolerance_sec: float = TEMPORAL_OFFSET_TOLERANCE_SEC,
 ) -> ContainmentResult:
     """
     Perform bidirectional containment detection between two videos.
@@ -635,6 +466,7 @@ def compare_videos_bidirectional(
         match_threshold=match_threshold,
         top_k=top_k,
         progress_callback=progress_callback,
+        offset_tolerance_sec=offset_tolerance_sec,
     )
 
 
@@ -648,6 +480,7 @@ def compare_frame_indexes_bidirectional(
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
     early_stop: bool = False,
     early_stop_margin: float = 0.04,
+    offset_tolerance_sec: float = TEMPORAL_OFFSET_TOLERANCE_SEC,
 ) -> ContainmentResult:
     """
     Perform bidirectional containment detection with prebuilt frame indices.
@@ -684,6 +517,7 @@ def compare_frame_indexes_bidirectional(
             total_frames_b=total_frames_b,
             duration_a=duration_a,
             duration_b=duration_b,
+            offset_tolerance_sec=offset_tolerance_sec,
         )
 
     # A -> B: Query B's index with A's embeddings
@@ -735,6 +569,7 @@ def compare_frame_indexes_bidirectional(
         total_frames_b=total_frames_b,
         duration_a=duration_a,
         duration_b=duration_b,
+        offset_tolerance_sec=offset_tolerance_sec,
     )
 
 
@@ -751,6 +586,7 @@ def _compare_frame_indexes_bidirectional_early_stop(
     total_frames_b: int,
     duration_a: float,
     duration_b: float,
+    offset_tolerance_sec: float,
 ) -> ContainmentResult:
     a_is_shorter = total_frames_a <= total_frames_b
     if a_is_shorter:
@@ -807,6 +643,7 @@ def _compare_frame_indexes_bidirectional_early_stop(
                 total_frames_b=total_frames_b,
                 duration_a=duration_a,
                 duration_b=duration_b,
+                offset_tolerance_sec=offset_tolerance_sec,
             )
         return _build_containment_result(
             cache_a=cache_a,
@@ -821,6 +658,7 @@ def _compare_frame_indexes_bidirectional_early_stop(
             total_frames_b=total_frames_b,
             duration_a=duration_a,
             duration_b=duration_b,
+            offset_tolerance_sec=offset_tolerance_sec,
         )
 
     if first_direction == "a_to_b":
@@ -877,6 +715,7 @@ def _compare_frame_indexes_bidirectional_early_stop(
         total_frames_b=total_frames_b,
         duration_a=duration_a,
         duration_b=duration_b,
+        offset_tolerance_sec=offset_tolerance_sec,
     )
 
 
@@ -893,26 +732,31 @@ def _build_containment_result(
     total_frames_b: int,
     duration_a: float,
     duration_b: float,
+    offset_tolerance_sec: float = TEMPORAL_OFFSET_TOLERANCE_SEC,
 ) -> ContainmentResult:
-    # Calculate containment ratios from time-consistent matches. The raw unique
-    # match count is too permissive for long videos because semantically similar
-    # but unrelated frames can appear throughout the source.
-    a_in_b = _temporal_consistent_coverage(
+    # Calculate containment ratios from the same bounded alignment used by
+    # segment/window consumers.  Keep the alignment objects so reports expose
+    # exactly which candidates contributed to each directional ratio.
+    alignment_a_to_b = align_matches(
         matches_a_to_b,
-        total_frames_a,
+        total_source_frames=total_frames_a,
         source_timestamps=cache_a.timestamps,
         total_source_duration=duration_a,
         target_timestamps=cache_b.timestamps,
         total_target_duration=duration_b,
+        offset_tolerance_sec=offset_tolerance_sec,
     )
-    b_in_a = _temporal_consistent_coverage(
+    alignment_b_to_a = align_matches(
         matches_b_to_a,
-        total_frames_b,
+        total_source_frames=total_frames_b,
         source_timestamps=cache_b.timestamps,
         total_source_duration=duration_b,
         target_timestamps=cache_a.timestamps,
         total_target_duration=duration_a,
+        offset_tolerance_sec=offset_tolerance_sec,
     )
+    a_in_b = alignment_a_to_b.source_coverage
+    b_in_a = alignment_b_to_a.source_coverage
     symmetric_similarity = (a_in_b + b_in_a) / 2
 
     all_best_sims = np.concatenate([best_sims_a, best_sims_b]) if len(best_sims_a) > 0 or len(best_sims_b) > 0 else np.array([], dtype="float32")
@@ -955,6 +799,17 @@ def _build_containment_result(
         raw_similarity_mean=raw_similarity_mean,
         raw_similarity_p95=raw_similarity_p95,
         raw_similarity_p99=raw_similarity_p99,
+        verified_matches_a_to_b=alignment_a_to_b.verified_matches,
+        verified_matches_b_to_a=alignment_b_to_a.verified_matches,
+        alignment_computed=bool(
+            alignment_a_to_b.alignment_computed
+            and alignment_b_to_a.alignment_computed
+        ),
+        temporal_evidence={
+            "a_to_b": dict(alignment_a_to_b.evidence),
+            "b_to_a": dict(alignment_b_to_a.evidence),
+            "offset_tolerance_sec": float(offset_tolerance_sec),
+        },
     )
 
 

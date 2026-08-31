@@ -1,5 +1,7 @@
 """Golden cases for direction-aware temporal segment aggregation."""
 
+import pytest
+
 from video_sim.matcher import FrameMatch, _temporal_consistent_coverage
 from video_sim.segmenter import (
     MatchedSegment,
@@ -43,7 +45,10 @@ def test_fixed_offset_and_real_sparse_timeline_coverage():
         source_timestamps=[0, 10, 20, 30, 40, 50],
         total_source_duration=50,
     )
-    assert windows[0].matched_frame_ratio < 0.5
+    # The 20s source sample's midpoint cell is [15,25], so its [15,20]
+    # intersection contributes to the first window.  The ratio is exactly
+    # one half after clipping and cross-window cell accounting.
+    assert windows[0].matched_frame_ratio == pytest.approx(0.5)
 
 
 def test_timestamp_coverage_is_not_biased_by_sampling_density():

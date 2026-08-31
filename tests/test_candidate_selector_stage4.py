@@ -181,7 +181,7 @@ def test_thread_budget_is_bounded_and_handles_missing_cpu_api(monkeypatch):
     assert configure_faiss_thread_budget(2, 8) == 4
 
 
-def test_thread_budget_configures_global_faiss_once(monkeypatch):
+def test_thread_budget_configures_faiss_for_each_calling_thread(monkeypatch):
     import video_sim.indexer as indexer
 
     calls = []
@@ -189,4 +189,8 @@ def test_thread_budget_configures_global_faiss_once(monkeypatch):
     monkeypatch.setattr(indexer, "_LAST_FAISS_THREAD_BUDGET", None)
     assert indexer.configure_faiss_thread_budget(2, 8) == 4
     assert indexer.configure_faiss_thread_budget(2, 8) == 4
-    assert calls == [4]
+    # FAISS's OpenMP setting can be thread-local in the installed runtime.
+    # Reapply it for every calling thread; the coordinator must not rely on a
+    # process-global last-value guard to configure a worker that has just
+    # started. The call remains outside per-query loops.
+    assert calls == [4, 4]

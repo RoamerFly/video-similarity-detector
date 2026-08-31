@@ -29,6 +29,11 @@ from video_sim.embedder import (
 from video_sim.frame_sampler import DynamicFrameSampler
 from video_sim.matcher import ContainmentResult, compare_videos_bidirectional
 from video_sim.preprocess import PreprocessConfig, add_preprocess_args
+from video_sim.recognition_contract import (
+    CONTAINMENT_SCORING_VERSION,
+    FEATURE_EXTRACTOR_ID,
+    REPORT_SCHEMA_VERSION,
+)
 from video_sim.segmenter import aggregate_bidirectional_segments
 
 
@@ -172,6 +177,12 @@ def main():
         help="Number of top results to retrieve per query (default: 10)",
     )
     parser.add_argument(
+        "--offset-tolerance",
+        type=float,
+        default=3.0,
+        help="Maximum temporal offset drift for verified matches (default: 3.0s)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -250,13 +261,22 @@ def main():
         cache_b=cache_b,
         match_threshold=args.match_threshold,
         top_k=args.top_k,
+        offset_tolerance_sec=args.offset_tolerance,
     )
+    if bool(getattr(result, "alignment_computed", False)):
+        # Temporal alignment is authoritative once computed, including the
+        # empty-evidence case.  Never fall back to raw Top-K matches here.
+        matches_a_to_b = list(getattr(result, "verified_matches_a_to_b", []))
+        matches_b_to_a = list(getattr(result, "verified_matches_b_to_a", []))
+    else:
+        matches_a_to_b = result.matches_a_to_b
+        matches_b_to_a = result.matches_b_to_a
     # Keep the single-pair CLI on the same direction-aware segment path as
     # batch_compare: aggregate A→B and B→A independently, then normalize and
     # fuse them in A/B coordinates.
     segments = aggregate_bidirectional_segments(
-        result.matches_a_to_b,
-        result.matches_b_to_a,
+        matches_a_to_b,
+        matches_b_to_a,
         source_timestamps_a=cache_a.timestamps,
         source_timestamps_b=cache_b.timestamps,
         total_source_duration_a=result.duration_a,
@@ -292,6 +312,16 @@ def main():
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         report = result.to_dict()
+        report.update(
+            {
+                "report_schema_version": REPORT_SCHEMA_VERSION,
+                "containment_scoring_version": CONTAINMENT_SCORING_VERSION,
+                "feature_extractor_id": FEATURE_EXTRACTOR_ID,
+                "match_threshold": args.match_threshold,
+                "top_k": args.top_k,
+                "offset_tolerance": args.offset_tolerance,
+            }
+        )
         report["segments"] = [segment.to_dict() for segment in segments]
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)

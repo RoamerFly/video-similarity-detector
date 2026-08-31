@@ -6534,6 +6534,8 @@ fn serialize_csv_report(
 fn report_pairs_csv(report: &Value) -> String {
     let headers = [
         "completed_at",
+        "report_schema_version",
+        "containment_scoring_version",
         "video_a",
         "video_b",
         "video_a_path",
@@ -6559,9 +6561,39 @@ fn report_pairs_csv(report: &Value) -> String {
         .into_iter()
         .flatten()
     {
+        let report_schema_version = pair
+            .get("report_schema_version")
+            .filter(|value| !value.is_null())
+            .map(|_| json_text(pair, "report_schema_version"))
+            .unwrap_or_else(|| json_text(report, "report_schema_version"));
+        let containment_scoring_version = pair
+            .get("containment_scoring_version")
+            .filter(|value| !value.is_null())
+            .map(|_| json_text(pair, "containment_scoring_version"))
+            .unwrap_or_else(|| json_text(report, "containment_scoring_version"));
         rows.push(
-            headers
-                .map(|header| csv_cell(json_text(pair, header)))
+            [
+                csv_cell(json_text(pair, "completed_at")),
+                csv_cell(report_schema_version),
+                csv_cell(containment_scoring_version),
+                csv_cell(json_text(pair, "video_a")),
+                csv_cell(json_text(pair, "video_b")),
+                csv_cell(json_text(pair, "video_a_path")),
+                csv_cell(json_text(pair, "video_b_path")),
+                csv_cell(json_text(pair, "a_in_b")),
+                csv_cell(json_text(pair, "b_in_a")),
+                csv_cell(json_text(pair, "symmetric_similarity")),
+                csv_cell(json_text(pair, "avg_similarity_a_to_b")),
+                csv_cell(json_text(pair, "avg_similarity_b_to_a")),
+                csv_cell(json_text(pair, "relation")),
+                csv_cell(json_text(pair, "total_frames_a")),
+                csv_cell(json_text(pair, "total_frames_b")),
+                csv_cell(json_text(pair, "duration_a")),
+                csv_cell(json_text(pair, "duration_b")),
+                csv_cell(json_text(pair, "raw_similarity_max")),
+                csv_cell(json_text(pair, "raw_similarity_p95")),
+                csv_cell(json_text(pair, "matched_segment_count")),
+            ]
                 .join(","),
         );
     }
@@ -7276,7 +7308,8 @@ mod tests {
     use super::{
         compact_task_match_key, estimated_windows_command_line_len, is_decord_seek_warning_line,
         is_h264_decoder_log_line, parse_analysis_video_context, parse_analysis_video_quarantined,
-        python_spawn_error_message, sha256_file, update_report_entries_for_resolved_path,
+        python_spawn_error_message, report_pairs_csv, sha256_file,
+        update_report_entries_for_resolved_path,
         AnalysisVideoContext, AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator,
         PythonLaunchDiagnostics, ReportPairIdentity,
         VideoMergeConfig,
@@ -7556,5 +7589,68 @@ mod tests {
         assert!(html_content.contains("c.mp4"));
 
         fs::remove_dir_all(directory).expect("remove temp report directory");
+    }
+
+    #[test]
+    fn report_pairs_csv_preserves_pair_versions_and_root_fallback() {
+        let report = json!({
+            "report_schema_version": 2,
+            "containment_scoring_version": 5,
+            "video_pairs": [
+                {
+                    "video_a": "pair-a.mp4",
+                    "video_b": "pair-b.mp4",
+                    "report_schema_version": 3,
+                    "containment_scoring_version": 7,
+                    "relation": "partial_overlap"
+                },
+                {
+                    "video_a": "root-a.mp4",
+                    "video_b": "root-b.mp4",
+                    "relation": "different"
+                }
+            ]
+        });
+
+        let csv = report_pairs_csv(&report);
+        let mut lines = csv.lines();
+        let header = lines.next().expect("CSV header");
+        let pair_row = lines.next().expect("pair-specific row");
+        let root_row = lines.next().expect("root-version fallback row");
+
+        assert!(header.starts_with(
+            "completed_at,report_schema_version,containment_scoring_version,video_a,video_b,"
+        ));
+        assert!(pair_row.starts_with(",3,7,pair-a.mp4,pair-b.mp4,"));
+        assert!(root_row.starts_with(",2,5,root-a.mp4,root-b.mp4,"));
+    }
+
+    #[test]
+    fn report_pairs_csv_keeps_version_columns_empty_for_legacy_reports() {
+        let report = json!({
+            "video_pairs": [{
+                "video_a": "legacy-a.mp4",
+                "video_b": "legacy-b.mp4",
+                "relation": "different"
+            }]
+        });
+
+        let csv = report_pairs_csv(&report);
+        let mut lines = csv.lines();
+        let header = lines.next().expect("CSV header");
+        let row = lines.next().expect("legacy row");
+        let header_columns: Vec<_> = header.split(',').collect();
+        let row_columns: Vec<_> = row.split(',').collect();
+        let schema_index = header_columns
+            .iter()
+            .position(|column| *column == "report_schema_version")
+            .expect("schema version column");
+        let scoring_index = header_columns
+            .iter()
+            .position(|column| *column == "containment_scoring_version")
+            .expect("scoring version column");
+
+        assert_eq!(row_columns[schema_index], "");
+        assert_eq!(row_columns[scoring_index], "");
     }
 }

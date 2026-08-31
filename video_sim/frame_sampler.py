@@ -32,6 +32,61 @@ except Exception:
     pass
 
 
+DEFAULT_DECODE_BATCH_BYTES = 64 * 1024 * 1024
+DECODE_BATCH_BYTES_ENV = "VIDEO_SIM_DECODE_BATCH_BYTES"
+
+
+def parse_decode_batch_bytes(value: Optional[str] = None) -> int:
+    """Return the positive Decord batch budget in bytes.
+
+    The budget is deliberately a decoded RGB-frame batch hint, rather than a
+    promise about process RSS: Decord/FFmpeg may hold additional internal
+    buffers. Invalid or missing environment values use the conservative
+    64-MiB default.
+    """
+    raw_value = os.environ.get(DECODE_BATCH_BYTES_ENV) if value is None else value
+    try:
+        parsed = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_DECODE_BATCH_BYTES
+    return parsed if parsed > 0 else DEFAULT_DECODE_BATCH_BYTES
+
+
+def _decoded_frame_bytes(frame_shape: Optional[Tuple[int, ...]]) -> int:
+    """Estimate one decoded uint8 RGB frame from its shape."""
+    if frame_shape is None:
+        return 0
+    try:
+        shape = tuple(int(dimension) for dimension in frame_shape)
+    except (TypeError, ValueError):
+        return 0
+    if len(shape) < 2 or any(dimension <= 0 for dimension in shape):
+        return 0
+    # A grayscale shape is converted to BGR by _rgb_to_bgr, so account for
+    # three channels when the decoder does not expose a channel dimension.
+    if len(shape) == 2:
+        return shape[0] * shape[1] * 3
+    return int(np.prod(shape, dtype=np.int64))
+
+
+def decode_batch_size_for_frame_shape(
+    frame_shape: Optional[Tuple[int, ...]],
+    budget_bytes: Optional[int] = None,
+) -> int:
+    """Choose a decoded-frame batch size that fits the requested byte hint.
+
+    Unknown or malformed shapes use one frame, because choosing a larger
+    batch without a size estimate could exceed the caller's intended bound.
+    A single frame larger than the budget still uses one frame; this only
+    bounds the batch request and cannot bound decoder-owned buffers or RSS.
+    """
+    budget = parse_decode_batch_bytes() if budget_bytes is None else max(1, int(budget_bytes))
+    frame_bytes = _decoded_frame_bytes(frame_shape)
+    if frame_bytes <= 0:
+        return 1
+    return max(1, budget // frame_bytes)
+
+
 @dataclass
 class RetainedFrame:
     """Information about a retained frame from dynamic sampling.
@@ -262,6 +317,11 @@ class DynamicFrameSampler:
         self.retained_count = 0
         self.total_frames = 0
         self._retained_callback_failed = False
+        # Decoder batch telemetry is intentionally limited to the decoded
+        # frame request. It is not a process RSS guarantee.
+        self.last_decode_batch_size: Optional[int] = None
+        self.last_decode_frame_bytes: Optional[int] = None
+        self.last_decode_batch_oversized = False
 
     def _get_thumbnail_dir(self, video_path: Union[str, Path]) -> Path:
         """Get the thumbnail directory for a video."""
@@ -473,27 +533,75 @@ class DynamicFrameSampler:
         self,
         vr: VideoReader,
         total_frames: int,
-        chunk_size: int = 64,
+        chunk_size: Optional[int] = None,
     ) -> Iterable[Tuple[int, np.ndarray]]:
         step = max(1, self.frame_step)
-        chunk_span = step * max(1, chunk_size)
+
+        # Decord does not expose frame geometry consistently across versions.
+        # Probe one frame when possible, then turn the byte budget into a
+        # sampled-frame count. If probing fails we use one frame conservatively
+        # and retain the existing per-frame fallback for decode errors.
+        frame_shape: Optional[Tuple[int, ...]] = None
+        prefetched_rgb_frame: Optional[np.ndarray] = None
+        if total_frames > 0:
+            try:
+                prefetched_rgb_frame = np.asarray(vr[0].asnumpy())
+                frame_shape = tuple(prefetched_rgb_frame.shape)
+            except Exception:
+                frame_shape = None
+                prefetched_rgb_frame = None
+        budget_bytes = parse_decode_batch_bytes()
+        batch_size = decode_batch_size_for_frame_shape(frame_shape, budget_bytes)
+        # ``chunk_size`` remains an internal compatibility hook for focused
+        # callers, but the normal path is governed by the byte budget.
+        if chunk_size is not None:
+            batch_size = min(batch_size, max(1, int(chunk_size)))
+        self.last_decode_batch_size = batch_size
+        self.last_decode_frame_bytes = _decoded_frame_bytes(frame_shape) or None
+        self.last_decode_batch_oversized = bool(
+            self.last_decode_frame_bytes is not None
+            and self.last_decode_frame_bytes > budget_bytes
+        )
+        chunk_span = step * batch_size
 
         for chunk_start in range(0, total_frames, chunk_span):
             indices = list(range(chunk_start, min(total_frames, chunk_start + chunk_span), step))
             if not indices:
                 continue
 
+            batch_indices = indices
+            prefetched_bgr_frame: Optional[np.ndarray] = None
+            if chunk_start == 0 and indices[0] == 0 and prefetched_rgb_frame is not None:
+                try:
+                    prefetched_bgr_frame = _rgb_to_bgr(prefetched_rgb_frame)
+                except Exception:
+                    # Keep frame zero in the batch when the probe cannot be
+                    # converted; the normal batch or scalar fallback may
+                    # still decode a usable representation.
+                    prefetched_bgr_frame = None
+                else:
+                    # The probe already decoded frame zero. Exclude it from
+                    # the first batch, and emit it first to preserve order.
+                    batch_indices = indices[1:]
+                    prefetched_rgb_frame = None
+                    yield 0, prefetched_bgr_frame
+
+            if not batch_indices:
+                # Avoid calling get_batch([]) when the first chunk contains
+                # only the prefetched frame.
+                continue
+
             try:
-                batch = vr.get_batch(indices).asnumpy()
+                batch = vr.get_batch(batch_indices).asnumpy()
             except Exception:
-                for index in indices:
+                for index in batch_indices:
                     try:
                         yield index, _rgb_to_bgr(vr[index].asnumpy())
                     except Exception:
                         continue
                 continue
 
-            for index, rgb_frame in zip(indices, batch):
+            for index, rgb_frame in zip(batch_indices, batch):
                 yield index, _rgb_to_bgr(rgb_frame)
 
     def _sample_with_opencv(

@@ -43,17 +43,19 @@ def configure_faiss_thread_budget(
     compare_workers: int = 1,
     available_cpus: Optional[int] = None,
 ) -> int:
-    """Set FAISS's global OpenMP budget once from the coordinating thread.
+    """Set FAISS's OpenMP budget for the current calling thread.
 
     FAISS versions without ``omp_set_num_threads`` are supported.  A small
-    lock and last-value guard make accidental repeated calls harmless; batch
-    workers never call this function themselves.
+    lock serializes the setter because some FAISS builds expose shared
+    runtime state.  The last-value field is retained for diagnostics and
+    backwards-compatible test hooks, but deliberately does not suppress a
+    repeated call: FAISS's OpenMP setting can be thread-local.  Call this from
+    a worker-pool initializer (or once per coordinating operation), never from
+    an individual query loop.
     """
     global _LAST_FAISS_THREAD_BUDGET
     budget = calculate_faiss_thread_budget(compare_workers, available_cpus)
     with _FAISS_THREAD_LOCK:
-        if _LAST_FAISS_THREAD_BUDGET == budget:
-            return budget
         setter = getattr(faiss, "omp_set_num_threads", None)
         if callable(setter):
             setter(int(budget))

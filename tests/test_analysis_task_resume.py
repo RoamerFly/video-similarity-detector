@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from scripts import batch_compare
+from video_sim.recognition_contract import CONTAINMENT_SCORING_VERSION, REPORT_SCHEMA_VERSION
 
 
 def test_task_manifest_persists_resume_progress(tmp_path: Path):
@@ -79,6 +80,34 @@ def test_pair_key_keeps_incremental_pairs_but_invalidates_changed_video(tmp_path
     video_b.write_bytes(b"changed")
 
     assert batch_compare.pair_key(video_a, video_b) != original_key
+
+
+def test_resume_state_does_not_reuse_unversioned_pair_payload(tmp_path: Path):
+    state_path = tmp_path / "resume.state.json"
+    signature = {
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "containment_scoring_version": CONTAINMENT_SCORING_VERSION,
+    }
+    state_path.write_text(
+        json.dumps(
+            {
+                "signature": signature,
+                "pairs": {
+                    "legacy": {"relation": "partial_overlap"},
+                    "modern": {
+                        "report_schema_version": REPORT_SCHEMA_VERSION,
+                        "containment_scoring_version": CONTAINMENT_SCORING_VERSION,
+                        "relation": "partial_overlap",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = batch_compare.load_resume_state(state_path, signature)
+
+    assert list(loaded["pairs"]) == ["modern"]
 
 
 def test_stage_progress_and_redo_reset_downstream(tmp_path: Path):

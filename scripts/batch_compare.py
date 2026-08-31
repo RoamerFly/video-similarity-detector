@@ -42,9 +42,74 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+from video_sim.recognition_contract import (
+    CONTAINMENT_SCORING_VERSION,
+    FEATURE_EXTRACTOR_ID,
+    FRAME_CACHE_SCHEMA_VERSION as CONTRACT_FRAME_CACHE_SCHEMA_VERSION,
+    REPORT_SCHEMA_VERSION,
+    feature_cache_identity,
+    is_current_report_pair,
+    pair_parameters,
+    pair_result_key as contract_pair_result_key,
+)
+
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def faiss_thread_budget_initializer(compare_workers: int) -> None:
+    """Configure FAISS once when an exact-comparison worker starts.
+
+    Keep the import inside the initializer so importing this batch module does
+    not eagerly load the full FAISS runtime. The caller invokes this through
+    ``ThreadPoolExecutor(initializer=...)``; it must not be moved into a pair
+    or query callback.
+    """
+    from video_sim.indexer import configure_faiss_thread_budget
+
+    configure_faiss_thread_budget(compare_workers=compare_workers)
+
+
+def release_embedder_reference(
+    had_embedder: bool,
+    resolved_device: str,
+    *,
+    torch_module=None,
+) -> dict[str, object]:
+    """Finish embedder cleanup after the caller drops its strong reference.
+
+    ``torch`` is intentionally resolved from ``sys.modules`` when the caller
+    does not provide a module. A CPU-only run therefore never imports torch as
+    a side effect, while a real CUDA run can call ``empty_cache`` after the
+    embedder reference is dropped. The caller must set its local ``embedder``
+    variable to ``None`` before calling this helper; accepting only the boolean
+    avoids retaining the model until after ``empty_cache``. The returned
+    counters are for diagnostics and do not claim that decoder or allocator
+    RSS is fully bounded.
+    """
+    collected = gc.collect()
+    cuda_cache_cleared = False
+    device_name = str(resolved_device or "").strip().lower()
+    if device_name.startswith("cuda"):
+        if torch_module is None:
+            torch_module = sys.modules.get("torch")
+        try:
+            cuda = getattr(torch_module, "cuda", None)
+            is_available = getattr(cuda, "is_available", None)
+            empty_cache = getattr(cuda, "empty_cache", None)
+            if callable(is_available) and is_available() and callable(empty_cache):
+                empty_cache()
+                cuda_cache_cleared = True
+        except Exception:
+            # Cache cleanup is opportunistic. The embedder reference and GC
+            # cleanup above remain valid even if an optional CUDA API fails.
+            pass
+    return {
+        "had_embedder": had_embedder,
+        "gc_collected": collected,
+        "cuda_cache_cleared": cuda_cache_cleared,
+    }
 
 
 def emit_video_context(video_path: Path, phase: str) -> None:
@@ -662,32 +727,60 @@ def file_fingerprint(path: Path) -> dict:
 
 
 def build_resume_signature(videos: list[Path], args, preprocess_config, resolved_device: str) -> dict:
+    """Build the global identity for resumable analysis state.
+
+    ``videos`` is intentionally not part of this identity.  A newly added or
+    changed source video must invalidate only the affected pair keys; putting
+    the full video list here would discard every unaffected completed pair.
+    Runtime imports stay inside the function so importing this script remains
+    lightweight for task-manifest tooling.
+    """
+    try:
+        from video_sim.embedder import (
+            FRAME_CACHE_SCHEMA_VERSION,
+            embedding_runtime_fingerprint,
+        )
+        frame_cache_schema_version = int(FRAME_CACHE_SCHEMA_VERSION)
+        embedding_runtime = embedding_runtime_fingerprint(resolved_device)
+    except Exception:
+        frame_cache_schema_version = CONTRACT_FRAME_CACHE_SCHEMA_VERSION
+        # This fallback is for lightweight tooling without torch.  A real
+        # analysis run loads the embedder and records its exact runtime value.
+        embedding_runtime = "precision=fp32"
+    try:
+        from video_sim.model_locator import embedding_model_fingerprint
+
+        model_fingerprint = embedding_model_fingerprint()
+    except Exception:
+        model_fingerprint = "unknown"
+
+    # Sampling and preprocessing are part of the per-video feature-cache
+    # identity.  They are deliberately omitted from the global checkpoint
+    # namespace so changing one source/cache does not invalidate unrelated
+    # completed pairs.  The pair key below binds the audited cache identity.
     return {
-        "containment_scoring_version": 4,
-        "skip_threshold": args.skip_threshold,
-        "max_gap_sec": args.max_gap_sec,
-        "frame_step": max(1, int(args.frame_step)),
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "containment_scoring_version": CONTAINMENT_SCORING_VERSION,
+        "feature_extractor_id": FEATURE_EXTRACTOR_ID,
+        "frame_cache_schema_version": frame_cache_schema_version,
+        "embedding_model_fingerprint": model_fingerprint,
+        "embedding_runtime": embedding_runtime,
         "match_threshold": args.match_threshold,
         "window_size": args.window_size,
         "top_k": args.top_k,
         "min_segment_duration": args.min_segment_duration,
         "min_segment_matches": args.min_segment_matches,
         "offset_tolerance": args.offset_tolerance,
-        "force": bool(args.force),
-        "error_tolerance": args.error_tolerance,
-        "error_severe_limit": args.error_severe_limit,
-        "error_missing_limit": args.error_missing_limit,
-        "preflight_validation": not args.skip_stream_validation,
         "early_stop": not bool(args.disable_early_stop),
-        "crop_black_borders": preprocess_config.crop_black_borders,
-        "resize_mode": preprocess_config.resize_mode.value,
-        "input_size": preprocess_config.input_size,
-        "portrait_rotation": preprocess_config.portrait_rotation.value,
-        "device": resolved_device,
     }
 
 
 def pair_key(video_a: Path, video_b: Path) -> str:
+    """Legacy source-only key retained for compatibility with callers/tests.
+
+    Production resume uses :func:`pair_result_key`, which additionally binds
+    both feature-cache identities and all scoring versions.
+    """
     identities = []
     for path in (video_a, video_b):
         fingerprint = file_fingerprint(path)
@@ -696,6 +789,27 @@ def pair_key(video_a: Path, video_b: Path) -> str:
         )
     left, right = sorted(identities)
     return f"{left}||{right}"
+
+
+def pair_result_key(
+    video_a: Path,
+    video_b: Path,
+    *,
+    cache_a_identity: dict | None = None,
+    cache_b_identity: dict | None = None,
+    resume_signature: dict | None = None,
+) -> str:
+    """Return the complete identity for a production pair result."""
+
+    signature = resume_signature or {}
+    return contract_pair_result_key(
+        video_a,
+        video_b,
+        cache_a_identity=cache_a_identity,
+        cache_b_identity=cache_b_identity,
+        pair_parameters_value=pair_parameters(signature),
+        global_identity=signature,
+    )
 
 
 def cache_duration_seconds(cache) -> float:
@@ -791,6 +905,24 @@ def load_incremental_resume_pairs(state_path: Path, signature: dict) -> dict:
     return pairs
 
 
+def _current_resume_pairs(pairs: object) -> dict:
+    """Keep only pair payloads carrying the current report contract.
+
+    The SQLite/JSON namespace is versioned by the global signature, but this
+    check also protects against manually copied or partially migrated state
+    files.  An old pair must be recomputed instead of silently acquiring the
+    current scoring meaning.
+    """
+
+    if not isinstance(pairs, dict):
+        return {}
+    return {
+        key: pair
+        for key, pair in pairs.items()
+        if isinstance(key, str) and is_current_report_pair(pair)
+    }
+
+
 def load_resume_sqlite(state_path: Path, signature: dict) -> dict:
     database_path = resume_pair_database_path(state_path, signature)
     if not database_path.exists():
@@ -809,7 +941,7 @@ def load_resume_sqlite(state_path: Path, signature: dict) -> dict:
             continue
         if isinstance(key, str) and isinstance(pair, dict):
             pairs[key] = pair
-    return pairs
+    return _current_resume_pairs(pairs)
 
 
 def load_legacy_resume_pair_files(state_path: Path, signature: dict) -> dict:
@@ -829,7 +961,7 @@ def load_legacy_resume_pair_files(state_path: Path, signature: dict) -> dict:
         pair = payload.get("pair")
         if isinstance(key, str) and isinstance(pair, dict):
             pairs[key] = pair
-    return pairs
+    return _current_resume_pairs(pairs)
 
 
 def read_resume_state_file(state_path: Path, signature: dict) -> dict | None:
@@ -842,10 +974,10 @@ def read_resume_state_file(state_path: Path, signature: dict) -> dict | None:
         return None
     if data.get("signature") != signature:
         return None
-    pairs = data.get("pairs")
+    pairs = _current_resume_pairs(data.get("pairs"))
     return {
         "signature": signature,
-        "pairs": pairs if isinstance(pairs, dict) else {},
+        "pairs": pairs,
     }
 
 
@@ -1758,6 +1890,10 @@ def main():
     # Exact caches are loaded later by ExactResourcePool only for active pairs.
     candidate_summaries = {}
     cache_artifacts = {}
+    # A cache is loaded once during this audit/index phase.  Store its small
+    # identity beside the artifact path so pair scheduling never has to open
+    # or parse the NPZ again for each pair.
+    cache_identities = {}
     cache_hits = 0
     cache_misses = []
     force_feature_redo = args.target_stage == "features" and args.redo_stage
@@ -1788,6 +1924,10 @@ def main():
                 skip_threshold=args.skip_threshold,
                 max_gap_sec=args.max_gap_sec,
                 frame_step=args.frame_step,
+            )
+            cache_identities[video_path] = feature_cache_identity(
+                cache,
+                cache_artifacts[video_path],
             )
             del cache
             cache_hits += 1
@@ -1929,6 +2069,10 @@ def main():
                 max_gap_sec=args.max_gap_sec,
                 frame_step=args.frame_step,
             )
+            cache_identities[video_path] = feature_cache_identity(
+                cache,
+                cache_artifacts[video_path],
+            )
             del cache
             gc.collect()
             if cache_hit:
@@ -2032,6 +2176,18 @@ def main():
             "comparison cannot continue."
         )
         sys.exit(1)
+    # Feature extraction is complete. Release the model before candidate
+    # screening and exact comparison so the next stages do not retain the
+    # embedder's CPU/GPU model alongside their indexes and caches.
+    had_embedder = embedder is not None
+    embedder = None
+    embedder_release = release_embedder_reference(had_embedder, resolved_device)
+    log(
+        "已释放特征提取器引用(Released embedder reference): "
+        f"had_embedder={embedder_release['had_embedder']}, "
+        f"gc_collected={embedder_release['gc_collected']}, "
+        f"cuda_cache_cleared={embedder_release['cuda_cache_cleared']}"
+    )
     raise_if_cancelled(cancel_file)
     if finish_stage_only("features"):
         return
@@ -2054,6 +2210,23 @@ def main():
     resumed_pair_count = len(resume_state.get("pairs", {}))
     if resumed_pair_count:
         log(f"断点续跑(Resume checkpoint): {resumed_pair_count} 个已完成视频对可用")
+
+    def production_pair_key(video_a: Path, video_b: Path) -> str:
+        """Build the pair identity from audited cache identities.
+
+        ``pair_key`` remains a source-only compatibility helper for callers
+        that need the historical format.  All production resume/scheduling
+        decisions use this key, which binds both feature-cache identities and
+        the current scoring contract.
+        """
+
+        return pair_result_key(
+            video_a,
+            video_b,
+            cache_a_identity=cache_identities.get(video_a),
+            cache_b_identity=cache_identities.get(video_b),
+            resume_signature=resume_signature,
+        )
 
     log("正在加载报告模块(Loading report module)...")
     from video_sim.reporter import BatchReportData, write_csv_report, write_html_report, write_json_report
@@ -2131,7 +2304,7 @@ def main():
     else:
         log(f"候选筛选已禁用(Candidate screening disabled): 将比较全部 {total_pairs} 对视频")
     candidate_pair_keys = {
-        pair_key(video_a, video_b)
+        production_pair_key(video_a, video_b)
         for video_a, video_b in video_pairs
     }
     resumed_candidate_pairs = {
@@ -2166,7 +2339,7 @@ def main():
     from video_sim.resource_pool import ExactResourcePool
 
     pair_units = {
-        pair_key(video_a, video_b): float(
+        production_pair_key(video_a, video_b): float(
             max(
                 1,
                 candidate_summaries[video_a].frame_count
@@ -2223,28 +2396,39 @@ def main():
                 top_k=args.top_k,
                 progress_callback=progress_callback,
                 early_stop=early_stop_enabled,
+                offset_tolerance_sec=args.offset_tolerance,
             )
+        # Once temporal alignment has run, its verified lists are the only
+        # evidence permitted for windows and segments.  In particular, an
+        # aligned result with an empty verified list must remain empty rather
+        # than silently reverting to the permissive raw Top-K matches.
+        if bool(getattr(result, "alignment_computed", False)):
+            matches_a_to_b = list(getattr(result, "verified_matches_a_to_b", []))
+            matches_b_to_a = list(getattr(result, "verified_matches_b_to_a", []))
+        else:
+            matches_a_to_b = result.matches_a_to_b
+            matches_b_to_a = result.matches_b_to_a
         duration_a = cache_duration_seconds(cache_a)
         duration_b = cache_duration_seconds(cache_b)
         windows_a_to_b = fixed_window_similarity(
-            result.matches_a_to_b,
+            matches_a_to_b,
             window_size=args.window_size,
             total_source_duration=duration_a,
             source_timestamps=cache_a.timestamps,
         )
         windows_b_to_a = fixed_window_similarity(
-            result.matches_b_to_a,
+            matches_b_to_a,
             window_size=args.window_size,
             total_source_duration=duration_b,
             source_timestamps=cache_b.timestamps,
         )
         with metrics.stage(
             "segment",
-            items=len(result.matches_a_to_b) + len(result.matches_b_to_a),
+            items=len(matches_a_to_b) + len(matches_b_to_a),
         ):
             segments = aggregate_bidirectional_segments(
-                result.matches_a_to_b,
-                result.matches_b_to_a,
+                matches_a_to_b,
+                matches_b_to_a,
                 source_timestamps_a=cache_a.timestamps,
                 source_timestamps_b=cache_b.timestamps,
                 total_source_duration_a=duration_a,
@@ -2337,7 +2521,11 @@ def main():
                 except OSError as checkpoint_error:
                     log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
 
-        with ThreadPoolExecutor(max_workers=compare_workers) as executor:
+        with ThreadPoolExecutor(
+            max_workers=compare_workers,
+            initializer=faiss_thread_budget_initializer,
+            initargs=(compare_workers,),
+        ) as executor:
             future_meta = {}
             pair_iterator = iter(enumerate(video_pairs, start=1))
             pairs_exhausted = False
@@ -2352,7 +2540,7 @@ def main():
                         pairs_exhausted = True
                         break
 
-                    current_pair_key = pair_key(video_a, video_b)
+                    current_pair_key = production_pair_key(video_a, video_b)
                     current_pair_units = pair_units[current_pair_key]
                     cached_pair = resume_state.get("pairs", {}).get(current_pair_key)
                     if cached_pair:
@@ -2448,7 +2636,7 @@ def main():
 
     for pair_index, (video_a, video_b) in enumerate(video_pairs, start=1):
         raise_if_cancelled(cancel_file)
-        current_pair_key = pair_key(video_a, video_b)
+        current_pair_key = production_pair_key(video_a, video_b)
         current_pair_units = pair_units[current_pair_key]
         pair_sub_label = f"当前比较：{video_a.name} ↔ {video_b.name}"
         emit_progress(

@@ -6,12 +6,14 @@ for frame-level match results.
 """
 
 from dataclasses import dataclass
+from bisect import bisect_left, bisect_right
 from statistics import median
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import math
 
 from video_sim.matcher import FrameMatch
+from video_sim.temporal_alignment import align_matches
 
 
 # Segment clustering constants are intentionally centralized.  They describe
@@ -91,6 +93,8 @@ def fixed_window_similarity(
     source_timestamps: Optional[Sequence[float]] = None,
     target_timestamps: Optional[Sequence[float]] = None,
     total_target_duration: Optional[float] = None,
+    verified_match_points: Optional[Sequence[FrameMatch]] = None,
+    alignment_computed: bool = False,
 ) -> List[WindowSimilarity]:
     """
     Calculate similarity statistics for fixed time windows.
@@ -113,6 +117,11 @@ def fixed_window_similarity(
     Returns:
         List of WindowSimilarity objects for each window
     """
+    # Once temporal alignment has run, an empty verified set is authoritative:
+    # falling back to raw candidates here would reintroduce the false windows
+    # that the matcher deliberately rejected.
+    if alignment_computed:
+        match_points = list(verified_match_points or [])
     if not match_points:
         return []
 
@@ -136,7 +145,7 @@ def fixed_window_similarity(
             min_time = min(0.0, min(finite_source_times))
     max_time = sorted_matches[-1].source_timestamp
     if total_source_duration is not None:
-        max_time = max(max_time, total_source_duration)
+        max_time = float(total_source_duration)
 
     # Ensure max_time > min_time so at least one window is created
     # For single match, create one window of window_size
@@ -146,26 +155,42 @@ def fixed_window_similarity(
     # Create windows
     windows = []
     window_start = min_time
-    match_cursor = 0
+    source_times = [float(match.source_timestamp) for match in sorted_matches]
+    # A retained sample represents a midpoint cell.  A cell can cross a window
+    # boundary and must contribute to both adjacent windows.  Binary searches
+    # over monotonic cell boundaries keep the pass O(M + W log M + crossings)
+    # instead of rescanning all matches for every window.
+    match_cells = [
+        timeline.get(float(match.source_timestamp), (float(match.source_timestamp), float(match.source_timestamp)))
+        for match in sorted_matches
+    ]
+    cell_lefts = [cell[0] for cell in match_cells]
+    cell_rights = [cell[1] for cell in match_cells]
 
     while window_start < max_time:
-        window_end = window_start + window_size
-
-        # The matches are sorted once, so windows remain O(number of matches)
-        # rather than rescanning the full list for every window.
-        while (
-            match_cursor < len(sorted_matches)
-            and sorted_matches[match_cursor].source_timestamp < window_start
-        ):
-            match_cursor += 1
-        window_cursor = match_cursor
-        while (
-            window_cursor < len(sorted_matches)
-            and sorted_matches[window_cursor].source_timestamp < window_end
-        ):
-            window_cursor += 1
-        window_matches = sorted_matches[match_cursor:window_cursor]
-        match_cursor = window_cursor
+        window_end = min(window_start + window_size, max_time)
+        # Point ownership remains half-open [start, end), preserving the
+        # historical count/average semantics.  Coverage uses the wider cell
+        # range below so a sample at 20s whose cell is [15,25] contributes to
+        # both adjacent windows.
+        point_first = bisect_left(source_times, window_start)
+        # With no duration hint the final retained timestamp is the best
+        # available boundary, so include it in the last window.  A known media
+        # duration keeps the conventional half-open interval and clips the
+        # tail exactly at that duration.
+        point_last = (
+            bisect_right(source_times, window_end)
+            if total_source_duration is None
+            else bisect_left(source_times, window_end)
+        )
+        window_matches = sorted_matches[point_first:point_last]
+        first = bisect_right(cell_rights, window_start)
+        last = bisect_left(cell_lefts, window_end)
+        coverage_matches = [
+            match
+            for index, match in enumerate(sorted_matches[first:last], start=first)
+            if cell_rights[index] > window_start and cell_lefts[index] < window_end
+        ]
 
         # Calculate statistics
         matched_count = len(window_matches)
@@ -185,12 +210,12 @@ def fixed_window_similarity(
         # every 20 seconds, while a cut-heavy source may retain many frames in
         # one second.
         matched_duration = _covered_duration(
-            [m.source_timestamp for m in window_matches],
+            [m.source_timestamp for m in coverage_matches],
             timeline,
             window_start,
             window_end,
         )
-        matched_ratio = matched_duration / max(window_size, 1e-9)
+        matched_ratio = matched_duration / max(window_end - window_start, 1e-9)
 
         windows.append(
             WindowSimilarity(
@@ -267,16 +292,37 @@ def aggregate_segments(
         ]
     )
 
-    # A single pass over source time preserves multiple disjoint reused clips,
-    # unlike offset-only clustering which merged every clip with the same
-    # offset.  Target monotonicity rejects semantically similar frames in a
-    # random order without requiring an O(n^2) alignment matrix.
-    clusters = _cluster_temporal_matches(
-        ordered,
-        offset_tolerance_sec=offset_tolerance_sec,
-        source_gap_limit=source_gap,
-        target_gap_limit=target_gap,
-    )
+    # Reuse the matcher alignment so multi-track candidates, duplicate source
+    # timestamps, static shots, and weak-track rejection have one definition.
+    # Custom gap limits are retained for compatibility with older callers and
+    # use the local streaming clusterer below; the normal path is bounded by
+    # the shared max-track budget.
+    if max_source_gap_sec is None and max_target_gap_sec is None:
+        alignment = align_matches(
+            [match for match, _ in ordered],
+            total_source_frames=len(source_timestamps) if source_timestamps is not None else 0,
+            source_timestamps=source_timestamps,
+            total_source_duration=total_source_duration,
+            target_timestamps=target_timestamps,
+            total_target_duration=total_target_duration,
+            offset_tolerance_sec=offset_tolerance_sec,
+            min_matches=min_segment_matches,
+        )
+        clusters = [
+            [(match, match.target_timestamp - match.source_timestamp) for match in track]
+            for track in alignment.tracks
+        ]
+    else:
+        # A single pass over source time preserves multiple disjoint reused
+        # clips, unlike offset-only clustering which merged every clip with
+        # the same offset. Target monotonicity rejects semantically similar
+        # frames in random order without an O(n^2) alignment matrix.
+        clusters = _cluster_temporal_matches(
+            ordered,
+            offset_tolerance_sec=offset_tolerance_sec,
+            source_gap_limit=source_gap,
+            target_gap_limit=target_gap,
+        )
     segments = []
     for cluster in clusters:
         if len(cluster) < min_segment_matches:

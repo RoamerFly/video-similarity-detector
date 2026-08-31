@@ -58,6 +58,8 @@ export interface ReportPair {
   totalFramesB: number
   durationA: number
   durationB: number
+  reportSchemaVersion: number | null
+  containmentScoringVersion: number | null
   raw: Record<string, unknown>
 }
 
@@ -103,17 +105,27 @@ export function parseJsonReport(content: string, sourcePath: string, threshold =
   return parseJsonValue(JSON.parse(content) as unknown, sourcePath, threshold)
 }
 
-// 解析已反序列化的报告对象（后端 read_report_overview 已剥离逐帧匹配并直接返回对象，
-// 前端无需再 JSON.parse 大字符串）。
+// 解析已反序列化的报告对象。后端 read_report_overview 当前返回完整 JSON，
+// 包括逐帧匹配明细；调用方可以直接传入该对象，避免再次 JSON.parse。
 export function parseJsonValue(data: unknown, sourcePath: string, threshold = 0.65): BatchReport {
   const record = asRecord(data)
+  const reportVersions: ReportVersions = {
+    reportSchemaVersion: versionValue(record.report_schema_version),
+    containmentScoringVersion: versionValue(record.containment_scoring_version),
+  }
   const rawPairs = Array.isArray(record.video_pairs)
     ? record.video_pairs
     : record.video_a && record.video_b
       ? [record]
       : []
   const reportTimestamp = textValue(record.timestamp)
-  const pairs = dedupePairs(rawPairs.map((item, index) => normalizePair(asRecord(item), index, reportTimestamp, threshold)))
+  const pairs = dedupePairs(rawPairs.map((item, index) => normalizePair(
+    asRecord(item),
+    index,
+    reportTimestamp,
+    threshold,
+    reportVersions,
+  )))
   const warnings = Array.isArray(record.warnings)
     ? record.warnings.map((item) => String(item))
     : []
@@ -130,7 +142,10 @@ export function parseJsonValue(data: unknown, sourcePath: string, threshold = 0.
 
 export function parseCsvReport(content: string, sourcePath: string, threshold = 0.65): BatchReport {
   const rows = parseCsv(content)
-  const pairs = dedupePairs(rows.map((row, index) => normalizePair(row, index, '', threshold)))
+  const pairs = dedupePairs(rows.map((row, index) => normalizePair(row, index, '', threshold, {
+    reportSchemaVersion: null,
+    containmentScoringVersion: null,
+  })))
   return {
     timestamp: '',
     warnings: [],
@@ -238,6 +253,7 @@ function normalizePair(
   index: number,
   reportTimestamp: string,
   threshold: number,
+  inheritedVersions: ReportVersions,
 ): ReportPair {
   const videoAPath = textValue(record.video_a_path) || textValue(record.video_a)
   const videoBPath = textValue(record.video_b_path) || textValue(record.video_b)
@@ -253,9 +269,18 @@ function normalizePair(
   const totalFramesB = numberValue(record.total_frames_b) ?? 0
   const durationA = numberValue(record.duration_a) ?? 0
   const durationB = numberValue(record.duration_b) ?? 0
-  const reportedRelation = textValue(record.relation) || 'unknown'
+  const reportSchemaVersion = versionValue(record.report_schema_version) ?? inheritedVersions.reportSchemaVersion
+  const containmentScoringVersion = versionValue(record.containment_scoring_version)
+    ?? inheritedVersions.containmentScoringVersion
+  // Keep the distinction between an absent/blank relation and an explicit
+  // backend label such as "unknown". Modern reports treat every non-blank
+  // backend label as authoritative; legacy reports retain their historical
+  // derivation behavior below.
+  const reportedRelationValue = textValue(record.relation).trim()
+  const reportedRelation = reportedRelationValue || 'unknown'
   const relation = normalizeReportedRelation(
     reportedRelation,
+    reportedRelationValue.length > 0,
     aInB,
     bInA,
     threshold,
@@ -263,6 +288,7 @@ function normalizePair(
     totalFramesB,
     durationA,
     durationB,
+    reportSchemaVersion,
   )
 
   return {
@@ -288,7 +314,9 @@ function normalizePair(
     totalFramesB,
     durationA,
     durationB,
-    raw: compactRawPair(record),
+    reportSchemaVersion,
+    containmentScoringVersion,
+    raw: compactRawPair(record, { reportSchemaVersion, containmentScoringVersion }),
   }
 }
 
@@ -436,6 +464,11 @@ function numberValue(value: unknown) {
   return Number.isFinite(numeric) ? numeric : null
 }
 
+function versionValue(value: unknown) {
+  const numeric = numberValue(value)
+  return numeric === null ? null : Math.trunc(numeric)
+}
+
 function normalizedRatio(value: unknown) {
   const numeric = numberValue(value)
   if (numeric === null) return null
@@ -449,6 +482,7 @@ function normalizedRatio(value: unknown) {
 
 function normalizeReportedRelation(
   reported: string,
+  hasReportedRelation: boolean,
   aInB: number | null,
   bInA: number | null,
   threshold: number,
@@ -456,8 +490,16 @@ function normalizeReportedRelation(
   totalFramesB: number,
   durationA: number,
   durationB: number,
+  reportSchemaVersion: number | null,
 ) {
   if (reported === 'identical_file' || reported === 'identical') return reported
+  // Versioned reports are authoritative: their relation was calculated by the
+  // matching pipeline that produced the report. Keep any non-empty backend
+  // label, including labels introduced by a future schema version, instead of
+  // applying the desktop's legacy thresholds to newer scoring semantics.
+  if (reportSchemaVersion !== null && reportSchemaVersion >= 2 && hasReportedRelation) {
+    return reported
+  }
   if (aInB === null || bInA === null) return reported
 
   const derived = determineRelation(
@@ -482,7 +524,12 @@ function normalizeReportedRelation(
   return reported === 'unknown' ? derived : reported
 }
 
-function compactRawPair(record: Record<string, unknown>) {
+interface ReportVersions {
+  reportSchemaVersion: number | null
+  containmentScoringVersion: number | null
+}
+
+function compactRawPair(record: Record<string, unknown>, versions: ReportVersions) {
   const keys = [
     'analysis_mode',
     'duplicate_group_paths',
@@ -495,7 +542,14 @@ function compactRawPair(record: Record<string, unknown>) {
     'preprocess_config',
     'match_threshold',
   ]
-  return Object.fromEntries(keys.filter((key) => key in record).map((key) => [key, record[key]]))
+  const compact = Object.fromEntries(keys.filter((key) => key in record).map((key) => [key, record[key]]))
+  if (versions.reportSchemaVersion !== null) {
+    compact.report_schema_version = versions.reportSchemaVersion
+  }
+  if (versions.containmentScoringVersion !== null) {
+    compact.containment_scoring_version = versions.containmentScoringVersion
+  }
+  return compact
 }
 
 function firstNumber(record: Record<string, unknown>, keys: string[]) {
