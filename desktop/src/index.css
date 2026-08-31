@@ -6134,9 +6134,10 @@ select {
 .settings-tab-panel {
   display: grid;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* Save feedback is absolutely positioned; a third row reserves an empty gap. */
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
-  padding: 14px;
+  padding: 14px 14px 4px;
   overflow: hidden;
 }
 
@@ -12364,6 +12365,7 @@ select {
 .settings-shell.route-fill {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
+  row-gap: 1px;
   overflow: hidden;
 }
 
@@ -12387,7 +12389,7 @@ select {
 
 .settings-tab-content {
   min-height: 0;
-  padding-bottom: 16px;
+  padding-bottom: 4px;
   overflow-x: hidden;
   overflow-y: auto;
 }
