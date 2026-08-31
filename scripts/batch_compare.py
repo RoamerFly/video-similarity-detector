@@ -47,6 +47,7 @@ from video_sim.recognition_contract import (
     FEATURE_EXTRACTOR_ID,
     FRAME_CACHE_SCHEMA_VERSION as CONTRACT_FRAME_CACHE_SCHEMA_VERSION,
     REPORT_SCHEMA_VERSION,
+    artifact_identity,
     feature_cache_identity,
     is_current_report_pair,
     pair_parameters,
@@ -849,8 +850,8 @@ def resume_state_path(report_dir: Path, input_dir: Path, signature: dict) -> Pat
     return report_dir / ".resume" / f"analysis_{directory_name}_{signature_hash}.state.json"
 
 
-def load_resume_state(state_path: Path, signature: dict) -> dict:
-    incremental_pairs = load_incremental_resume_pairs(state_path, signature)
+def load_resume_state(state_path: Path, signature: dict, metrics=None) -> dict:
+    incremental_pairs = load_incremental_resume_pairs(state_path, signature, metrics=metrics)
     if incremental_pairs:
         return {"signature": signature, "pairs": incremental_pairs}
 
@@ -899,8 +900,8 @@ def load_resume_state(state_path: Path, signature: dict) -> dict:
     return state
 
 
-def load_incremental_resume_pairs(state_path: Path, signature: dict) -> dict:
-    pairs = load_resume_sqlite(state_path, signature)
+def load_incremental_resume_pairs(state_path: Path, signature: dict, metrics=None) -> dict:
+    pairs = load_resume_sqlite(state_path, signature, metrics=metrics)
     pairs.update(load_legacy_resume_pair_files(state_path, signature))
     return pairs
 
@@ -917,30 +918,47 @@ def _current_resume_pairs(pairs: object) -> dict:
     if not isinstance(pairs, dict):
         return {}
     return {
-        key: pair
+        key: _public_pair_payload(pair)
         for key, pair in pairs.items()
         if isinstance(key, str) and is_current_report_pair(pair)
     }
 
 
-def load_resume_sqlite(state_path: Path, signature: dict) -> dict:
+def _public_pair_payload(payload: object) -> dict:
+    """Copy a pair result while removing fields owned by the scheduler.
+
+    ``report_ordinal`` identifies a pair's position in one invocation's
+    candidate list.  It is therefore not stable resume/report data: inserting
+    a candidate before an existing pair changes it.  Keep the scheduler key
+    in ``result_by_ordinal`` and the ``PairWorkItem`` instead of persisting it
+    in a pair payload.  Copying also prevents sanitizing a loaded checkpoint
+    from mutating the object returned by a resume store.
+    """
+
+    if not isinstance(payload, dict):
+        return {}
+    public_payload = dict(payload)
+    public_payload.pop("report_ordinal", None)
+    return public_payload
+
+
+def load_resume_sqlite(state_path: Path, signature: dict, metrics=None) -> dict:
     database_path = resume_pair_database_path(state_path, signature)
     if not database_path.exists():
         return {}
     try:
-        with sqlite3.connect(database_path, timeout=30) as connection:
-            rows = connection.execute("SELECT pair_key, pair_json FROM completed_pairs").fetchall()
-    except (sqlite3.Error, OSError):
-        return {}
+        from video_sim.resume_store import load_resume_pairs_fetchmany
 
-    pairs = {}
-    for key, pair_json in rows:
-        try:
-            pair = json.loads(pair_json)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if isinstance(key, str) and isinstance(pair, dict):
-            pairs[key] = pair
+        diagnostics: dict[str, int] = {}
+        pairs = load_resume_pairs_fetchmany(
+            database_path,
+            diagnostics=diagnostics,
+        )
+        if metrics is not None:
+            metrics.count("resume_read_batches", diagnostics.get("read_batches", 0))
+            metrics.count("resume_read_rows", diagnostics.get("read_rows", 0))
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return {}
     return _current_resume_pairs(pairs)
 
 
@@ -993,7 +1011,14 @@ def save_resume_pairs(
     database_path = resume_pair_database_path(state_path, signature)
     database_path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
-        (key, json.dumps(pair, ensure_ascii=False, separators=(",", ":")))
+        (
+            key,
+            json.dumps(
+                _public_pair_payload(pair),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
         for key, pair in pairs.items()
     ]
     last_error: Exception | None = None
@@ -1020,11 +1045,101 @@ def save_resume_pairs(
     raise OSError(f"SQLite resume checkpoint is unavailable: {last_error}")
 
 
+def checkpoint_resume_pair(
+    writer,
+    state_path: Path,
+    signature: dict,
+    key: str,
+    payload: dict,
+) -> None:
+    """Persist one pair, retaining the legacy fallback when writer setup fails.
+
+    The long-lived writer is an optimization.  If its initialization exhausts
+    retries, each pair must still use the legacy one-shot writer so a later
+    database recovery can checkpoint subsequent work.  Persistence failures
+    remain warnings and never turn an otherwise successful comparison into a
+    pair failure.
+    """
+
+    public_payload = _public_pair_payload(payload)
+    try:
+        if writer is None:
+            save_resume_pair(state_path, signature, key, public_payload)
+        else:
+            writer.write_pair(key, public_payload)
+    except (OSError, sqlite3.Error) as checkpoint_error:
+        log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
+    except Exception as checkpoint_error:
+        # Preserve the previous writer boundary for unexpected adapter errors.
+        log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
+
+
+def create_resume_sqlite_writer(database_path: Path):
+    """Create the main-thread checkpoint writer with legacy retry semantics."""
+
+    from video_sim.resume_store import ResumeSQLiteWriter
+
+    last_error: Exception | None = None
+    for attempt in range(8):
+        try:
+            return ResumeSQLiteWriter(database_path)
+        except (sqlite3.Error, OSError) as exc:
+            last_error = exc
+            if attempt >= 7:
+                break
+            time.sleep(0.12 * (attempt + 1))
+    raise OSError(f"SQLite resume checkpoint writer unavailable: {last_error}")
+
+
+def resolve_pair_schedule_window(value: object = None) -> int:
+    """Parse the bounded locality window without silently truncating values."""
+
+    raw = os.environ.get("VIDEO_SIM_PAIR_SCHEDULE_WINDOW", "64") if value is None else value
+    text = str(raw).strip()
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("pair schedule window must be a positive integer") from exc
+    if str(parsed) != text or parsed < 1:
+        raise ValueError("pair schedule window must be a positive integer")
+    return parsed
+
+
 ACTIVE_TASK_MANIFEST_PATH: Path | None = None
 ACTIVE_TASK_CACHE_DIR: Path | None = None
 ACTIVE_TASK_MANIFEST: dict = {}
 TASK_MANIFEST_LOCK = RLock()
 TARGET_TASK_STAGE = ""
+ACTIVE_RESUME_WRITER = None
+
+
+def close_active_resume_writer() -> None:
+    """Close the process-owned resume writer after cancel/error cleanup."""
+
+    global ACTIVE_RESUME_WRITER
+    writer = ACTIVE_RESUME_WRITER
+    ACTIVE_RESUME_WRITER = None
+    if writer is not None:
+        try:
+            writer.close()
+        except (OSError, RuntimeError, sqlite3.Error):
+            pass
+
+
+def ordered_report_pairs(original_work_items, result_by_ordinal):
+    """Materialize successful pair rows in the original candidate order.
+
+    Locality scheduling and concurrent completion are execution details.  The
+    report contract remains candidate order, with failed or absent ordinals
+    omitted.  Keeping this tiny pure helper separate also makes that contract
+    testable without constructing a full batch command.
+    """
+
+    return [
+        _public_pair_payload(result_by_ordinal[item.report_ordinal])
+        for item in original_work_items
+        if item.report_ordinal in result_by_ordinal
+    ]
 
 
 def task_state_path(cache_dir: Path, task_id: str) -> Path:
@@ -1387,7 +1502,7 @@ def ensure_video_indexed(
     )
     from video_sim.frame_sampler import DynamicFrameSampler
 
-    cache_path = FrameEmbeddingCache.get_cache_path(
+    cache_path = FrameEmbeddingCache.resolve_cache_path(
         video_path,
         cache_dir,
         preprocess_config,
@@ -1483,9 +1598,66 @@ def ensure_video_indexed(
         )
     if metrics is not None:
         metrics.count("embeddings", len(cache.embeddings))
+    # Make the candidate sidecar available to direct callers as soon as the
+    # full cache is written.  Sidecar failures never invalidate the full
+    # feature cache; the next audit will rebuild it.
+    try:
+        candidate_summary, _ = build_and_save_candidate_summary(
+            cache,
+            FrameEmbeddingCache.resolve_cache_path(
+                video_path,
+                cache_dir,
+                preprocess_config,
+                skip_threshold=skip_threshold,
+                max_gap_sec=max_gap_sec,
+                frame_step=frame_step,
+            ),
+            metrics=metrics,
+        )
+        # Reuse the in-memory summary in the caller; rebuilding here would
+        # duplicate sketch work and central-directory metadata reads.
+        cache._candidate_summary = candidate_summary
+    except Exception as summary_error:
+        log(f"  候选摘要写入失败(Candidate summary write failed): {summary_error}")
+        if metrics is not None:
+            metrics.count("candidate_summary_load_errors")
     log(f"  已保存缓存(Saved cache): {cache_path}")
 
     return cache, embedder, False
+
+
+def build_and_save_candidate_summary(cache, cache_path: Path, metrics=None):
+    """Build one production summary and persist it without risking the cache."""
+
+    from video_sim.candidate_selector import build_candidate_summary
+    from video_sim.candidate_summary_store import save_candidate_summary
+
+    summary = build_candidate_summary(
+        cache,
+        representatives_per_video=64,
+        max_index_frames_per_video=1024,
+        window_seconds=30.0,
+        max_windows_per_video=96,
+        include_baseline=False,
+    )
+    try:
+        save_candidate_summary(
+            summary,
+            cache_path,
+            cache_metadata=cache.metadata,
+            artifact_identity_callback=(
+                (lambda: metrics.count("cache_artifact_manifest_reads"))
+                if metrics is not None else None
+            ),
+        )
+    except Exception as summary_error:
+        log(f"  候选摘要写入失败(Candidate summary write failed): {summary_error}")
+        if metrics is not None:
+            metrics.count("candidate_summary_load_errors")
+        return summary, False
+    if metrics is not None:
+        metrics.count("candidate_summary_rebuilds")
+    return summary, True
 
 
 def main():
@@ -1886,7 +2058,9 @@ def main():
     emit_progress("model", 0, max(1, len(videos)), "检查可复用视频特征缓存")
     from video_sim.embedder import FrameEmbeddingCache, embedding_runtime_fingerprint
 
-    # Candidate summaries are bounded and can outlive the full cache objects.
+    # Candidate summaries can outlive the full cache objects.  Their embedding
+    # sketches are per-video bounded; timestamps and auxiliary signatures are
+    # retained for every frame (overall O(N) sidecar storage).
     # Exact caches are loaded later by ExactResourcePool only for active pairs.
     candidate_summaries = {}
     cache_artifacts = {}
@@ -1897,40 +2071,94 @@ def main():
     cache_hits = 0
     cache_misses = []
     force_feature_redo = args.target_stage == "features" and args.redo_stage
+    from video_sim.candidate_summary_store import (
+        candidate_summary_path,
+        try_load_candidate_summary,
+    )
     for cache_index, video_path in enumerate(videos, start=1):
         raise_if_cancelled(cancel_file)
-        cache = None if args.force or force_feature_redo else FrameEmbeddingCache.load_valid(
+        cache_path = FrameEmbeddingCache.resolve_cache_path(
             video_path,
             cache_dir,
             preprocess_config,
             skip_threshold=args.skip_threshold,
             max_gap_sec=args.max_gap_sec,
             frame_step=args.frame_step,
+        )
+        expected_metadata = FrameEmbeddingCache.expected_metadata(
+            video_path,
+            skip_threshold=args.skip_threshold,
+            max_gap_sec=args.max_gap_sec,
+            frame_step=args.frame_step,
+            preprocess_config=preprocess_config,
             embedding_runtime=embedding_runtime_fingerprint(resolved_device),
         )
-        if cache is None:
-            cache_misses.append(video_path)
-        else:
-            from video_sim.candidate_selector import build_candidate_summary
-            candidate_summaries[video_path] = build_candidate_summary(
-                cache,
-                representatives_per_video=64,
-                max_index_frames_per_video=1024,
+        summary = None
+        miss_reason = "forced rebuild"
+        if not (args.force or force_feature_redo) and cache_path.exists():
+            sidecar = candidate_summary_path(cache_path)
+            current_artifact_identity = None
+            if sidecar.exists():
+                if metrics is not None:
+                    metrics.count("cache_artifact_manifest_reads")
+                current_artifact_identity = artifact_identity(cache_path)
+            summary, miss_reason = try_load_candidate_summary(
+                sidecar,
+                expected_cache_metadata=expected_metadata,
+                source_cache_path=cache_path,
+                source_artifact_identity=current_artifact_identity,
             )
-            cache_artifacts[video_path] = FrameEmbeddingCache.get_cache_path(
-                video_path,
-                cache_dir,
-                preprocess_config,
-                skip_threshold=args.skip_threshold,
-                max_gap_sec=args.max_gap_sec,
-                frame_step=args.frame_step,
-            )
-            cache_identities[video_path] = feature_cache_identity(
-                cache,
-                cache_artifacts[video_path],
-            )
-            del cache
-            cache_hits += 1
+            if summary is not None:
+                candidate_summaries[video_path] = summary
+                cache_artifacts[video_path] = cache_path
+                cache_identities[video_path] = dict(summary.feature_cache_identity or {})
+                cache_hits += 1
+                if metrics is not None:
+                    metrics.count("candidate_summary_hits")
+            elif sidecar.exists() and metrics is not None:
+                metrics.count("candidate_summary_load_errors")
+
+        if summary is None:
+            if metrics is not None:
+                metrics.count("candidate_summary_misses")
+            if miss_reason and miss_reason != "forced rebuild":
+                log(f"  候选摘要未命中(Candidate summary miss): {video_path.name}; reason={miss_reason}")
+            if not (args.force or force_feature_redo) and cache_path.exists():
+                # A sidecar miss falls back exactly once to the existing full
+                # cache validator.  It may then be rebuilt without touching
+                # or deleting the frame cache because of sidecar errors.
+                if metrics is not None:
+                    metrics.count("cache_audit_full_npz_loads")
+                    try:
+                        metrics.count("cache_audit_full_npz_bytes", int(cache_path.stat().st_size))
+                    except OSError:
+                        pass
+                cache = FrameEmbeddingCache.load_valid(
+                    video_path,
+                    cache_dir,
+                    preprocess_config,
+                    skip_threshold=args.skip_threshold,
+                    max_gap_sec=args.max_gap_sec,
+                    frame_step=args.frame_step,
+                    embedding_runtime=embedding_runtime_fingerprint(resolved_device),
+                )
+            else:
+                cache = None
+            if cache is None:
+                cache_misses.append(video_path)
+            else:
+                summary, summary_saved = build_and_save_candidate_summary(
+                    cache, cache_path, metrics=metrics
+                )
+                candidate_summaries[video_path] = summary
+                cache_artifacts[video_path] = cache_path
+                cache_identities[video_path] = dict(summary.feature_cache_identity or {})
+                if not cache_identities[video_path]:
+                    if metrics is not None:
+                        metrics.count("cache_artifact_manifest_reads")
+                    cache_identities[video_path] = feature_cache_identity(cache, cache_path)
+                cache_hits += 1
+                del cache
         emit_progress(
             "model",
             cache_index,
@@ -1940,8 +2168,27 @@ def main():
             max(1, len(videos)),
             f"可复用 {cache_hits} 个，需处理 {len(cache_misses)} 个",
         )
-    update_task_manifest(reusedVideoCaches=cache_hits)
-    log(f"缓存审计(Cache audit): {cache_hits} 个可复用，{len(cache_misses)} 个需重新提取。")
+    if metrics is not None:
+        sidecar_bytes = 0
+        for summary_path in (candidate_summary_path(path) for path in cache_artifacts.values()):
+            try:
+                sidecar_bytes += int(summary_path.stat().st_size)
+            except OSError:
+                pass
+        metrics.set_count("candidate_summary_disk_bytes", sidecar_bytes)
+    summary_hits = metrics.counters.get("candidate_summary_hits", 0)
+    summary_misses = metrics.counters.get("candidate_summary_misses", 0)
+    summary_rebuilds = metrics.counters.get("candidate_summary_rebuilds", 0)
+    update_task_manifest(
+        reusedVideoCaches=cache_hits,
+        candidateSummaryHits=summary_hits,
+        candidateSummaryMisses=summary_misses,
+        candidateSummaryRebuilds=summary_rebuilds,
+    )
+    log(
+        f"缓存审计(Cache audit): {cache_hits} 个可复用，{len(cache_misses)} 个需重新提取；"
+        f"摘要命中 {summary_hits}，缺失/失效 {summary_misses}，重建 {summary_rebuilds}。"
+    )
     if finish_stage_only("cache"):
         return
 
@@ -2055,13 +2302,7 @@ def main():
                 on_embed_progress,
                 metrics,
             )
-            from video_sim.candidate_selector import build_candidate_summary
-            candidate_summaries[video_path] = build_candidate_summary(
-                cache,
-                representatives_per_video=64,
-                max_index_frames_per_video=1024,
-            )
-            cache_artifacts[video_path] = FrameEmbeddingCache.get_cache_path(
+            cache_artifacts[video_path] = FrameEmbeddingCache.resolve_cache_path(
                 video_path,
                 cache_dir,
                 preprocess_config,
@@ -2069,10 +2310,21 @@ def main():
                 max_gap_sec=args.max_gap_sec,
                 frame_step=args.frame_step,
             )
-            cache_identities[video_path] = feature_cache_identity(
-                cache,
-                cache_artifacts[video_path],
+            candidate_summaries[video_path] = getattr(cache, "_candidate_summary", None)
+            if candidate_summaries[video_path] is None:
+                candidate_summaries[video_path], _ = build_and_save_candidate_summary(
+                    cache, cache_artifacts[video_path], metrics=metrics
+                )
+            cache_identities[video_path] = dict(
+                candidate_summaries[video_path].feature_cache_identity or {}
             )
+            if not cache_identities[video_path]:
+                if metrics is not None:
+                    metrics.count("cache_artifact_manifest_reads")
+                cache_identities[video_path] = feature_cache_identity(
+                    cache,
+                    cache_artifacts[video_path],
+                )
             del cache
             gc.collect()
             if cache_hit:
@@ -2080,16 +2332,8 @@ def main():
             else:
                 cache_rebuilds += 1
                 emit_sample_log(True)
-                cache_path = FrameEmbeddingCache.get_cache_path(
-                    video_path,
-                    cache_dir,
-                    preprocess_config,
-                    skip_threshold=args.skip_threshold,
-                    max_gap_sec=args.max_gap_sec,
-                    frame_step=args.frame_step,
-                )
                 record_task_cache_artifact(
-                    cache_path,
+                    cache_artifacts[video_path],
                     f"视频 {video_path.name} 的抽帧与特征缓存；同配置增量任务可以复用",
                 )
             index_units_done += video_units
@@ -2206,7 +2450,7 @@ def main():
     state_path = task_state_path(cache_dir, task_id)
     if args.target_stage == "compare" and args.redo_stage:
         clear_resume_pairs(state_path, resume_signature)
-    resume_state = load_resume_state(state_path, resume_signature)
+    resume_state = load_resume_state(state_path, resume_signature, metrics=metrics)
     resumed_pair_count = len(resume_state.get("pairs", {}))
     if resumed_pair_count:
         log(f"断点续跑(Resume checkpoint): {resumed_pair_count} 个已完成视频对可用")
@@ -2275,10 +2519,19 @@ def main():
             + summary.optimized_source_representatives.nbytes
             + summary.optimized_index_embeddings.nbytes
             + summary.auxiliary_signatures.nbytes
+            + (summary.baseline_source_representatives.nbytes if summary.baseline_source_representatives is not None else 0)
+            + (summary.baseline_index_embeddings.nbytes if summary.baseline_index_embeddings is not None else 0)
         )
         for summary in candidate_summaries.values()
     )
     metrics.set_count("candidate_summary_bytes", summary_bytes)
+    sidecar_bytes = 0
+    for summary_path in (candidate_summary_path(path) for path in cache_artifacts.values()):
+        try:
+            sidecar_bytes += int(summary_path.stat().st_size)
+        except OSError:
+            pass
+    metrics.set_count("candidate_summary_disk_bytes", sidecar_bytes)
     # Exact comparison will reload full caches through the pool. Drop all
     # candidate-only arrays before scheduling those leases; keep only scalar
     # frame counts/durations and artifact paths for progress/reporting.
@@ -2287,6 +2540,10 @@ def main():
         summary.optimized_source_representatives = np.zeros((0, 0), dtype="float32")
         summary.optimized_index_embeddings = np.zeros((0, 0), dtype="float32")
         summary.auxiliary_signatures = np.zeros((0,), dtype="uint64")
+        if summary.baseline_source_representatives is not None:
+            summary.baseline_source_representatives = np.zeros((0, 0), dtype="float32")
+        if summary.baseline_index_embeddings is not None:
+            summary.baseline_index_embeddings = np.zeros((0, 0), dtype="float32")
     gc.collect()
     video_pairs = candidate_selection.pairs
     total_pairs = len(video_pairs)
@@ -2382,6 +2639,113 @@ def main():
     exact_pool = ExactResourcePool(
         max_resident_videos=max(2, compare_workers * 2, requested_pool_cap)
     )
+
+    from video_sim.pair_scheduler import (
+        PairWorkItem,
+        schedule_diagnostics,
+        schedule_pairs_for_locality,
+    )
+    original_work_items = [
+        PairWorkItem(
+            report_ordinal=ordinal,
+            video_a=video_a,
+            video_b=video_b,
+            key=production_pair_key(video_a, video_b),
+            units=pair_units[production_pair_key(video_a, video_b)],
+        )
+        for ordinal, (video_a, video_b) in enumerate(video_pairs)
+    ]
+    fresh_work_items = [
+        item for item in original_work_items
+        if item.key not in resumed_candidate_pairs
+    ]
+    try:
+        schedule_window = resolve_pair_schedule_window()
+    except ValueError as schedule_error:
+        log(f"警告(Warning): {schedule_error}; 使用默认候选窗口 64")
+        schedule_window = 64
+    scheduled_work_items = schedule_pairs_for_locality(
+        fresh_work_items,
+        window_size=schedule_window,
+        resident_capacity=exact_pool.max_resident_videos,
+    )
+    original_schedule_diag = schedule_diagnostics(
+        fresh_work_items,
+        fresh_work_items,
+        exact_pool.max_resident_videos,
+    )
+    scheduled_schedule_diag = schedule_diagnostics(
+        fresh_work_items,
+        scheduled_work_items,
+        exact_pool.max_resident_videos,
+    )
+    metrics.set_count("pair_schedule_window", schedule_window)
+    metrics.set_count("pair_schedule_pending_pairs", len(fresh_work_items))
+    for label, diagnostics in (
+        ("original", original_schedule_diag),
+        ("scheduled", scheduled_schedule_diag),
+    ):
+        for name, value in diagnostics.items():
+            metrics.set_count(f"pair_schedule_{label}_{name}", value)
+    log(
+        "候选调度诊断(Schedule diagnostics; predicted only): "
+        f"window={schedule_window}, pending={len(fresh_work_items)}, "
+        f"misses {original_schedule_diag['predicted_misses']}→{scheduled_schedule_diag['predicted_misses']}, "
+        f"hits {original_schedule_diag['predicted_hits']}→{scheduled_schedule_diag['predicted_hits']}, "
+        f"evictions {original_schedule_diag['predicted_evictions']}→{scheduled_schedule_diag['predicted_evictions']}"
+    )
+
+    global ACTIVE_RESUME_WRITER
+    resume_writer = None
+    try:
+        resume_writer = create_resume_sqlite_writer(
+            resume_pair_database_path(state_path, resume_signature)
+        )
+    except OSError as writer_error:
+        log(f"警告(Warning): 初始化 SQLite 断点写入器失败，将继续比较: {compact_error(writer_error)}")
+    ACTIVE_RESUME_WRITER = resume_writer
+
+    result_by_ordinal: dict[int, dict] = {}
+    for item in original_work_items:
+        cached_pair = resume_state.get("pairs", {}).get(item.key)
+        if cached_pair:
+            # A resume row is keyed by the symmetric production pair, while
+            # the report ordinal belongs to this run's candidate list.  Copy
+            # the payload so an old run's ordinal can never leak into the
+            # newly materialized report.
+            cached_pair = _public_pair_payload(cached_pair)
+            result_by_ordinal[item.report_ordinal] = cached_pair
+
+    def checkpoint_pair(item: PairWorkItem, payload: dict) -> None:
+        """Checkpoint from the main thread; persistence cannot fail a pair."""
+
+        public_payload = _public_pair_payload(payload)
+        resume_state.setdefault("pairs", {})[item.key] = public_payload
+        checkpoint_resume_pair(
+            resume_writer,
+            state_path,
+            resume_signature,
+            item.key,
+            public_payload,
+        )
+
+    def materialize_pair_result(item: PairWorkItem, payload) -> dict:
+        result, segments, windows_a_to_b, windows_b_to_a = payload
+        before = len(report_data.video_pairs)
+        report_data.add_pair_result(
+            result=result,
+            segments=[s.to_dict() for s in segments],
+            windows_a_to_b=[w.to_dict() for w in windows_a_to_b],
+            windows_b_to_a=[w.to_dict() for w in windows_b_to_a],
+        )
+        if len(report_data.video_pairs) <= before:
+            raise RuntimeError("reporter did not materialize a pair result")
+        pair_data = report_data.video_pairs.pop()
+        pair_data["preprocess_config"] = preprocess_config.to_dict()
+        pair_data["match_threshold"] = args.match_threshold
+        result_by_ordinal[item.report_ordinal] = pair_data
+        checkpoint_pair(item, pair_data)
+        return pair_data
 
     def compare_leased_pair(cache_a, index_a, cache_b, index_b, progress_callback):
         total_frames_a = max(1, len(cache_a.embeddings))
@@ -2499,27 +2863,8 @@ def main():
                     on_parallel_compare_progress,
                 )
 
-        def store_parallel_pair(current_pair_key: str, payload):
-            result, segments, windows_a_to_b, windows_b_to_a = payload
-            report_data.add_pair_result(
-                result=result,
-                segments=[s.to_dict() for s in segments],
-                windows_a_to_b=[w.to_dict() for w in windows_a_to_b],
-                windows_b_to_a=[w.to_dict() for w in windows_b_to_a],
-            )
-            if report_data.video_pairs:
-                report_data.video_pairs[-1]["preprocess_config"] = preprocess_config.to_dict()
-                report_data.video_pairs[-1]["match_threshold"] = args.match_threshold
-                resume_state.setdefault("pairs", {})[current_pair_key] = report_data.video_pairs[-1]
-                try:
-                    save_resume_pair(
-                        state_path,
-                        resume_signature,
-                        current_pair_key,
-                        report_data.video_pairs[-1],
-                    )
-                except OSError as checkpoint_error:
-                    log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
+        def store_parallel_pair(item: PairWorkItem, payload):
+            materialize_pair_result(item, payload)
 
         with ThreadPoolExecutor(
             max_workers=compare_workers,
@@ -2527,7 +2872,7 @@ def main():
             initargs=(compare_workers,),
         ) as executor:
             future_meta = {}
-            pair_iterator = iter(enumerate(video_pairs, start=1))
+            pair_iterator = iter(scheduled_work_items)
             pairs_exhausted = False
             max_in_flight = max(compare_workers, compare_workers * 4)
 
@@ -2535,18 +2880,15 @@ def main():
                 while not pairs_exhausted and len(future_meta) < max_in_flight:
                     raise_if_cancelled(cancel_file)
                     try:
-                        pair_index, (video_a, video_b) = next(pair_iterator)
+                        item = next(pair_iterator)
+                        pair_index = item.report_ordinal + 1
+                        video_a, video_b = item.video_a, item.video_b
                     except StopIteration:
                         pairs_exhausted = True
                         break
 
-                    current_pair_key = production_pair_key(video_a, video_b)
-                    current_pair_units = pair_units[current_pair_key]
-                    cached_pair = resume_state.get("pairs", {}).get(current_pair_key)
-                    if cached_pair:
-                        report_data.video_pairs.append(cached_pair)
-                        log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
-                        continue
+                    current_pair_key = item.key
+                    current_pair_units = item.units
 
                     pair_sub_label = f"当前比较：{video_a.name} ↔ {video_b.name}"
                     future = executor.submit(
@@ -2559,6 +2901,7 @@ def main():
                         pair_sub_label,
                     )
                     future_meta[future] = (
+                        item,
                         pair_index,
                         video_a,
                         video_b,
@@ -2575,11 +2918,11 @@ def main():
                     return_when=FIRST_COMPLETED,
                 )
                 for future in completed_futures:
-                    pair_index, video_a, video_b, current_pair_key, current_pair_units, pair_sub_label = future_meta.pop(future)
+                    item, pair_index, video_a, video_b, current_pair_key, current_pair_units, pair_sub_label = future_meta.pop(future)
                     try:
                         raise_if_cancelled(cancel_file)
                         result = future.result()
-                        store_parallel_pair(current_pair_key, result)
+                        store_parallel_pair(item, result)
                         with progress_lock:
                             in_flight_pair_units.pop(current_pair_key, None)
                             compare_units_done += current_pair_units
@@ -2632,12 +2975,14 @@ def main():
                             f"{pair_sub_label} · 比较失败",
                         )
 
-        video_pairs = []
+        scheduled_work_items = []
 
-    for pair_index, (video_a, video_b) in enumerate(video_pairs, start=1):
+    for item in scheduled_work_items:
+        pair_index = item.report_ordinal + 1
+        video_a, video_b = item.video_a, item.video_b
         raise_if_cancelled(cancel_file)
-        current_pair_key = production_pair_key(video_a, video_b)
-        current_pair_units = pair_units[current_pair_key]
+        current_pair_key = item.key
+        current_pair_units = item.units
         pair_sub_label = f"当前比较：{video_a.name} ↔ {video_b.name}"
         emit_progress(
             "compare",
@@ -2648,12 +2993,6 @@ def main():
             1,
             pair_sub_label,
         )
-        cached_pair = resume_state.get("pairs", {}).get(current_pair_key)
-        if cached_pair:
-            report_data.video_pairs.append(cached_pair)
-            log(f"  Resume pair {pair_index}/{total_pairs}: {video_a.name} / {video_b.name}")
-            continue
-
         try:
             total_frames_a = max(1, candidate_summaries[video_a].frame_count)
             total_frames_b = max(1, candidate_summaries[video_b].frame_count)
@@ -2689,26 +3028,7 @@ def main():
                     on_compare_progress,
                 )
 
-            # Add to report
-            report_data.add_pair_result(
-                result=result,
-                segments=[s.to_dict() for s in segments],
-                windows_a_to_b=[w.to_dict() for w in windows_a_to_b],
-                windows_b_to_a=[w.to_dict() for w in windows_b_to_a],
-            )
-            if report_data.video_pairs:
-                report_data.video_pairs[-1]["preprocess_config"] = preprocess_config.to_dict()
-                report_data.video_pairs[-1]["match_threshold"] = args.match_threshold
-                resume_state.setdefault("pairs", {})[current_pair_key] = report_data.video_pairs[-1]
-                try:
-                    save_resume_pair(
-                        state_path,
-                        resume_signature,
-                        current_pair_key,
-                        report_data.video_pairs[-1],
-                    )
-                except OSError as checkpoint_error:
-                    log(f"警告(Warning): 保存断点续跑检查点失败: {compact_error(checkpoint_error)}")
+            materialize_pair_result(item, (result, segments, windows_a_to_b, windows_b_to_a))
             compare_units_done += current_pair_units
             completed_pair_count += 1
             processed_pair_count = completed_pair_count + failed_pair_count
@@ -2758,6 +3078,26 @@ def main():
                 f"{pair_sub_label} · 比较失败",
             )
 
+    # Materialize report rows strictly in candidate order after all scheduled
+    # work has completed. Future completion order and locality scheduling
+    # cannot change JSON/CSV/HTML row order.
+    report_data.video_pairs = ordered_report_pairs(
+        original_work_items,
+        result_by_ordinal,
+    )
+    writer_diagnostics = resume_writer.diagnostics() if resume_writer is not None else {
+        "writer_commits": 0,
+        "writer_rows": 0,
+        "writer_attempts": 0,
+        "writer_retries": 0,
+        "connection_inits": 0,
+    }
+    for name, value in writer_diagnostics.items():
+        metrics.set_count(f"resume_writer_{name}", value)
+    for name, value in exact_pool.stats().items():
+        metrics.set_count(f"exact_pool_{name}", value)
+    close_active_resume_writer()
+    resume_writer = None
     emit_progress(
         "compare",
         compare_units_total,
@@ -2833,6 +3173,7 @@ if __name__ == "__main__":
     try:
         main()
     except AnalysisCancelled as exc:
+        close_active_resume_writer()
         active_stage = str(ACTIVE_TASK_MANIFEST.get("activeStage") or "")
         if active_stage:
             stage = next(
@@ -2849,6 +3190,7 @@ if __name__ == "__main__":
         log(str(exc))
         sys.exit(130)
     except Exception:
+        close_active_resume_writer()
         active_stage = str(ACTIVE_TASK_MANIFEST.get("activeStage") or "")
         if active_stage:
             stage = next(

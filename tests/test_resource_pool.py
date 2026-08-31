@@ -4,6 +4,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from video_sim.embedder import FrameEmbeddingCache
 from video_sim.indexer import build_frame_index
@@ -81,6 +82,103 @@ def test_pool_concurrent_same_item_loads_once(tmp_path: Path):
         assert all(executor.map(lambda _item: use_resource(), range(4)))
     assert calls == 1
     assert pool.stats()["hits"] >= 3
+    assert pool.stats()["successful_loads"] == 1
+    assert pool.stats()["failed_loads"] == 0
+
+
+def test_pool_counts_actual_successful_and_failed_loads(tmp_path: Path):
+    good_path = tmp_path / "a-good.npz"
+    bad_path = tmp_path / "z-bad.npz"
+    cache = _cache(good_path.with_suffix(".mp4"))
+
+    def loader(path):
+        if path == bad_path:
+            raise ValueError("broken cache")
+        return cache
+
+    pool = ExactResourcePool(cache_loader=loader)
+    with pool.acquire(good_path):
+        pass
+    with pytest.raises(ValueError, match="broken cache"):
+        with pool.acquire(bad_path):
+            pass
+
+    stats = pool.stats()
+    assert stats["successful_loads"] == 1
+    assert stats["failed_loads"] == 1
+    assert stats["misses"] == 2
+
+
+def test_pool_counts_index_builder_failure_as_failed_load(tmp_path: Path):
+    path = tmp_path / "index-fails.npz"
+    cache = _cache(path.with_suffix(".mp4"))
+
+    def bad_index(_cache_value):
+        raise ValueError("bad index")
+
+    pool = ExactResourcePool(
+        cache_loader=lambda _path: cache,
+        index_builder=bad_index,
+    )
+
+    with pytest.raises(ValueError, match="bad index"):
+        with pool.acquire(path):
+            pass
+
+    stats = pool.stats()
+    assert stats["successful_loads"] == 0
+    assert stats["failed_loads"] == 1
+
+
+def test_pool_pair_counts_each_actual_endpoint_load_and_failure(tmp_path: Path):
+    good_path = tmp_path / "a-good.npz"
+    bad_path = tmp_path / "z-bad.npz"
+    cache = _cache(good_path.with_suffix(".mp4"))
+
+    def loader(path):
+        if path == bad_path:
+            raise ValueError("broken pair cache")
+        return cache
+
+    pool = ExactResourcePool(cache_loader=loader)
+    with pytest.raises(ValueError, match="broken pair cache"):
+        with pool.acquire_pair(good_path, bad_path):
+            pass
+
+    stats = pool.stats()
+    assert stats["successful_loads"] == 1
+    assert stats["failed_loads"] == 1
+    assert stats["resident_videos"] == 1
+
+
+def test_pool_body_exception_is_not_counted_as_failed_load(tmp_path: Path):
+    path = tmp_path / "one.npz"
+    cache = _cache(path.with_suffix(".mp4"))
+    pool = ExactResourcePool(cache_loader=lambda _path: cache)
+
+    with pytest.raises(RuntimeError, match="body failure"):
+        with pool.acquire(path):
+            raise RuntimeError("body failure")
+
+    assert pool.stats()["successful_loads"] == 1
+    assert pool.stats()["failed_loads"] == 0
+
+
+def test_pool_pair_body_exception_is_not_counted_as_failed_load(tmp_path: Path):
+    paths = [tmp_path / f"{name}.npz" for name in "ab"]
+    caches = {path: _cache(path.with_suffix(".mp4")) for path in paths}
+    pool = ExactResourcePool(
+        max_resident_videos=2,
+        cache_loader=lambda path: caches[path],
+    )
+
+    with pytest.raises(RuntimeError, match="pair body failure"):
+        with pool.acquire_pair(paths[0], paths[1]):
+            raise RuntimeError("pair body failure")
+
+    stats = pool.stats()
+    assert stats["successful_loads"] == 2
+    assert stats["failed_loads"] == 0
 
 
 def test_pool_pair_reservation_avoids_cross_pair_deadlock(tmp_path: Path):

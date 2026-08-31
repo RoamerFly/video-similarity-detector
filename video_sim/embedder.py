@@ -616,6 +616,60 @@ class FrameEmbeddingCache:
         return Path(cache_dir) / "embeddings" / f"{Path(video_path).stem}{preprocess_config.cache_suffix}.npz"
 
     @classmethod
+    def resolve_cache_path(
+        cls,
+        video_path: Union[str, Path],
+        cache_dir: Union[str, Path] = "data",
+        preprocess_config: Optional["PreprocessConfig"] = None,
+        skip_threshold: Optional[float] = None,
+        max_gap_sec: Optional[float] = None,
+        frame_step: Optional[int] = None,
+    ) -> Path:
+        """Resolve the actual numbered or legacy cache path without NPZ I/O."""
+
+        path = cls.get_cache_path(
+            video_path,
+            cache_dir,
+            preprocess_config,
+            skip_threshold=skip_threshold,
+            max_gap_sec=max_gap_sec,
+            frame_step=frame_step,
+        )
+        if path.exists():
+            return path
+        legacy = _find_matching_legacy_profile_cache(
+            path,
+            preprocess_config or PreprocessConfig(),
+            skip_threshold,
+            max_gap_sec,
+            frame_step,
+        )
+        return legacy or path
+
+    @classmethod
+    def expected_metadata(
+        cls,
+        video_path: Union[str, Path],
+        skip_threshold: Optional[float],
+        max_gap_sec: Optional[float],
+        frame_step: Optional[int] = None,
+        preprocess_config: Optional["PreprocessConfig"] = None,
+        embedding_model: Optional[str] = None,
+        embedding_runtime: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Build expected metadata for audits that have not loaded the NPZ."""
+
+        return cls.build_metadata(
+            video_path,
+            skip_threshold=skip_threshold,
+            max_gap_sec=max_gap_sec,
+            frame_step=frame_step,
+            preprocess_config=preprocess_config,
+            embedding_model=embedding_model,
+            embedding_runtime=embedding_runtime,
+        )
+
+    @classmethod
     def build_metadata(
         cls,
         video_path: Union[str, Path],
@@ -676,7 +730,7 @@ class FrameEmbeddingCache:
         embedding_runtime: Optional[str] = None,
     ) -> Optional["FrameEmbeddingCache"]:
         """Load a cache only when the file and all analysis parameters match."""
-        cache_path = cls.get_cache_path(
+        cache_path = cls.resolve_cache_path(
             video_path,
             cache_dir,
             preprocess_config,
@@ -684,11 +738,6 @@ class FrameEmbeddingCache:
             max_gap_sec=max_gap_sec,
             frame_step=frame_step,
         )
-        if not cache_path.exists():
-            cache_path = _find_matching_legacy_profile_cache(
-                cache_path, preprocess_config,
-                skip_threshold, max_gap_sec, frame_step,
-            ) or cache_path
         if not cache_path.exists():
             return None
 

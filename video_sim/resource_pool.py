@@ -71,6 +71,12 @@ class ExactResourcePool:
         self._entries: dict[str, _PoolEntry] = {}
         self._hits = 0
         self._misses = 0
+        # These counters describe actual loader attempts.  ``misses`` keeps
+        # its existing admission semantics (a slot is reserved before I/O),
+        # while successful/failed loads are updated only after the loader and
+        # index construction path really succeeds or raises.
+        self._successful_loads = 0
+        self._failed_loads = 0
         self._evictions = 0
         self._peak_resident_videos = 0
         self._peak_estimated_bytes = 0
@@ -299,11 +305,17 @@ class ExactResourcePool:
                 break
 
         try:
-            cache = self.cache_loader(Path(path))
-            resource = ExactResource(cache=cache, frame_index=self.index_builder(cache))
+            try:
+                cache = self.cache_loader(Path(path))
+                resource = ExactResource(cache=cache, frame_index=self.index_builder(cache))
+            except BaseException:
+                with self._condition:
+                    self._failed_loads += 1
+                raise
             estimated_bytes = self._estimate_resource_bytes(resource)
             with self._condition:
                 soft_overage = self._publish_loaded_locked(key, resource, estimated_bytes)
+                self._successful_loads += 1
                 if soft_overage:
                     self._oversized_pair_or_resource += 1
             return resource
@@ -380,8 +392,13 @@ class ExactResourcePool:
             pair_soft_overage = False
             for key in new_keys:
                 path = path_by_key[key]
-                cache = self.cache_loader(path)
-                resource = ExactResource(cache=cache, frame_index=self.index_builder(cache))
+                try:
+                    cache = self.cache_loader(path)
+                    resource = ExactResource(cache=cache, frame_index=self.index_builder(cache))
+                except BaseException:
+                    with self._condition:
+                        self._failed_loads += 1
+                    raise
                 estimated_bytes = self._estimate_resource_bytes(resource)
                 with self._condition:
                     pair_soft_overage = (
@@ -394,6 +411,7 @@ class ExactResourcePool:
                         )
                         or pair_soft_overage
                     )
+                    self._successful_loads += 1
                 resources_by_key[key] = resource
             for key in unique_keys:
                 if key not in resources_by_key:
@@ -446,6 +464,8 @@ class ExactResourcePool:
             return {
                 "hits": int(self._hits),
                 "misses": int(self._misses),
+                "successful_loads": int(self._successful_loads),
+                "failed_loads": int(self._failed_loads),
                 "evictions": int(self._evictions),
                 "resident_videos": len(resident),
                 "peak_resident_videos": int(self._peak_resident_videos),

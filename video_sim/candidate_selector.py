@@ -27,7 +27,11 @@ class CandidateSelection:
 
 @dataclass
 class CandidateVideoSummary:
-    """Bounded candidate-stage representation of one embedding cache."""
+    """Candidate-stage representation; timestamps/signatures remain O(N).
+
+    Only the embedding sketches are bounded per video.  Full timestamps and
+    auxiliary signatures are retained to preserve candidate evidence.
+    """
 
     video_path: str
     frame_count: int
@@ -42,6 +46,14 @@ class CandidateVideoSummary:
     # float matrix set.
     baseline_source_representatives: np.ndarray | None = None
     baseline_index_embeddings: np.ndarray | None = None
+    # Persisted identity fields are populated by build/load helpers.  They
+    # remain optional so existing callers constructing summaries directly keep
+    # working.
+    embedding_shape: tuple[int, int] | None = None
+    embedding_dtype: str = "float32"
+    cache_metadata: dict | None = None
+    feature_cache_identity: dict | None = None
+    summary_params: dict | None = None
 
 
 @dataclass
@@ -138,16 +150,15 @@ def select_candidate_pairs(
         if summary_input:
             summary = item
             if mode == "baseline":
-                source_block = (
-                    summary.baseline_source_representatives
-                    if summary.baseline_source_representatives is not None
-                    else summary.optimized_source_representatives
-                )
-                indexed_embeddings = (
-                    summary.baseline_index_embeddings
-                    if summary.baseline_index_embeddings is not None
-                    else summary.optimized_index_embeddings
-                )
+                if (
+                    summary.baseline_source_representatives is None
+                    or summary.baseline_index_embeddings is None
+                ):
+                    raise ValueError(
+                        "baseline candidate selection requires persisted baseline summaries"
+                    )
+                source_block = summary.baseline_source_representatives
+                indexed_embeddings = summary.baseline_index_embeddings
             else:
                 source_block = summary.optimized_source_representatives
                 indexed_embeddings = summary.optimized_index_embeddings
@@ -741,25 +752,32 @@ def build_candidate_summary(
     max_index_frames_per_video: int = 2048,
     window_seconds: float = 30.0,
     max_windows_per_video: int = 96,
+    include_baseline: bool = True,
 ) -> CandidateVideoSummary:
-    """Materialize the bounded candidate representation and releaseable data.
+    """Materialize a releaseable candidate representation.
 
     This helper is intentionally deterministic with the legacy selector: it
     uses the same sketch functions and signature generation as the full-cache
-    path.  Callers can delete the input cache immediately after it returns.
+    path.  Embedding sketches are per-video limited, while timestamps and
+    auxiliary signatures retain one value per frame.  Callers can delete the
+    input cache immediately after it returns.
     """
     embeddings = np.asarray(cache.embeddings, dtype="float32")
-    timestamps = np.ascontiguousarray(cache.timestamps, dtype="float32").copy()
+    # Keep every timestamp (the embedding sketch alone is bounded).  The
+    # selector historically consumes float32 timestamps, so it converts only
+    # at that call boundary while the sidecar retains this complete vector.
+    timestamps = np.ascontiguousarray(cache.timestamps).copy()
+    selector_timestamps = np.asarray(cache.timestamps, dtype="float32")
     frame_count = int(len(embeddings))
     optimized_source = _multiscale_sketch(
         embeddings,
-        timestamps,
+        selector_timestamps,
         limit=max(1, representatives_per_video),
         window_seconds=window_seconds,
     )
     optimized_index = _multiscale_sketch(
         embeddings,
-        timestamps,
+        selector_timestamps,
         limit=max(1, max_index_frames_per_video),
         window_seconds=window_seconds,
     )
@@ -769,6 +787,30 @@ def build_candidate_summary(
         signature_kind = "simhash"
     else:
         signature_kind = "phash"
+    baseline_source = None
+    baseline_index = None
+    if include_baseline:
+        window_representatives = _window_embeddings(
+            embeddings,
+            selector_timestamps,
+            window_seconds=window_seconds,
+            limit=max(1, max_windows_per_video),
+        )
+        baseline_source = _stack_nonempty(
+            [
+                _representative_embeddings(embeddings, max(4, representatives_per_video)),
+                window_representatives,
+            ]
+        )
+        baseline_index = _stack_nonempty(
+            [
+                _representative_embeddings(
+                    embeddings,
+                    max(representatives_per_video, max_index_frames_per_video),
+                ),
+                window_representatives,
+            ]
+        )
     return CandidateVideoSummary(
         video_path=str(cache.video_path),
         frame_count=frame_count,
@@ -782,6 +824,17 @@ def build_candidate_summary(
         ),
         auxiliary_signatures=np.ascontiguousarray(signatures, dtype=np.uint64),
         auxiliary_kind=signature_kind,
+        baseline_source_representatives=baseline_source,
+        baseline_index_embeddings=baseline_index,
+        embedding_shape=(frame_count, int(embeddings.shape[1]) if embeddings.ndim == 2 else 0),
+        embedding_dtype=str(getattr(cache.embeddings, "dtype", "float32")),
+        cache_metadata=dict(cache.metadata) if isinstance(cache.metadata, Mapping) else None,
+        summary_params={
+            "representatives_per_video": int(representatives_per_video),
+            "max_index_frames_per_video": int(max_index_frames_per_video),
+            "window_seconds": float(window_seconds),
+            "max_windows_per_video": int(max_windows_per_video),
+        },
     )
 
 

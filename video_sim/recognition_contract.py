@@ -196,14 +196,44 @@ def feature_cache_identity(
     embeddings = getattr(cache, "embeddings", None)
     shape = list(getattr(embeddings, "shape", ()))
     dtype = str(getattr(embeddings, "dtype", ""))
+    return feature_cache_identity_from_parts(metadata, shape, dtype, cache_path)
+
+
+def artifact_identity(path: str | Path) -> dict[str, Any]:
+    """Return the public source-artifact identity used by cache sidecars.
+
+    ZIP identities read only the central directory (filename, CRC and sizes);
+    no member is opened or decompressed.
+    """
+
+    return _artifact_identity(path)
+
+
+def feature_cache_identity_from_parts(
+    metadata: Mapping[str, Any] | None,
+    embedding_shape: Any,
+    embedding_dtype: Any,
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Build exactly the identity returned by :func:`feature_cache_identity`.
+
+    This variant lets a sidecar audit reconstruct the identity without
+    opening ``frame_features.npz``.
+    """
+
+    metadata_value = dict(metadata) if isinstance(metadata, Mapping) else {}
+    try:
+        shape_value = [int(value) for value in embedding_shape]
+    except (TypeError, ValueError):
+        shape_value = []
     identity: dict[str, Any] = {
-        "schema_version": metadata.get("schema_version", FRAME_CACHE_SCHEMA_VERSION),
-        "metadata_digest": digest_payload(metadata),
-        "embedding_shape": shape,
-        "embedding_dtype": dtype,
+        "schema_version": metadata_value.get("schema_version", FRAME_CACHE_SCHEMA_VERSION),
+        "metadata_digest": digest_payload(metadata_value),
+        "embedding_shape": shape_value,
+        "embedding_dtype": str(embedding_dtype),
     }
-    if cache_path is not None:
-        identity["artifact"] = _artifact_identity(cache_path)
+    if path is not None:
+        identity["artifact"] = _artifact_identity(path)
     return identity
 
 
