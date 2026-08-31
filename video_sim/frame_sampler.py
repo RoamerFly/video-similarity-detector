@@ -21,8 +21,8 @@ from decord import VideoReader, cpu
 
 from video_sim.preprocess import (
     PreprocessConfig,
-    preprocess_frame_for_clip,
-    preprocess_frame_for_hash,
+    prepare_frame_geometry,
+    resize_prepared_frame,
 )
 from video_sim.metrics import RecognitionMetrics
 
@@ -34,6 +34,16 @@ except Exception:
 
 DEFAULT_DECODE_BATCH_BYTES = 64 * 1024 * 1024
 DECODE_BATCH_BYTES_ENV = "VIDEO_SIM_DECODE_BATCH_BYTES"
+
+SAMPLER_STAGE_NAMES = (
+    "sampler_decode",
+    "sampler_color_convert",
+    "sampler_geometry",
+    "sampler_hash_resize",
+    "sampler_phash",
+    "sampler_clip_prepare",
+    "sampler_callback",
+)
 
 
 def parse_decode_batch_bytes(value: Optional[str] = None) -> int:
@@ -314,6 +324,10 @@ class DynamicFrameSampler:
         self.metrics = metrics
         self._preprocess_elapsed_seconds = 0.0
         self._preprocess_calls = 0
+        self._sampler_stage_elapsed = {}
+        self._sampler_stage_items = {}
+        self._sampler_sampled_frames = 0
+        self._sampler_retained_frames = 0
         self.retained_count = 0
         self.total_frames = 0
         self._retained_callback_failed = False
@@ -322,6 +336,76 @@ class DynamicFrameSampler:
         self.last_decode_batch_size: Optional[int] = None
         self.last_decode_frame_bytes: Optional[int] = None
         self.last_decode_batch_oversized = False
+
+    def _reset_sampler_metrics(self) -> None:
+        """Reset per-video timers without touching run-level metrics."""
+
+        if self.metrics is None:
+            self._sampler_stage_elapsed = {}
+            self._sampler_stage_items = {}
+            self._sampler_sampled_frames = 0
+            self._sampler_retained_frames = 0
+            return
+        self._sampler_stage_elapsed = {name: 0.0 for name in SAMPLER_STAGE_NAMES}
+        self._sampler_stage_items = {name: 0 for name in SAMPLER_STAGE_NAMES}
+        self._sampler_sampled_frames = 0
+        self._sampler_retained_frames = 0
+
+    def _accumulate_sampler_stage(
+        self,
+        name: str,
+        elapsed_seconds: float,
+        items: int = 0,
+    ) -> None:
+        """Accumulate a stage locally; metrics are flushed once per sample."""
+
+        if self.metrics is None:
+            return
+        self._sampler_stage_elapsed[name] = (
+            self._sampler_stage_elapsed.get(name, 0.0) + max(0.0, float(elapsed_seconds))
+        )
+        self._sampler_stage_items[name] = (
+            self._sampler_stage_items.get(name, 0) + max(0, int(items))
+        )
+
+    def _flush_sampler_metrics(self) -> None:
+        """Write locally accumulated sampler metrics at the sampling boundary."""
+
+        if self.metrics is None:
+            return
+
+        # ``preprocess`` is the legacy outer field. Its timers overlap the
+        # granular geometry/resize stages, so consumers must not add this
+        # value to the sampler_* values. ``decode_sample`` remains owned by
+        # the caller's legacy outer sampling scope (for example embedder.py).
+        preprocess_elapsed = (
+            self._sampler_stage_elapsed.get("sampler_geometry", 0.0)
+            + self._sampler_stage_elapsed.get("sampler_hash_resize", 0.0)
+            + self._sampler_stage_elapsed.get("sampler_clip_prepare", 0.0)
+        )
+        preprocess_items = (
+            self._sampler_sampled_frames + self._sampler_retained_frames
+        )
+        self._preprocess_elapsed_seconds = preprocess_elapsed
+        self._preprocess_calls = preprocess_items
+        # A zero record keeps every dynamically named stage visible even for
+        # an empty stream. Batch insertion preserves one call per stage while
+        # reducing the resource snapshot cost to one per sampled video.
+        self.metrics.add_elapsed_batch(
+            [
+                *(
+                    (
+                        name,
+                        self._sampler_stage_elapsed.get(name, 0.0),
+                        self._sampler_stage_items.get(name, 0),
+                    )
+                    for name in SAMPLER_STAGE_NAMES
+                ),
+                ("preprocess", preprocess_elapsed, preprocess_items),
+            ]
+        )
+        self.metrics.count("sampled_frames", self._sampler_sampled_frames)
+        self.metrics.count("retained_frames", self._sampler_retained_frames)
 
     def _get_thumbnail_dir(self, video_path: Union[str, Path]) -> Path:
         """Get the thumbnail directory for a video."""
@@ -426,19 +510,20 @@ class DynamicFrameSampler:
         self.source_duration_sec = 0.0
         self._preprocess_elapsed_seconds = 0.0
         self._preprocess_calls = 0
+        self._reset_sampler_metrics()
         self.retained_count = 0
         self.total_frames = 0
         # Sampling instances are reusable.  A callback failure from an
         # earlier run must not suppress the safe decoder fallback on the next
         # run.
         self._retained_callback_failed = False
-        if not video_path.exists():
-            raise FileNotFoundError(f"Video not found: {video_path}")
-
-        # Decord implements sparse get_batch requests with repeated random
-        # seeking. OpenCV advances sequentially and is more reliable for
-        # sparse frame_step values.
         try:
+            if not video_path.exists():
+                raise FileNotFoundError(f"Video not found: {video_path}")
+
+            # Decord implements sparse get_batch requests with repeated random
+            # seeking. OpenCV advances sequentially and is more reliable for
+            # sparse frame_step values.
             if self.frame_step > 1:
                 try:
                     self._sample_with_opencv(
@@ -468,12 +553,7 @@ class DynamicFrameSampler:
                         video_path, progress_callback, retained_frames, retained_callback
                     )
         finally:
-            if self.metrics is not None and self._preprocess_elapsed_seconds > 0:
-                self.metrics.add_elapsed(
-                    "preprocess",
-                    self._preprocess_elapsed_seconds,
-                    items=self._preprocess_calls,
-                )
+            self._flush_sampler_metrics()
 
     def _sample_with_decord(
         self,
@@ -483,7 +563,15 @@ class DynamicFrameSampler:
         retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> List[RetainedFrame]:
         """Sample frames with Decord first to avoid OpenCV swscaler noise."""
-        vr = VideoReader(str(video_path), ctx=cpu(0), num_threads=1)
+        decode_open_started = time.perf_counter() if self.metrics is not None else 0.0
+        try:
+            vr = VideoReader(str(video_path), ctx=cpu(0), num_threads=1)
+        finally:
+            if self.metrics is not None:
+                self._accumulate_sampler_stage(
+                    "sampler_decode",
+                    time.perf_counter() - decode_open_started,
+                )
         total_frames = len(vr)
         self.total_frames = total_frames
         if total_frames <= 0:
@@ -544,12 +632,20 @@ class DynamicFrameSampler:
         frame_shape: Optional[Tuple[int, ...]] = None
         prefetched_rgb_frame: Optional[np.ndarray] = None
         if total_frames > 0:
+            decode_started = time.perf_counter() if self.metrics is not None else 0.0
             try:
                 prefetched_rgb_frame = np.asarray(vr[0].asnumpy())
                 frame_shape = tuple(prefetched_rgb_frame.shape)
             except Exception:
                 frame_shape = None
                 prefetched_rgb_frame = None
+            finally:
+                if self.metrics is not None:
+                    self._accumulate_sampler_stage(
+                        "sampler_decode",
+                        time.perf_counter() - decode_started,
+                        items=1 if prefetched_rgb_frame is not None else 0,
+                    )
         budget_bytes = parse_decode_batch_bytes()
         batch_size = decode_batch_size_for_frame_shape(frame_shape, budget_bytes)
         # ``chunk_size`` remains an internal compatibility hook for focused
@@ -572,6 +668,7 @@ class DynamicFrameSampler:
             batch_indices = indices
             prefetched_bgr_frame: Optional[np.ndarray] = None
             if chunk_start == 0 and indices[0] == 0 and prefetched_rgb_frame is not None:
+                color_started = time.perf_counter() if self.metrics is not None else 0.0
                 try:
                     prefetched_bgr_frame = _rgb_to_bgr(prefetched_rgb_frame)
                 except Exception:
@@ -584,25 +681,87 @@ class DynamicFrameSampler:
                     # the first batch, and emit it first to preserve order.
                     batch_indices = indices[1:]
                     prefetched_rgb_frame = None
+                    if self.metrics is not None:
+                        self._accumulate_sampler_stage(
+                            "sampler_color_convert",
+                            time.perf_counter() - color_started,
+                            items=1,
+                        )
                     yield 0, prefetched_bgr_frame
+                if self.metrics is not None and prefetched_bgr_frame is None:
+                    self._accumulate_sampler_stage(
+                        "sampler_color_convert",
+                        time.perf_counter() - color_started,
+                    )
 
             if not batch_indices:
                 # Avoid calling get_batch([]) when the first chunk contains
                 # only the prefetched frame.
                 continue
 
+            decode_started = time.perf_counter() if self.metrics is not None else 0.0
             try:
                 batch = vr.get_batch(batch_indices).asnumpy()
             except Exception:
+                if self.metrics is not None:
+                    self._accumulate_sampler_stage(
+                        "sampler_decode",
+                        time.perf_counter() - decode_started,
+                    )
                 for index in batch_indices:
+                    scalar_decode_started = time.perf_counter() if self.metrics is not None else 0.0
                     try:
-                        yield index, _rgb_to_bgr(vr[index].asnumpy())
+                        rgb_frame = vr[index].asnumpy()
                     except Exception:
+                        if self.metrics is not None:
+                            self._accumulate_sampler_stage(
+                                "sampler_decode",
+                                time.perf_counter() - scalar_decode_started,
+                            )
                         continue
+                    if self.metrics is not None:
+                        self._accumulate_sampler_stage(
+                            "sampler_decode",
+                            time.perf_counter() - scalar_decode_started,
+                            items=1,
+                        )
+                    scalar_color_started = time.perf_counter() if self.metrics is not None else 0.0
+                    try:
+                        bgr_frame = _rgb_to_bgr(rgb_frame)
+                    except Exception:
+                        if self.metrics is not None:
+                            self._accumulate_sampler_stage(
+                                "sampler_color_convert",
+                                time.perf_counter() - scalar_color_started,
+                            )
+                        continue
+                    if self.metrics is not None:
+                        self._accumulate_sampler_stage(
+                            "sampler_color_convert",
+                            time.perf_counter() - scalar_color_started,
+                            items=1,
+                        )
+                    yield index, bgr_frame
                 continue
+            if self.metrics is not None:
+                self._accumulate_sampler_stage(
+                    "sampler_decode",
+                    time.perf_counter() - decode_started,
+                    items=len(batch_indices),
+                )
 
             for index, rgb_frame in zip(batch_indices, batch):
-                yield index, _rgb_to_bgr(rgb_frame)
+                color_started = time.perf_counter() if self.metrics is not None else 0.0
+                try:
+                    bgr_frame = _rgb_to_bgr(rgb_frame)
+                finally:
+                    if self.metrics is not None:
+                        self._accumulate_sampler_stage(
+                            "sampler_color_convert",
+                            time.perf_counter() - color_started,
+                            items=1,
+                        )
+                yield index, bgr_frame
 
     def _sample_with_opencv(
         self,
@@ -612,8 +771,17 @@ class DynamicFrameSampler:
         retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> List[RetainedFrame]:
         # Open video with OpenCV
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
+        decode_open_started = time.perf_counter() if self.metrics is not None else 0.0
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            opened = cap.isOpened()
+        finally:
+            if self.metrics is not None:
+                self._accumulate_sampler_stage(
+                    "sampler_decode",
+                    time.perf_counter() - decode_open_started,
+                )
+        if not opened:
             raise ValueError(f"Cannot open video: {video_path}")
 
         # Get video properties
@@ -633,12 +801,25 @@ class DynamicFrameSampler:
 
         try:
             while True:
+                decode_started = time.perf_counter() if self.metrics is not None else 0.0
                 ret, frame = cap.read()
+                if self.metrics is not None:
+                    self._accumulate_sampler_stage(
+                        "sampler_decode",
+                        time.perf_counter() - decode_started,
+                        items=1 if ret and frame is not None and frame.size else 0,
+                    )
                 if not ret or frame is None or frame.size == 0:
                     read_failures += 1
                     if total_frames > 0 and read_failures < 25 and frame_index + self.frame_step < total_frames:
+                        seek_started = time.perf_counter() if self.metrics is not None else 0.0
                         frame_index += self.frame_step
                         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                        if self.metrics is not None:
+                            self._accumulate_sampler_stage(
+                                "sampler_decode",
+                                time.perf_counter() - seek_started,
+                            )
                         continue
                     break
                 read_failures = 0
@@ -664,9 +845,21 @@ class DynamicFrameSampler:
                 next_frame_index = frame_index + 1
                 reached_end = False
                 for _ in range(self.frame_step - 1):
+                    grab_started = time.perf_counter() if self.metrics is not None else 0.0
                     if not cap.grab():
+                        if self.metrics is not None:
+                            self._accumulate_sampler_stage(
+                                "sampler_decode",
+                                time.perf_counter() - grab_started,
+                            )
                         reached_end = True
                         break
+                    if self.metrics is not None:
+                        self._accumulate_sampler_stage(
+                            "sampler_decode",
+                            time.perf_counter() - grab_started,
+                            items=1,
+                        )
                     next_frame_index += 1
                 frame_index = next_frame_index
                 if reached_end:
@@ -691,15 +884,62 @@ class DynamicFrameSampler:
         video_path: Path,
         retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> Tuple[Optional[imagehash.ImageHash], int]:
-        preprocess_started = time.perf_counter()
-        # Preprocess frame for hash computation
-        preprocessed = preprocess_frame_for_hash(frame, self.preprocess_config)
-        self._preprocess_elapsed_seconds += time.perf_counter() - preprocess_started
-        self._preprocess_calls += 1
+        metrics_enabled = self.metrics is not None
+        if metrics_enabled:
+            self._sampler_sampled_frames += 1
 
-        # Convert to PIL and compute pHash
-        pil_image = Image.fromarray(cv2.cvtColor(preprocessed, cv2.COLOR_BGR2RGB))
+        # Prepare geometry exactly once per candidate. The prepared result is
+        # a read-only view when no rotation allocates a new array. Hash and
+        # CLIP then resize this same geometry independently with their legacy
+        # interpolation methods (INTER_AREA and INTER_LINEAR respectively).
+        geometry_started = time.perf_counter() if metrics_enabled else 0.0
+        prepared = prepare_frame_geometry(frame, self.preprocess_config)
+        if metrics_enabled:
+            self._accumulate_sampler_stage(
+                "sampler_geometry",
+                time.perf_counter() - geometry_started,
+                items=1,
+            )
+
+        target_size = max(1, int(self.preprocess_config.input_size))
+        if prepared.shape[0] != target_size or prepared.shape[1] != target_size:
+            hash_resize_started = time.perf_counter() if metrics_enabled else 0.0
+            hash_frame = resize_prepared_frame(
+                prepared,
+                target_size=target_size,
+                mode=self.preprocess_config.resize_mode,
+                interpolation=cv2.INTER_AREA,
+            )
+            if metrics_enabled:
+                self._accumulate_sampler_stage(
+                    "sampler_hash_resize",
+                    time.perf_counter() - hash_resize_started,
+                    items=1,
+                )
+        else:
+            # The old public hash path skipped resize for an already square
+            # target frame. Keep that behavior while retaining a private copy
+            # boundary for the hash consumer.
+            hash_frame = prepared
+
+        hash_color_started = time.perf_counter() if metrics_enabled else 0.0
+        hash_rgb = cv2.cvtColor(hash_frame, cv2.COLOR_BGR2RGB)
+        if metrics_enabled:
+            self._accumulate_sampler_stage(
+                "sampler_color_convert",
+                time.perf_counter() - hash_color_started,
+                items=1,
+            )
+
+        phash_started = time.perf_counter() if metrics_enabled else 0.0
+        pil_image = Image.fromarray(hash_rgb)
         current_hash = imagehash.phash(pil_image)
+        if metrics_enabled:
+            self._accumulate_sampler_stage(
+                "sampler_phash",
+                time.perf_counter() - phash_started,
+                items=1,
+            )
 
         # Decision: retain or skip
         should_retain = False
@@ -726,11 +966,31 @@ class DynamicFrameSampler:
             # Keep the compact preprocessed RGB frame in memory for embedding.
             # The UI uses timestamps to seek in the original videos, so no
             # thumbnail files are needed.
-            clip_preprocess_started = time.perf_counter()
-            clip_frame = preprocess_frame_for_clip(frame, self.preprocess_config)
-            clip_frame = cv2.cvtColor(clip_frame, cv2.COLOR_BGR2RGB)
-            self._preprocess_elapsed_seconds += time.perf_counter() - clip_preprocess_started
-            self._preprocess_calls += 1
+            if prepared.shape[0] != target_size or prepared.shape[1] != target_size:
+                clip_prepare_started = time.perf_counter() if metrics_enabled else 0.0
+                clip_bgr = resize_prepared_frame(
+                    prepared,
+                    target_size=target_size,
+                    mode=self.preprocess_config.resize_mode,
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                if metrics_enabled:
+                    self._accumulate_sampler_stage(
+                        "sampler_clip_prepare",
+                        time.perf_counter() - clip_prepare_started,
+                        items=1,
+                    )
+            else:
+                clip_bgr = prepared
+
+            clip_color_started = time.perf_counter() if metrics_enabled else 0.0
+            clip_frame = cv2.cvtColor(clip_bgr, cv2.COLOR_BGR2RGB)
+            if metrics_enabled:
+                self._accumulate_sampler_stage(
+                    "sampler_color_convert",
+                    time.perf_counter() - clip_color_started,
+                    items=1,
+                )
             retained_frame = RetainedFrame(
                 video_path=str(video_path),
                 frame_index=frame_index,
@@ -741,9 +1001,20 @@ class DynamicFrameSampler:
             if retained_frames is not None:
                 retained_frames.append(retained_frame)
             self.retained_count += 1
+            if metrics_enabled:
+                self._sampler_retained_frames += 1
             if retained_callback is not None:
                 self._retained_callback_failed = True
-                retained_callback(retained_frame)
+                callback_started = time.perf_counter() if metrics_enabled else 0.0
+                try:
+                    retained_callback(retained_frame)
+                finally:
+                    if metrics_enabled:
+                        self._accumulate_sampler_stage(
+                            "sampler_callback",
+                            time.perf_counter() - callback_started,
+                            items=1,
+                        )
                 self._retained_callback_failed = False
 
             # Update state
@@ -787,10 +1058,14 @@ def dynamic_sample_frames(
 
 def _rgb_to_bgr(frame: np.ndarray) -> np.ndarray:
     frame = np.asarray(frame)
+    # Decord normally provides uint8 RGB. Avoid an unnecessary full-frame
+    # astype allocation on this hot path; cvtColor already returns a fresh BGR
+    # array. Keep the historical cast for all other dtypes and channel forms.
+    converted = frame if frame.dtype == np.uint8 else frame.astype(np.uint8)
     if frame.ndim == 2:
-        return cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        return cv2.cvtColor(converted, cv2.COLOR_GRAY2BGR)
     if frame.shape[-1] == 4:
-        return cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
+        return cv2.cvtColor(converted, cv2.COLOR_RGBA2BGR)
     if frame.shape[-1] == 3:
-        return cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(converted, cv2.COLOR_RGB2BGR)
     raise ValueError(f"Unsupported decoded frame shape: {frame.shape}")

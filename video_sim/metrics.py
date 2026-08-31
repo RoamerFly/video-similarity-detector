@@ -16,7 +16,7 @@ from pathlib import Path
 import sys
 import threading
 import time
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterable, Iterator, Optional
 
 
 STAGE_NAMES = (
@@ -123,6 +123,34 @@ class RecognitionMetrics:
         """Alias for accumulating a timer owned by a caller hot loop."""
 
         self.record_stage(name, elapsed_seconds, items=items)
+
+    def add_elapsed_batch(self, records: Iterable[tuple[str, float, int]]) -> None:
+        """Accumulate several stage records with one resource snapshot.
+
+        Each tuple is ``(name, elapsed_seconds, items)``. Every entry has the
+        same clamping and call-count behavior as :meth:`record_stage`; repeated
+        names therefore create repeated calls while accumulating into the same
+        ``StageMetric``. An empty batch does nothing and does not sample
+        resources.
+        """
+
+        normalized = [
+            (
+                str(name),
+                max(0.0, float(elapsed_seconds)),
+                max(0, int(items)),
+            )
+            for name, elapsed_seconds, items in records
+        ]
+        if not normalized:
+            return
+        with self._lock:
+            for name, elapsed_seconds, items in normalized:
+                metric = self.stages.setdefault(name, StageMetric())
+                metric.elapsed_ms += elapsed_seconds * 1000.0
+                metric.calls += 1
+                metric.items += items
+        self.snapshot_resources()
 
     def count(self, name: str, amount: int = 1) -> None:
         with self._lock:

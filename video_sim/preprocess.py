@@ -161,7 +161,7 @@ def crop_black_borders(
     return frame[top:bottom, left:right]
 
 
-def resize_with_aspect_ratio(
+def resize_prepared_frame(
     frame: np.ndarray,
     target_size: int,
     mode: ResizeMode = ResizeMode.CENTER_CROP,
@@ -218,6 +218,22 @@ def resize_with_aspect_ratio(
         return canvas
 
 
+def resize_with_aspect_ratio(
+    frame: np.ndarray,
+    target_size: int,
+    mode: ResizeMode = ResizeMode.CENTER_CROP,
+    interpolation: int = cv2.INTER_LINEAR,
+) -> np.ndarray:
+    """Backward-compatible name for :func:`resize_prepared_frame`."""
+
+    return resize_prepared_frame(
+        frame,
+        target_size=target_size,
+        mode=mode,
+        interpolation=interpolation,
+    )
+
+
 def rotate_portrait_frame(
     frame: np.ndarray,
     rotation: PortraitRotation = PortraitRotation.RIGHT_90,
@@ -238,6 +254,41 @@ def rotate_portrait_frame(
     return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
 
+def prepare_frame_geometry(
+    frame: np.ndarray,
+    config: PreprocessConfig = None,
+) -> np.ndarray:
+    """Apply border cropping and portrait rotation without resizing.
+
+    The returned array can be a view into ``frame`` and is marked read-only.
+    Consumers must treat it as an immutable prepared view and pass it to
+    :func:`resize_prepared_frame` when a fixed-size array is needed. Public
+    preprocessing wrappers copy it when no resize is required, preserving
+    their historical independent-array return semantics.
+    """
+
+    if config is None:
+        config = PreprocessConfig()
+
+    # Cropping is intentionally a view. Neither border detection nor rotation
+    # mutates the input, so this avoids copying a full decoded frame before a
+    # candidate has passed the pHash retention decision.
+    result = frame
+    if config.crop_black_borders:
+        result = crop_black_borders(
+            result,
+            threshold=config.border_threshold,
+            min_ratio=config.border_crop_ratio,
+        )
+    result = rotate_portrait_frame(result, config.portrait_rotation)
+
+    # ``view`` prevents changing the caller's writeability flag when the
+    # geometry path is a no-op and ``result`` is the original ndarray.
+    result = np.asarray(result).view()
+    result.setflags(write=False)
+    return result
+
+
 def preprocess_frame_geometry(
     frame: np.ndarray,
     config: PreprocessConfig = None,
@@ -254,25 +305,20 @@ def preprocess_frame_geometry(
     if config is None:
         config = PreprocessConfig()
 
-    result = frame.copy()
-
-    if config.crop_black_borders:
-        result = crop_black_borders(
-            result,
-            threshold=config.border_threshold,
-            min_ratio=config.border_crop_ratio,
-        )
-
-    result = rotate_portrait_frame(result, config.portrait_rotation)
+    result = prepare_frame_geometry(frame, config)
 
     size = max(1, int(target_size or config.input_size))
     if result.shape[0] != size or result.shape[1] != size:
-        result = resize_with_aspect_ratio(
+        result = resize_prepared_frame(
             result,
             target_size=size,
             mode=config.resize_mode,
             interpolation=interpolation,
         )
+    else:
+        # The prepared geometry may be a read-only view into the input, while
+        # this public API historically returned an independent writable array.
+        result = result.copy()
 
     return result
 

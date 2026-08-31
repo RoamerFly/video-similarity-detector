@@ -20,6 +20,49 @@ def test_metrics_record_and_round_trip(tmp_path):
     assert loaded.to_dict()["stages"]["candidate"]["calls"] == 1
 
 
+def test_metrics_batch_matches_individual_stage_records_and_snapshots_once(monkeypatch):
+    batch = RecognitionMetrics()
+    individual = RecognitionMetrics()
+    batch_snapshots = []
+    individual_snapshots = []
+    monkeypatch.setattr(batch, "snapshot_resources", lambda: batch_snapshots.append(1))
+    monkeypatch.setattr(individual, "snapshot_resources", lambda: individual_snapshots.append(1))
+
+    records = [
+        ("dynamic_stage", 0.0125, 2),
+        ("dynamic_stage", 0.5, 3),
+        ("another_stage", 0.0, 0),
+    ]
+    batch.add_elapsed_batch(records)
+    for name, elapsed, items in records:
+        individual.record_stage(name, elapsed, items=items)
+
+    for name in ("dynamic_stage", "another_stage"):
+        assert batch.stages[name].elapsed_ms == individual.stages[name].elapsed_ms
+        assert batch.stages[name].calls == individual.stages[name].calls
+        assert batch.stages[name].items == individual.stages[name].items
+    assert batch_snapshots == [1]
+    assert len(individual_snapshots) == len(records)
+
+
+def test_metrics_batch_clamps_negative_values_and_empty_batch_is_noop(monkeypatch):
+    metrics = RecognitionMetrics()
+    snapshots = []
+    monkeypatch.setattr(metrics, "snapshot_resources", lambda: snapshots.append(1))
+
+    metrics.add_elapsed_batch([])
+    assert snapshots == []
+
+    metrics.add_elapsed_batch(
+        [("dynamic_stage", -4.0, -7), ("zero_stage", 0.0, 0)]
+    )
+    assert snapshots == [1]
+    assert metrics.stages["dynamic_stage"].elapsed_ms == 0.0
+    assert metrics.stages["dynamic_stage"].items == 0
+    assert metrics.stages["dynamic_stage"].calls == 1
+    assert metrics.stages["zero_stage"].calls == 1
+
+
 def test_metrics_accepts_legacy_or_partial_payloads():
     loaded = RecognitionMetrics.from_dict({"stages": {"embed": {"elapsed_ms": 2}}})
     payload = loaded.to_dict()
