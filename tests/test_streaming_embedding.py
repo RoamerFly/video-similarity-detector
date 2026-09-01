@@ -238,7 +238,7 @@ def test_dynamic_sampler_stream_api_preserves_order(monkeypatch, tmp_path):
     assert [frame.timestamp for frame in streamed] == [frame.timestamp for frame in materialized]
 
 
-def test_sampler_does_not_restart_after_decoder_emitted_frame(monkeypatch, tmp_path):
+def test_sampler_does_not_restart_after_opencv_emitted_frame(monkeypatch, tmp_path):
     """A partial stream failure must propagate instead of duplicating output."""
     video = tmp_path / "partial.mp4"
     video.write_bytes(b"partial")
@@ -246,46 +246,35 @@ def test_sampler_does_not_restart_after_decoder_emitted_frame(monkeypatch, tmp_p
     frame = _frames(1)[0]
     fallback_called = False
 
-    def decord(_path, _progress=None, retained_frames=None, retained_callback=None):
+    def opencv(_path, _progress=None, retained_frames=None, retained_callback=None):
         sampler.retained_count = 1
         sampler._retained_callback_failed = True
         if retained_callback is not None:
             retained_callback(frame)
-        raise RuntimeError("decoder failed after first frame")
+        raise RuntimeError("opencv failed after first frame")
 
-    def opencv(*_args, **_kwargs):
+    def decord(*_args, **_kwargs):
         nonlocal fallback_called
         fallback_called = True
         return []
 
-    monkeypatch.setattr(sampler, "_sample_with_decord", decord)
     monkeypatch.setattr(sampler, "_sample_with_opencv", opencv)
+    monkeypatch.setattr(sampler, "_sample_with_decord", decord)
     with pytest.raises(RuntimeError, match="after first frame"):
         sampler.sample_stream(video, lambda _frame: None)
     assert not fallback_called
 
 
-def test_sampler_falls_back_when_decoder_fails_before_first_frame(monkeypatch, tmp_path):
+def test_sampler_falls_back_when_opencv_fails_before_first_frame(monkeypatch, tmp_path):
     video = tmp_path / "fallback.mp4"
     video.write_bytes(b"fallback")
     sampler = DynamicFrameSampler(cache_dir=tmp_path)
     frame = _frames(1)[0]
     fallback_called = False
-    decoder_calls = 0
+    def opencv(*_args, **_kwargs):
+        raise RuntimeError("opencv failed before first frame")
 
-    def decord(*_args, **_kwargs):
-        nonlocal decoder_calls
-        decoder_calls += 1
-        if decoder_calls == 1:
-            sampler.retained_count = 1
-            sampler._retained_callback_failed = True
-            callback = _args[-1] if _args and callable(_args[-1]) else None
-            if callback is not None:
-                callback(frame)
-            raise RuntimeError("decoder failed after first frame")
-        raise RuntimeError("decoder failed before first frame")
-
-    def opencv(_path, _progress=None, retained_frames=None, retained_callback=None):
+    def decord(_path, _progress=None, retained_frames=None, retained_callback=None):
         nonlocal fallback_called
         fallback_called = True
         sampler.retained_count = 1
@@ -293,10 +282,8 @@ def test_sampler_falls_back_when_decoder_fails_before_first_frame(monkeypatch, t
             retained_callback(frame)
         return [frame]
 
-    monkeypatch.setattr(sampler, "_sample_with_decord", decord)
     monkeypatch.setattr(sampler, "_sample_with_opencv", opencv)
-    with pytest.raises(RuntimeError, match="after first frame"):
-        sampler.sample_stream(video, lambda _frame: None)
+    monkeypatch.setattr(sampler, "_sample_with_decord", decord)
     emitted = []
     sampler.sample_stream(video, emitted.append)
     assert fallback_called

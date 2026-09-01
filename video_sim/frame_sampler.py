@@ -45,6 +45,13 @@ SAMPLER_STAGE_NAMES = (
     "sampler_callback",
 )
 
+# Decoder selection is part of the sampler's observable state.  In
+# particular, callers can distinguish the normal sequential OpenCV path
+# from the exceptional Decord fallback without inferring it from timings.
+DECODER_BACKEND_UNKNOWN = "unknown"
+DECODER_BACKEND_OPENCV = "opencv"
+DECODER_BACKEND_DECORD = "decord"
+
 
 def parse_decode_batch_bytes(value: Optional[str] = None) -> int:
     """Return the positive Decord batch budget in bytes.
@@ -336,6 +343,39 @@ class DynamicFrameSampler:
         self.last_decode_batch_size: Optional[int] = None
         self.last_decode_frame_bytes: Optional[int] = None
         self.last_decode_batch_oversized = False
+        self.decoder_backend = DECODER_BACKEND_UNKNOWN
+        # ``last_decoder_backend`` is kept as an explicit telemetry alias for
+        # integrations that report the most recently completed sample.
+        self.last_decoder_backend = DECODER_BACKEND_UNKNOWN
+        self.decoder_fallback = False
+        self.decoder_fallback_reason: Optional[str] = None
+        self.decoder_backend_history: List[str] = []
+
+    def _mark_decoder_backend(
+        self,
+        backend: str,
+        *,
+        fallback: bool = False,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        """Record the backend used for the current video sample.
+
+        This state describes decoder selection, rather than process memory
+        usage.  A fallback is only marked when the alternate backend is
+        entered after the primary backend failed before emitting a retained
+        frame.
+        """
+
+        self.decoder_backend = backend
+        self.last_decoder_backend = backend
+        if not self.decoder_backend_history or self.decoder_backend_history[-1] != backend:
+            self.decoder_backend_history.append(backend)
+        if fallback:
+            self.decoder_fallback = True
+            if error is not None:
+                self.decoder_fallback_reason = (
+                    f"{type(error).__name__}: {error}"
+                )
 
     def _reset_sampler_metrics(self) -> None:
         """Reset per-video timers without touching run-level metrics."""
@@ -406,6 +446,21 @@ class DynamicFrameSampler:
         )
         self.metrics.count("sampled_frames", self._sampler_sampled_frames)
         self.metrics.count("retained_frames", self._sampler_retained_frames)
+
+    def _flush_decoder_telemetry(self) -> None:
+        """Record decoder selection once after a video sample completes."""
+
+        if self.metrics is None:
+            return
+        self.metrics.count(
+            "decoder_opencv_videos",
+            int(self.decoder_backend == DECODER_BACKEND_OPENCV),
+        )
+        self.metrics.count(
+            "decoder_decord_videos",
+            int(self.decoder_backend == DECODER_BACKEND_DECORD),
+        )
+        self.metrics.count("decoder_fallbacks", int(self.decoder_fallback))
 
     def _get_thumbnail_dir(self, video_path: Union[str, Path]) -> Path:
         """Get the thumbnail directory for a video."""
@@ -517,42 +572,48 @@ class DynamicFrameSampler:
         # earlier run must not suppress the safe decoder fallback on the next
         # run.
         self._retained_callback_failed = False
+        self.decoder_backend = DECODER_BACKEND_UNKNOWN
+        self.last_decoder_backend = DECODER_BACKEND_UNKNOWN
+        self.decoder_fallback = False
+        self.decoder_fallback_reason = None
+        self.decoder_backend_history = []
         try:
             if not video_path.exists():
                 raise FileNotFoundError(f"Video not found: {video_path}")
 
-            # Decord implements sparse get_batch requests with repeated random
-            # seeking. OpenCV advances sequentially and is more reliable for
-            # sparse frame_step values.
-            if self.frame_step > 1:
-                try:
-                    self._sample_with_opencv(
-                        video_path, progress_callback, retained_frames, retained_callback
-                    )
-                except Exception as opencv_error:
-                    if self._retained_callback_failed or self.retained_count > 0:
-                        raise
-                    print(
-                        f"警告(Warning): OpenCV 顺序帧读取器读取失败 {video_path.resolve()}，改用 Decord: {opencv_error}"
-                    )
-                    self._sample_with_decord(
-                        video_path, progress_callback, retained_frames, retained_callback
-                    )
-            else:
-                try:
-                    self._sample_with_decord(
-                        video_path, progress_callback, retained_frames, retained_callback
-                    )
-                except Exception as decord_error:
-                    if self._retained_callback_failed or self.retained_count > 0:
-                        raise
-                    print(
-                        f"警告(Warning): Decord 帧读取器读取失败 {video_path.resolve()}，改用 OpenCV: {decord_error}"
-                    )
-                    self._sample_with_opencv(
-                        video_path, progress_callback, retained_frames, retained_callback
-                    )
+            # OpenCV advances sequentially and keeps only the current decoded
+            # frame alive. This is the safe default for frame_step=1: Decord's
+            # get_batch/asnumpy path can retain decoder-owned native buffers as
+            # batches progress, allowing RSS to grow substantially for
+            # portrait/high-resolution videos. The same order is retained
+            # for sparse frame_step values, where OpenCV already was primary.
+            try:
+                self._mark_decoder_backend(DECODER_BACKEND_OPENCV)
+                self._sample_with_opencv(
+                    video_path, progress_callback, retained_frames, retained_callback
+                )
+            except Exception as opencv_error:
+                # Never restart a partially emitted stream: doing so would
+                # duplicate callback output and can corrupt the cache.
+                if (
+                    self._retained_callback_failed
+                    or self.retained_count > 0
+                    or (retained_frames is not None and len(retained_frames) > 0)
+                ):
+                    raise
+                self._mark_decoder_backend(
+                    DECODER_BACKEND_DECORD,
+                    fallback=True,
+                    error=opencv_error,
+                )
+                print(
+                    f"警告(Warning): OpenCV 顺序帧读取器读取失败 {video_path.resolve()}，改用 Decord: {opencv_error}"
+                )
+                self._sample_with_decord(
+                    video_path, progress_callback, retained_frames, retained_callback
+                )
         finally:
+            self._flush_decoder_telemetry()
             self._flush_sampler_metrics()
 
     def _sample_with_decord(
@@ -562,7 +623,8 @@ class DynamicFrameSampler:
         retained_frames: Optional[List[RetainedFrame]] = None,
         retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> List[RetainedFrame]:
-        """Sample frames with Decord first to avoid OpenCV swscaler noise."""
+        """Sample frames with Decord as the guarded OpenCV fallback."""
+        self._mark_decoder_backend(DECODER_BACKEND_DECORD)
         decode_open_started = time.perf_counter() if self.metrics is not None else 0.0
         try:
             vr = VideoReader(str(video_path), ctx=cpu(0), num_threads=1)
@@ -770,6 +832,7 @@ class DynamicFrameSampler:
         retained_frames: Optional[List[RetainedFrame]] = None,
         retained_callback: Optional[Callable[[RetainedFrame], None]] = None,
     ) -> List[RetainedFrame]:
+        self._mark_decoder_backend(DECODER_BACKEND_OPENCV)
         # Open video with OpenCV
         decode_open_started = time.perf_counter() if self.metrics is not None else 0.0
         try:
@@ -869,6 +932,9 @@ class DynamicFrameSampler:
 
         if progress_callback:
             progress_callback(frame_index, total_frames, frame_index / fps if fps > 0 else 0.0)
+
+        if self.retained_count == 0 and total_frames > 0:
+            raise ValueError("OpenCV decoded no usable frames")
 
         return retained_frames or []
 

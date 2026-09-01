@@ -41,7 +41,10 @@ from video_sim.model_locator import (
     resolve_embedding_model_source,
 )
 
-FRAME_CACHE_SCHEMA_VERSION = 4
+# v5 records the switch to sequential OpenCV-first dynamic decoding. Existing
+# caches were produced with Decord-first sampling and must be rebuilt rather
+# than silently reused with the new frame-selection backend.
+FRAME_CACHE_SCHEMA_VERSION = 5
 
 
 def _nested_context(*contexts):

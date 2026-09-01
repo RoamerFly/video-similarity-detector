@@ -22,7 +22,9 @@ FEATURE_EXTRACTOR_ID = "clip_vision_pooler_v1"
 # the value from video_sim.embedder when the runtime is available.  Keeping a
 # fallback lets report/key helpers remain usable in tooling and tests that do
 # not install torch.
-FRAME_CACHE_SCHEMA_VERSION = 4
+# Keep the lightweight fallback in sync with video_sim.embedder. v5 marks the
+# OpenCV-first dynamic decoder contract, so older Decord caches are stale.
+FRAME_CACHE_SCHEMA_VERSION = 5
 
 PAIR_PARAMETER_KEYS = (
     "match_threshold",
