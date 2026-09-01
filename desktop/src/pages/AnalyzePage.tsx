@@ -39,6 +39,7 @@ import {
   cancelCurrentTask,
   clearCacheItems,
   createAnalysisTask,
+  createAnalysisRunId,
   deleteAnalysisTask,
   deleteFiles,
   fileName,
@@ -60,6 +61,7 @@ import {
   selectOutputDirectory,
   selectVideoDirectory,
   updateAnalysisTask,
+  waitForAnalysisTaskShutdown,
   type AnalysisTaskRecord,
   type AnalysisTaskStageId,
   type CacheScanResult,
@@ -89,6 +91,7 @@ import {
   analysisTaskStatusLabel,
   canStartAnalysisStage,
   formatStageElapsed,
+  shouldWaitForAnalysisTaskShutdown,
 } from '@/utils/analysisTask'
 
 interface PendingTaskDraft {
@@ -194,6 +197,7 @@ export function AnalyzePage() {
     setReportPaths,
     setErrorMessage,
     setActiveTaskId,
+    setActiveRunId,
     setActiveTaskConfig,
     setReport,
     setResultSummary,
@@ -652,6 +656,7 @@ export function AnalyzePage() {
       : task.videos.map((video) => video.path)
     setLoadedTaskId(task.id)
     setActiveTaskId('')
+    setActiveRunId(null)
     setActiveTaskConfig(null)
     setPendingTaskDraft(null)
     setTaskCreateDialogOpen(false)
@@ -748,6 +753,7 @@ export function AnalyzePage() {
       } else {
         setLoadedTaskId(seededTask.id)
         setActiveTaskId('')
+        setActiveRunId(null)
         setActiveTaskConfig(null)
         setRunningStatus('idle')
         setProgress(0, '任务已新建，等待启动', { subProgress: null, subStage: '' })
@@ -791,7 +797,12 @@ export function AnalyzePage() {
       useSettingsStore.getState(),
       analysisConfigFromSettings(useSettingsStore.getState()),
     )
-    const taskConfig: RunBatchCompareConfig = { ...defaults, ...task.config, taskId: task.id }
+    const taskConfig: RunBatchCompareConfig = {
+      ...defaults,
+      ...task.config,
+      taskId: task.id,
+      runId: createAnalysisRunId(),
+    }
     if (!taskConfig?.videoDir || !taskConfig?.cacheDir) {
       setErrorMessage('该任务缺少运行配置，无法继续。')
       return
@@ -801,7 +812,37 @@ export function AnalyzePage() {
       return
     }
 
+    // Pausing is cooperative: cancel_current_task requests the worker to
+    // stop, while the watchdog waits for the Python/FFmpeg process tree to
+    // actually exit.  This handler is shared by the task list and the page's
+    // continue action, so keep the wait here before changing the task to
+    // running/preparing or clearing logs.  Otherwise an immediate continue
+    // races with the previous process and is rejected as "already running".
+    if (shouldWaitForAnalysisTaskShutdown(task.status, useAnalysisStore.getState().runningStatus)) {
+      const pausedProgress = task.progress
+      setProgress(pausedProgress, '正在等待上一次分析任务安全停止', {
+        subProgress: null,
+        subStage: '',
+      })
+      try {
+        await waitForAnalysisTaskShutdown()
+      } catch (error) {
+        const message = normalizeBackendError(error)
+        const latestProgress = useAnalysisStore.getState().progress
+        setErrorMessage('')
+        setProgress(latestProgress, '任务仍处于暂停状态，可稍后继续')
+        appendLog({ stream: 'stderr', line: message, timestamp: Date.now() })
+        await updateAnalysisTask(task.id, taskConfig.cacheDir, taskConfig.projectRoot, {
+          status: 'paused',
+          stage: '任务已暂停，可从任务列表继续',
+          progress: latestProgress,
+        }).catch(() => undefined)
+        return
+      }
+    }
+
     setActiveTaskId(task.id)
+    setActiveRunId(taskConfig.runId ?? null)
     setActiveTaskConfig(taskConfig)
     setIsPreparing(true)
     setErrorMessage('')
@@ -913,6 +954,7 @@ export function AnalyzePage() {
         // sidebar capsule cannot keep displaying the deleted task's pause
         // state (or accept a late cancellation event for it).
         setActiveTaskId('')
+        setActiveRunId(null)
         setActiveTaskConfig(null)
         setRunningStatus('idle')
         setProgress(0, '尚未运行分析', { subProgress: null, subStage: '' })

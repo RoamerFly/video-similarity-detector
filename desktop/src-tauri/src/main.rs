@@ -521,6 +521,8 @@ struct AnalysisStageFinishedPayload {
 #[serde(rename_all = "camelCase")]
 struct AnalysisErrorPayload {
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -997,6 +999,7 @@ struct RunBatchCompareConfig {
     min_segment_matches: Option<u32>,
     offset_tolerance: Option<f64>,
     task_id: Option<String>,
+    run_id: Option<String>,
     task_match_key: Option<String>,
     execution_stage: Option<String>,
     redo_stage: Option<bool>,
@@ -3682,6 +3685,11 @@ fn run_batch_compare(
         .filter(|value| is_safe_storage_id(value))
         .map(str::to_string)
         .unwrap_or_else(|| format!("analysis-{}", timestamp_millis()));
+    let run_id = config
+        .run_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("legacy-{}", timestamp_millis()));
     let execution_stage = config
         .execution_stage
         .as_deref()
@@ -3884,6 +3892,7 @@ fn run_batch_compare(
     let app_for_task = app.clone();
     let payload_for_task = payload.clone();
     let task_id_for_event = task_id.clone();
+    let run_id_for_event = run_id.clone();
     let stage_for_event = execution_stage.clone();
     thread::spawn(move || {
         run_batch_compare_process(
@@ -3891,6 +3900,7 @@ fn run_batch_compare(
             command,
             payload_for_task,
             task_id_for_event,
+            run_id_for_event,
             stage_for_event,
             launch_diagnostics,
         );
@@ -4829,11 +4839,40 @@ fn cancel_current_task(
     Ok(())
 }
 
+/// Wait until the cancelled analysis worker has released its TaskState.
+/// `cancel_current_task` intentionally returns as soon as cancellation is
+/// requested, while Python may still be unwinding and flushing its logs. A
+/// resume must wait for this boundary or the next run races the old process.
+#[tauri::command]
+async fn wait_for_analysis_task_shutdown(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(65);
+        loop {
+            let running = app
+                .state::<TaskState>()
+                .is_running
+                .lock()
+                .map(|guard| *guard)
+                .unwrap_or(false);
+            if !running {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("等待上一次分析任务安全停止超时，请稍后再继续".to_string());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    })
+    .await
+    .map_err(|error| format!("等待分析任务停止失败: {error}"))?
+}
+
 fn run_batch_compare_process(
     app: tauri::AppHandle,
     mut command: Command,
     payload: AnalysisFinishedPayload,
     task_id: String,
+    run_id: String,
     execution_stage: Option<String>,
     launch_diagnostics: PythonLaunchDiagnostics,
 ) {
@@ -4842,7 +4881,7 @@ fn run_batch_compare_process(
         Err(error) => {
             let message = python_spawn_error_message(&error, &launch_diagnostics);
             emit_log(&app, "stderr", &message);
-            emit_error(&app, &message);
+            emit_error_for_run(&app, &message, Some(&run_id));
             reset_task_state(&app);
             return;
         }
@@ -4894,7 +4933,7 @@ fn run_batch_compare_process(
         Err(error) => {
             let message = format!("等待 Python 进程失败: {error}");
             emit_log(&app, "stderr", &message);
-            emit_error(&app, &message);
+            emit_error_for_run(&app, &message, Some(&run_id));
             heartbeat_stop.store(true, Ordering::Relaxed);
             let _ = heartbeat_handle.join();
             join_log_threads(stdout_handle, stderr_handle);
@@ -4913,7 +4952,7 @@ fn run_batch_compare_process(
     if cancelled {
         let message = "分析已取消".to_string();
         emit_log(&app, "stderr", &message);
-        emit_error(&app, &message);
+        emit_error_for_run(&app, &message, Some(&run_id));
         return;
     }
 
@@ -4923,7 +4962,7 @@ fn run_batch_compare_process(
             None => "Python 分析被系统终止".to_string(),
         };
         emit_log(&app, "stderr", &message);
-        emit_error(&app, &message);
+        emit_error_for_run(&app, &message, Some(&run_id));
         return;
     }
 
@@ -7326,6 +7365,7 @@ fn main() {
             resume_video_merge,
             run_duplicate_file_check,
             cancel_current_task,
+            wait_for_analysis_task_shutdown,
             list_reports,
             read_report,
             read_report_overview,
@@ -8032,10 +8072,19 @@ fn emit_progress_detail<R: tauri::Runtime>(
 }
 
 fn emit_error<R: tauri::Runtime>(app: &tauri::AppHandle<R>, message: &str) {
+    emit_error_for_run(app, message, None);
+}
+
+fn emit_error_for_run<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    message: &str,
+    run_id: Option<&str>,
+) {
     let _ = app.emit(
         "analysis-error",
         AnalysisErrorPayload {
             message: message.to_string(),
+            run_id: run_id.map(ToOwned::to_owned),
         },
     );
 }
@@ -9590,7 +9639,7 @@ mod tests {
         parse_analysis_video_context, parse_analysis_video_quarantined, python_spawn_error_message,
         report_pairs_csv, sha256_clip_file_cancelable, unique_merge_output_path,
         update_report_entries_for_resolved_path, validate_export_path_chain,
-        write_clip_model_metadata, write_json_atomic, AnalysisVideoContext,
+        write_clip_model_metadata, write_json_atomic, AnalysisErrorPayload, AnalysisVideoContext,
         AnalysisVideoQuarantinedPayload, ClipModelInstallMetadata, ClipModelManifest,
         DecoderWarningAccumulator, MergeFinishedPayload, MergeProgressPayload,
         PythonLaunchDiagnostics, ReportPairIdentity, UpdateCancelState, VideoMergeConfig,
@@ -9705,6 +9754,23 @@ mod tests {
         })
         .expect("serialize running merge progress");
         assert!(running.get("paused").is_none());
+    }
+
+    #[test]
+    fn analysis_error_event_keeps_execution_identity() {
+        let payload = serde_json::to_value(AnalysisErrorPayload {
+            message: "分析已取消".to_string(),
+            run_id: Some("current-run".to_string()),
+        })
+        .expect("serialize analysis error event");
+        assert_eq!(payload["runId"], "current-run");
+
+        let legacy = serde_json::to_value(AnalysisErrorPayload {
+            message: "旧版错误".to_string(),
+            run_id: None,
+        })
+        .expect("serialize legacy analysis error event");
+        assert!(legacy.get("runId").is_none());
     }
 
     #[test]

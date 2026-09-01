@@ -30,6 +30,15 @@ export function analysisTaskStatusClass(task: AnalysisTaskRecord, isActive = fal
   return 'is-unknown'
 }
 
+/**
+ * A paused task may still have a backend process winding down.  Every resume
+ * entry point must wait for that process before changing the live state or
+ * clearing the previous run's logs.
+ */
+export function shouldWaitForAnalysisTaskShutdown(taskStatus: string, runningStatus: string) {
+  return taskStatus === 'paused' || runningStatus === 'paused'
+}
+
 export function analysisTaskStages(task: AnalysisTaskRecord): AnalysisTaskStage[] {
   const current = new Map((task.stages ?? []).map((stage) => [stage.id, stage]))
   return analysisTaskStageDefinitions.map((definition) => ({

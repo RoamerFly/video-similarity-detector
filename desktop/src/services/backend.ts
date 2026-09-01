@@ -250,6 +250,7 @@ export interface RunBatchCompareConfig {
   minSegmentMatches?: number
   offsetTolerance?: number
   taskId?: string
+  runId?: string
   taskMatchKey?: string
   executionStage?: AnalysisTaskStageId
   redoStage?: boolean
@@ -391,6 +392,19 @@ export interface AnalysisStageFinishedPayload {
 
 export interface AnalysisErrorPayload {
   message: string
+  runId?: string
+}
+
+export function shouldAcceptAnalysisEvent(activeRunId: string | null, eventRunId?: string) {
+  return eventRunId === undefined || eventRunId === activeRunId
+}
+
+let analysisRunSequence = 0
+
+export function createAnalysisRunId() {
+  analysisRunSequence += 1
+  const randomPart = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)
+  return `${Date.now()}-${analysisRunSequence}-${randomPart}`
 }
 
 export interface AnalysisVideoQuarantinedPayload {
@@ -1073,6 +1087,11 @@ export async function runDuplicateFileCheck(config: DuplicateFileCheckConfig) {
 export async function cancelCurrentTask() {
   if (!hasTauriRuntime()) return
   return invoke<void>('cancel_current_task')
+}
+
+export async function waitForAnalysisTaskShutdown() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('wait_for_analysis_task_shutdown')
 }
 
 export async function listReports(outputDir: string, refresh = false) {

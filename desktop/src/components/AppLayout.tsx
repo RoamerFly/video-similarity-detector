@@ -13,6 +13,7 @@ import {
   closeWindow,
   checkForUpdates,
   checkPythonEnv,
+  createAnalysisRunId,
   getAnalysisTask,
   getAppInfo,
   hasTauriRuntime,
@@ -29,7 +30,9 @@ import {
   runBatchCompare,
   runDuplicateFileCheck,
   setCloseBehavior,
+  shouldAcceptAnalysisEvent,
   updateAnalysisTask,
+  waitForAnalysisTaskShutdown,
   type FileMoveStatus,
   type MergeProgressPayload,
   type AppInfo,
@@ -79,14 +82,20 @@ export function AppLayout() {
       if (action === 'pause' && store.runningStatus !== 'running') return
       if (action === 'resume' && store.runningStatus !== 'paused') return
 
+      let cancellationRequested = false
       analysisActionInFlight.current = true
       try {
         if (action === 'pause') {
           await cancelCurrentTask()
+          cancellationRequested = true
+          const pendingPause = useAnalysisStore.getState()
+          pendingPause.setProgress(pendingPause.progress, '正在等待分析任务安全停止')
+          await waitForAnalysisTaskShutdown()
+          const stoppedProgress = useAnalysisStore.getState().progress
           await updateAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot, {
             status: 'paused',
             stage: '任务已暂停，可从任务列表继续',
-            progress: store.progress,
+            progress: stoppedProgress,
           })
           const latest = useAnalysisStore.getState()
           latest.appendLog({
@@ -100,13 +109,18 @@ export function AppLayout() {
           return
         }
 
+        const pendingResume = useAnalysisStore.getState()
+        pendingResume.setProgress(pendingResume.progress, '正在等待上一次分析任务安全停止')
+        await waitForAnalysisTaskShutdown()
         const task = await getAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot)
         const resumedConfig = {
           ...taskConfig,
           ...(task.config ?? {}),
           taskId,
+          runId: createAnalysisRunId(),
         }
         const latest = useAnalysisStore.getState()
+        latest.setActiveRunId(resumedConfig.runId ?? null)
         latest.setActiveTaskConfig(resumedConfig)
         latest.setErrorMessage('')
         latest.setRunningStatus('running')
@@ -153,7 +167,20 @@ export function AppLayout() {
         })
       } catch (error) {
         const latest = useAnalysisStore.getState()
-        if (latest.runningStatus !== 'paused') {
+        if (action === 'resume' || cancellationRequested) {
+          const message = normalizeBackendError(error)
+          latest.setRunningStatus('paused')
+          latest.setErrorMessage('')
+          latest.setProgress(latest.progress, '任务仍处于暂停状态，可稍后继续')
+          latest.appendLog({ stream: 'stderr', line: message, timestamp: Date.now() })
+          if (action === 'pause') {
+            await updateAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot, {
+              status: 'paused',
+              stage: '任务已暂停，可从任务列表继续',
+              progress: latest.progress,
+            }).catch(() => undefined)
+          }
+        } else {
           const message = normalizeBackendError(error)
           latest.setRunningStatus('error')
           latest.setErrorMessage(message)
@@ -413,6 +440,7 @@ export function AppLayout() {
         const cancelled = friendlyMessage.includes('取消') || friendlyMessage.includes('cancel')
         const store = useAnalysisStore.getState()
         if (!store.activeTaskId) return
+        if (!shouldAcceptAnalysisEvent(store.activeRunId, payload.runId)) return
         store.setRunningStatus(cancelled ? 'paused' : 'error')
         store.setErrorMessage(cancelled ? '' : friendlyMessage)
         store.setProgress(cancelled ? store.progress : 100, cancelled ? '任务已暂停' : '分析失败')

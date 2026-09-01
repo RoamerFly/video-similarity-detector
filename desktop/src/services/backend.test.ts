@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   isProjectPageUrl,
+  shouldAcceptAnalysisEvent,
   PROJECT_ISSUES_URL,
   PROJECT_LICENSE_URL,
   PROJECT_REPOSITORY_URL,
@@ -18,5 +19,13 @@ describe('project page URL allowlist', () => {
     expect(isProjectPageUrl(`${PROJECT_REPOSITORY_URL}/`)).toBe(false)
     expect(isProjectPageUrl(`${PROJECT_ISSUES_URL}?redirect=https://example.com`)).toBe(false)
     expect(isProjectPageUrl('https://github.com/RoamerFly/video-similarity-detector.evil.example/issues')).toBe(false)
+  })
+})
+
+describe('analysis event execution identity', () => {
+  it('rejects late events from a previous analysis execution', () => {
+    expect(shouldAcceptAnalysisEvent('current-run', 'previous-run')).toBe(false)
+    expect(shouldAcceptAnalysisEvent('current-run', 'current-run')).toBe(true)
+    expect(shouldAcceptAnalysisEvent(null, undefined)).toBe(true)
   })
 })

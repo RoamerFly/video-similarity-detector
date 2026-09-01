@@ -40,6 +40,7 @@ interface AnalysisState {
   report: BatchReport | null
   errorMessage: string
   activeTaskId: string
+  activeRunId: string | null
   activeTaskConfig: RunBatchCompareConfig | null
   selectedVideoPaths: Set<string>
   videoMultiSelect: boolean
@@ -59,6 +60,7 @@ interface AnalysisState {
   setReport: (report: BatchReport | null) => void
   setErrorMessage: (message: string) => void
   setActiveTaskId: (taskId: string) => void
+  setActiveRunId: (runId: string | null) => void
   setActiveTaskConfig: (config: RunBatchCompareConfig | null) => void
   setSelectedVideoPaths: (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => void
   setVideoMultiSelect: (enabled: boolean) => void
@@ -156,6 +158,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   report: null,
   errorMessage: '',
   activeTaskId: '',
+  activeRunId: null,
   activeTaskConfig: null,
   selectedVideoPaths: new Set<string>(),
   videoMultiSelect: false,
@@ -235,6 +238,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   setReport: (report) => set({ report }),
   setErrorMessage: (errorMessage) => set({ errorMessage }),
   setActiveTaskId: (activeTaskId) => set({ activeTaskId }),
+  setActiveRunId: (activeRunId) => set({ activeRunId }),
   setActiveTaskConfig: (activeTaskConfig) => set({ activeTaskConfig }),
   setSelectedVideoPaths: (updater) =>
     set((state) => ({
@@ -289,6 +293,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       report: null,
       errorMessage: '',
       activeTaskId: '',
+      activeRunId: null,
       activeTaskConfig: null,
       selectedVideoPaths: new Set<string>(),
       videoMultiSelect: false,
