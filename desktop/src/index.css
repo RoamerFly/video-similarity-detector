@@ -10227,12 +10227,16 @@ select {
 }
 
 .environment-status-inline {
-  display: flex;
+  display: grid;
   min-width: 0;
   align-items: center;
-  gap: 12px;
+  grid-template-columns: minmax(max-content, 1fr) repeat(3, minmax(0, 1fr)) auto;
+  grid-template-areas:
+    "heading python scripts report action"
+    "gpu message message message action";
+  gap: 6px 10px;
   overflow: hidden;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .environment-status-inline > strong,
@@ -10244,6 +10248,21 @@ select {
   color: rgba(222, 235, 255, 0.78);
   font-size: 11px;
 }
+
+.environment-status-inline > strong {
+  grid-area: heading;
+}
+
+.environment-status-inline .environment-status-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.environment-status-inline .environment-status-item-1 { grid-area: python; }
+.environment-status-inline .environment-status-item-2 { grid-area: scripts; }
+.environment-status-inline .environment-status-item-3 { grid-area: report; }
+.environment-status-inline .environment-status-item-4 { grid-area: gpu; }
 
 .environment-status-inline > span.is-failed {
   color: rgba(255, 178, 196, 0.94);
@@ -10258,14 +10277,16 @@ select {
 }
 
 .environment-inline-message {
-  flex: 1;
+  grid-area: message;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .environment-status-inline .neon-button {
+  grid-area: action;
+  grid-row: 1 / span 2;
   min-height: 28px;
-  margin-left: auto;
   padding-inline: 9px;
   font-size: 11px;
 }
@@ -13444,9 +13465,10 @@ select {
   transition: width 220ms ease, height 220ms ease, border-color 180ms ease, border-radius 180ms ease;
 }
 
-.merge-export-status-anchor > .editor-export-status.is-expanded {
-  width: min(340px, calc(100vw - 118px));
-  height: min(286px, calc(100vh - 32px));
+.merge-export-status-anchor > .editor-export-status.is-expanded,
+.analysis-export-status-anchor > .editor-export-status.is-expanded {
+  width: min(520px, calc(100vw - 118px));
+  height: min(360px, calc(100vh - 32px));
   border-color: rgba(104, 190, 255, 0.66);
   border-radius: 14px;
 }
@@ -13473,6 +13495,10 @@ select {
   grid-template-columns: 16px max-content minmax(0, 1fr) max-content 16px;
   padding: 0 10px;
   border-bottom: 1px solid rgba(116, 175, 255, 0.2);
+}
+
+.editor-export-status.analysis-export-status.is-expanded .merge-export-pill-head {
+  grid-template-columns: 16px max-content minmax(0, 1fr) max-content max-content 16px;
 }
 
 .merge-export-pill-head:hover,
@@ -13511,15 +13537,42 @@ select {
   font-size: 11px;
 }
 
+.merge-export-pill-head > .analysis-capsule-action {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  color: rgba(232, 244, 255, 0.9);
+  border: 1px solid rgba(116, 190, 255, 0.34);
+  border-radius: 7px;
+  background: rgba(56, 125, 220, 0.28);
+  cursor: pointer;
+}
+
+.merge-export-pill-head > .analysis-capsule-action:hover,
+.merge-export-pill-head > .analysis-capsule-action:focus-visible {
+  color: #fff;
+  border-color: rgba(151, 220, 255, 0.76);
+  background: rgba(56, 145, 240, 0.48);
+  outline: none;
+}
+
+.merge-export-pill-head > .analysis-capsule-action svg {
+  width: 13px;
+  height: 13px;
+}
+
 .merge-export-pill-chevron {
   width: 14px;
   height: 14px;
   color: rgba(184, 211, 255, 0.66);
   transition: transform 180ms ease;
+  transform: rotate(180deg);
 }
 
 .editor-export-status.is-expanded .merge-export-pill-chevron {
-  transform: rotate(180deg);
+  transform: rotate(0deg);
 }
 
 .merge-export-pill-progress {
@@ -13731,38 +13784,31 @@ select {
 }
 
 @media (max-width: 900px) {
-  .merge-export-status-anchor > .editor-export-status.is-expanded {
-    width: min(330px, calc(100vw - 106px));
-  }
-}
-
-@media (max-width: 560px) {
-  .merge-export-status-anchor > .editor-export-status.is-expanded {
-    width: min(310px, calc(100vw - 96px));
-    height: min(270px, calc(100vh - 24px));
-  }
-}
-
-/* Analysis logs contain separate stdout/stderr views and report links, so
-   their expanded capsule needs more room than the compact merge status tray.
-   Keep the viewport cap at every breakpoint because the capsules are anchored
-   to the bottom of the navigation rail and must remain fully usable in a
-   narrow window. */
-.analysis-export-status-anchor > .editor-export-status.is-expanded {
-  width: min(520px, calc(100vw - 118px));
-  height: min(430px, calc(100vh - 32px));
-}
-
-@media (max-width: 900px) {
+  .merge-export-status-anchor > .editor-export-status.is-expanded,
   .analysis-export-status-anchor > .editor-export-status.is-expanded {
     width: min(480px, calc(100vw - 106px));
-    height: min(400px, calc(100vh - 32px));
+    height: min(340px, calc(100vh - 32px));
   }
 }
 
 @media (max-width: 560px) {
+  .merge-export-status-anchor > .editor-export-status.is-expanded,
   .analysis-export-status-anchor > .editor-export-status.is-expanded {
     width: min(420px, calc(100vw - 96px));
-    height: min(360px, calc(100vh - 24px));
+    height: min(300px, calc(100vh - 24px));
   }
+}
+
+
+.analysis-log-toolbar-copy {
+  min-width: 0;
+  color: rgba(203, 218, 247, 0.58);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.analysis-log-toolbar-copy > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

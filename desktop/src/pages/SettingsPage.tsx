@@ -409,15 +409,18 @@ export function SettingsPage() {
   const saveFeedbackTimer = useRef<number | null>(null)
   const savedSettingsRef = useRef<SettingsSnapshot>(settingsSnapshotFromState(useSettingsStore.getState()))
   const [saveFeedback, setSaveFeedback] = useState<'idle' | 'saving' | 'saved'>('idle')
-  const environmentConfigKey = buildEnvironmentConfigKey(settings.pythonPath, settings.projectRoot, settings.reportDir)
-
   const executeEnvironmentCheck = useCallback(async (quickCheck = false) => {
+    const configKey = buildEnvironmentConfigKey(
+      useSettingsStore.getState().pythonPath,
+      useSettingsStore.getState().projectRoot,
+      useSettingsStore.getState().reportDir,
+    )
     useEnvironmentStore.getState().setChecking(true)
     useEnvironmentStore.getState().setError('')
     setError('')
     try {
       const status = await runEnvironmentCheck(quickCheck)
-      useEnvironmentStore.getState().setStatus(status, environmentConfigKey)
+      useEnvironmentStore.getState().setStatus(status, configKey)
     } catch (err) {
       const message = normalizeBackendError(err)
       useEnvironmentStore.getState().setStatus({
@@ -427,13 +430,13 @@ export function SettingsPage() {
         reportDirOk: false,
         gpuAvailable: undefined,
         gpuMessage: '未检测',
-      }, environmentConfigKey)
+      }, configKey)
       useEnvironmentStore.getState().setError(message)
       setError(message)
     } finally {
       useEnvironmentStore.getState().setChecking(false)
     }
-  }, [environmentConfigKey])
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -640,7 +643,10 @@ export function SettingsPage() {
       cacheDir: appInfo?.defaultCacheDir || settings.cacheDir,
       reportDir: appInfo?.defaultOutputDir || settings.reportDir,
     })
-    useEnvironmentStore.getState().resetEnvironment()
+    // Keep the last probe visible while the reset values are checked again.
+    // Clearing the store here made the footer look uninitialized after every
+    // reset and also discarded the GPU result until the user refreshed it.
+    void executeEnvironmentCheck(false)
     showSettingsMessage('已恢复默认基础设置，请点击“保存设置”应用。')
   }
 
@@ -773,8 +779,8 @@ export function SettingsPage() {
             <ShieldCheck size={17} />
             环境状态
           </strong>
-          {environmentRows.map((row) => (
-            <span className={environmentStatusClass(row.ok)} title={`${row.label}：${row.value}`} key={row.label}>
+          {environmentRows.map((row, index) => (
+            <span className={`environment-status-item environment-status-item-${index + 1} ${environmentStatusClass(row.ok)}`} title={`${row.label}：${row.value}`} key={row.label}>
               {row.ok === false ? <AlertCircle size={14} /> : row.ok === true ? <CheckCircle2 size={14} /> : <Info size={14} />}
               {row.label}：{row.value}
             </span>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown, CheckCircle2, ChevronDown, Clipboard, FolderOpen, Gauge, Trash2 } from 'lucide-react'
+import { ArrowDown, CheckCircle2, ChevronDown, Clipboard, FolderOpen, Gauge, Pause, Play, Trash2 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { GlassPanel } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
@@ -31,6 +31,10 @@ export function analysisExportCompactText(
 
 function formatAnalysisLogStream(stream: 'stdout' | 'stderr') {
   return stream === 'stderr' ? '错误(stderr)' : '输出(stdout)'
+}
+
+function isPercentageStatus(value: string) {
+  return /^\d+(?:\.\d+)?%$/.test(value)
 }
 
 interface AnalysisReportEntry {
@@ -109,7 +113,10 @@ export function AnalysisExportStatus({
   const visibleLogs = logSummary[logView]
   const renderedLogs = visibleLogs.slice(-500)
   const reportEntries = analysisReportEntries(reportPaths)
-  const compactText = t(analysisExportCompactText(progress, runningStatus, errorMessage))
+  const compactText = analysisExportCompactText(progress, runningStatus, errorMessage)
+  const compactLabel = isPercentageStatus(compactText)
+    ? `${t('分析')} ${compactText}`
+    : t(compactText)
   const statusLabel = errorMessage.trim()
     ? errorMessage
     : runningStatus === 'success'
@@ -168,21 +175,44 @@ export function AnalysisExportStatus({
 
   return (
     <Translated>
-      <GlassPanel ref={panelRef} className={`editor-export-status ${expanded ? 'is-expanded' : 'is-collapsed'}`}>
-        <button
-          type="button"
+      <GlassPanel ref={panelRef} className={`editor-export-status analysis-export-status ${expanded ? 'is-expanded' : 'is-collapsed'}`}>
+        <div
           className="merge-export-pill-head"
+          role="button"
+          tabIndex={0}
           onClick={() => setExpanded(!expanded)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              setExpanded(!expanded)
+            }
+          }}
           aria-expanded={expanded}
           aria-controls="analysis-export-status-body"
           title={expanded ? '收起导出状态和日志' : '展开导出状态和日志'}
         >
           <Gauge />
-          <span>{expanded ? '分析状态与日志' : compactText}</span>
+          <span>{expanded ? '分析状态与日志' : compactLabel}</span>
           {expanded && <strong title={stage}>{stage}</strong>}
           {expanded && <b>{progress.toFixed(2)}%</b>}
+          {expanded && (runningStatus === 'running' || runningStatus === 'paused') && (
+            <button
+              type="button"
+              className="analysis-capsule-action"
+              title={runningStatus === 'running' ? '暂停' : '继续'}
+              aria-label={runningStatus === 'running' ? '暂停' : '继续'}
+              onClick={(event) => {
+                event.stopPropagation()
+                window.dispatchEvent(new CustomEvent('analysis-task-action', {
+                  detail: { action: runningStatus === 'running' ? 'pause' : 'resume' },
+                }))
+              }}
+            >
+              {runningStatus === 'running' ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
+            </button>
+          )}
           <ChevronDown className="merge-export-pill-chevron" aria-hidden="true" />
-        </button>
+        </div>
 
         <div className="merge-export-pill-progress" aria-hidden="true">
           <span style={{ width: `${progress}%` }} />

@@ -3,6 +3,7 @@ import { ArrowDown, CheckCircle2, ChevronDown, FolderOpen, Gauge, Trash2 } from 
 import { useShallow } from 'zustand/react/shallow'
 import { GlassPanel } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
+import { useI18n } from '@/i18n/useI18n'
 import { normalizeBackendError, revealInFolder } from '@/services/backend'
 import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
 
@@ -29,6 +30,7 @@ export function MergeExportStatus({
   expanded: controlledExpanded,
   onExpandedChange,
 }: MergeExportStatusProps = {}) {
+  const { t } = useI18n()
   const [internalExpanded, setInternalExpanded] = useState(false)
   const expanded = controlledExpanded ?? internalExpanded
   const setExpanded = onExpandedChange ?? setInternalExpanded
@@ -92,6 +94,9 @@ export function MergeExportStatus({
   const visibleLogs = logs.slice(-300)
   const hiddenLogCount = Math.max(0, logs.length - visibleLogs.length)
   const compactText = mergeExportCompactText(progress, error)
+  const compactLabel = /^\d+(?:\.\d+)?%$/.test(compactText)
+    ? `${t('导出')} ${compactText}`
+    : t(compactText)
 
   return (
     <Translated>
@@ -105,7 +110,7 @@ export function MergeExportStatus({
         title={expanded ? '收起导出状态和日志' : '展开导出状态和日志'}
       >
         <Gauge />
-        <span>{expanded ? '导出状态与日志' : compactText}</span>
+        <span>{expanded ? '导出状态与日志' : compactLabel}</span>
         {expanded && <strong title={stage}>{stage}</strong>}
         {expanded && <b>{progress.toFixed(2)}%</b>}
         <ChevronDown className="merge-export-pill-chevron" aria-hidden="true" />

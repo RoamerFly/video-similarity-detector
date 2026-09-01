@@ -1319,6 +1319,7 @@ const extraEnglishText: Record<string, string> = {
   '进度': 'Progress',
   '分析中': 'Analyzing',
   '分析': 'Analyze',
+  '导出': 'Export',
   '已取消': 'Cancelled',
   '暂无分析报告': 'No analysis report',
   '前往报告文件夹': 'Open Report Folder',

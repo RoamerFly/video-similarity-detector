@@ -70,6 +70,7 @@ import {
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useEventCallback } from '@/components/merge/useEventCallback'
 import {
   analysisConfigFromSettings,
   analysisPresetOptions,
@@ -906,6 +907,21 @@ export function AnalyzePage() {
         settings.projectRoot || task.config?.projectRoot,
         deleteGeneratedCache,
       )
+      if (task.id === activeTaskId) {
+        // A paused task is deletable because no backend work remains. Clear
+        // the live run state as part of the delete transaction so the
+        // sidebar capsule cannot keep displaying the deleted task's pause
+        // state (or accept a late cancellation event for it).
+        pauseRequestedTaskId.current = ''
+        setActiveTaskId('')
+        setRunningStatus('idle')
+        setProgress(0, '尚未运行分析', { subProgress: null, subStage: '' })
+        setErrorMessage('')
+        setReportPaths(null)
+        setReport(null)
+        setResultSummary(null)
+        clearLogs()
+      }
       if (detailTask?.id === task.id) setDetailTask(null)
       if (stageTaskId === task.id) setStageTaskId('')
       setDeleteTask(null)
@@ -916,6 +932,24 @@ export function AnalyzePage() {
       setTaskCacheBusy(false)
     }
   }
+
+  const handleCapsuleAction = useEventCallback((event: Event) => {
+    const action = (event as CustomEvent<{ action?: 'pause' | 'resume' }>).detail?.action
+    if (action === 'pause') {
+      void handlePause()
+      return
+    }
+    if (action === 'resume') {
+      const taskId = useAnalysisStore.getState().activeTaskId
+      const task = historyTasks.find((item) => item.id === taskId)
+      if (task) void handleRunTask(task)
+    }
+  })
+
+  useEffect(() => {
+    window.addEventListener('analysis-task-action', handleCapsuleAction)
+    return () => window.removeEventListener('analysis-task-action', handleCapsuleAction)
+  }, [handleCapsuleAction])
 
   async function handleOpenTaskCache(task: AnalysisTaskRecord) {
     setTaskCacheBusy(true)
