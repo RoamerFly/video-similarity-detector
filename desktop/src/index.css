@@ -13392,16 +13392,22 @@ select {
   margin: auto 0 0;
   align-items: center;
   flex-direction: column;
-  gap: 7px;
+  gap: 0;
 }
 
 .sidebar-version-row > .version-pill {
-  width: 70px;
-  min-width: 70px;
+  display: flex;
+  width: 92px;
+  min-width: 92px;
+  height: 32px;
+  min-height: 32px;
   margin: 0;
-  padding: 5px 0;
-  flex: 0 0 70px;
+  padding: 0 8px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
   font-size: 11px;
+  border-radius: 6px;
 }
 
 .merge-export-status-anchor {
