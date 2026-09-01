@@ -110,6 +110,7 @@ import {
   selectOutputDirectory,
   selectSubtitleFiles,
   selectVideoFiles,
+  validateVideoExport,
 } from '@/services/backend'
 import {
   useMergeStore,
@@ -117,6 +118,7 @@ import {
   type MergeRotation,
   type MergeTextItem,
 } from '@/stores/mergeStore'
+import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -132,6 +134,78 @@ const commonResolutionOptions = [
   { label: '方形 1080', width: 1080, height: 1080 },
   { label: '标清 480p', width: 854, height: 480 },
 ]
+
+const mediaAttributeEpsilon = 0.001
+type MergeOutputFormat = 'mp4' | 'mkv' | 'mov'
+
+const mergeOutputFormats: Array<{ value: MergeOutputFormat; label: string }> = [
+  { value: 'mp4', label: 'MP4（兼容性最佳）' },
+  { value: 'mkv', label: 'MKV（保留轨道信息）' },
+  { value: 'mov', label: 'MOV（剪辑软件友好）' },
+]
+
+type ExportValidationResult = Awaited<ReturnType<typeof validateVideoExport>>
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure export-form helpers are covered by MergePage tests.
+export function outputNameStem(value: string) {
+  const trimmed = value.trim()
+  return trimmed.replace(/\.(?:mp4|mkv|mov)$/i, '')
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure export-form helpers are covered by MergePage tests.
+export function basicOutputNameError(value: string) {
+  const name = value.trim()
+  if (!name) return '请输入导出文件名称。'
+  if (/[<>:"/\\|?*]/.test(name) || Array.from(name).some((character) => character.charCodeAt(0) < 32)) return '文件名称不能包含 \\/:*?"<>| 或控制字符。'
+  if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(name)) return '文件名称不能使用系统保留名称。'
+  if (name.endsWith('.') || name.endsWith(' ')) return '文件名称不能以句点或空格结尾。'
+  return ''
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure export-form helper is covered by MergePage tests.
+export function canConfirmExport(
+  directory: string,
+  name: string,
+  validating: boolean,
+  validation: ExportValidationResult | null,
+) {
+  if (!directory.trim() || basicOutputNameError(name) || validating || !validation) return false
+  return !validation.nameTooLong && (validation.valid || validation.nameConflict)
+}
+
+function syncMediaAttributes(
+  media: HTMLMediaElement,
+  options: { muted: boolean; volume: number; playbackRate?: number },
+) {
+  if (media.muted !== options.muted) media.muted = options.muted
+  const volume = clamp(options.volume, 0, 1)
+  if (Math.abs(media.volume - volume) > mediaAttributeEpsilon) media.volume = volume
+  if (options.playbackRate !== undefined && Math.abs(media.playbackRate - options.playbackRate) > mediaAttributeEpsilon) {
+    media.playbackRate = options.playbackRate
+  }
+}
+
+function resetInactiveMedia(media: HTMLMediaElement) {
+  if (!media.paused) media.pause()
+  if (Math.abs(media.playbackRate - 1) > mediaAttributeEpsilon) media.playbackRate = 1
+  if (media.readyState >= 1 && media.currentTime > mediaAttributeEpsilon) {
+    try { media.currentTime = 0 } catch { /* decoder may be unloading */ }
+  }
+}
+
+function pauseMediaAtCurrentPosition(media: HTMLMediaElement) {
+  if (!media.paused) media.pause()
+  if (Math.abs(media.playbackRate - 1) > mediaAttributeEpsilon) media.playbackRate = 1
+}
+
+function releasePreviewMedia(media: HTMLMediaElement) {
+  media.pause()
+  media.removeAttribute('src')
+  // Explicitly tell the browser to tear down the decoder and buffered data.
+  // Merely pausing leaves large source buffers alive while FFmpeg starts.
+  media.load()
+}
+
 export function MergePage() {
   const merge = useMergeStore(useShallow((state) => ({
     addAudio: state.addAudio,
@@ -146,7 +220,6 @@ export function MergePage() {
     beginHistoryTransaction: state.beginHistoryTransaction,
     canRedo: state.canRedo,
     canUndo: state.canUndo,
-    clearLogs: state.clearLogs,
     duplicateVideo: state.duplicateVideo,
     endHistoryTransaction: state.endHistoryTransaction,
     items: state.items,
@@ -160,10 +233,6 @@ export function MergePage() {
     removeTextTrack: state.removeTextTrack,
     removeVideo: state.removeVideo,
     removeVideoTrack: state.removeVideoTrack,
-    running: state.running,
-    setError: state.setError,
-    setProgress: state.setProgress,
-    setRunning: state.setRunning,
     setSettings: state.setSettings,
     settings: state.settings,
     splitVideo: state.splitVideo,
@@ -178,6 +247,13 @@ export function MergePage() {
     updateVideos: state.updateVideos,
     videoTracks: state.videoTracks,
   })))
+  const mergeRuntime = useMergeRuntimeStore(useShallow((state) => ({
+    clearLogs: state.clearLogs,
+    running: state.running,
+    setError: state.setError,
+    setProgress: state.setProgress,
+    setRunning: state.setRunning,
+  })))
   const {
     audioTracks: mergeAudioTracks,
     updateAudios: updateMergeAudios,
@@ -190,7 +266,7 @@ export function MergePage() {
     items: merge.items,
     projectRoot,
     pythonPath,
-    onError: merge.setError,
+    onError: mergeRuntime.setError,
   })
   const dropActive = useMergeFileDrop()
   const previewRef = useRef<HTMLVideoElement | null>(null)
@@ -213,6 +289,8 @@ export function MergePage() {
   const lastPlaybackSyncRef = useRef(0)
   const lastPlaybackStructureKeyRef = useRef('')
   const lastPlaybackAudioKeyRef = useRef('')
+  const activeVideoIdsRef = useRef<Set<string>>(new Set())
+  const activeAudioIdsRef = useRef<Set<string>>(new Set())
   const playheadRef = useRef(0)
   const playbackAnchorRef = useRef({ time: 0, timestamp: 0 })
   // Every structural/play-state transition invalidates pending media events.
@@ -231,6 +309,13 @@ export function MergePage() {
   const [structuralPlayhead, setStructuralPlayhead] = useState(0)
   const [playing, setPlaying] = useState(false)
   playingRef.current = playing
+  const releaseAllPreviewMedia = useEventCallback(() => {
+    ++playbackGenerationRef.current
+    previewVideoRefs.current.forEach((video) => releasePreviewMedia(video))
+    previewAudioRefs.current.forEach((audio) => releasePreviewMedia(audio))
+    activeVideoIdsRef.current.clear()
+    activeAudioIdsRef.current.clear()
+  })
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(() => typeof window === 'undefined' ? 900 : window.innerHeight)
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
@@ -256,6 +341,22 @@ export function MergePage() {
   const [resolutionPreviewDuration, setResolutionPreviewDuration] = useState(5)
   const [resolutionPreviewClipIds, setResolutionPreviewClipIds] = useState<string[]>([])
   const [resolutionPreview, setResolutionPreview] = useState<{ path: string; start: number; duration: number; signature: string } | null>(null)
+  const [exportDirectoryDialogOpen, setExportDirectoryDialogOpen] = useState(false)
+  const [exportDirectoryDraft, setExportDirectoryDraft] = useState('')
+  const [exportNameDraft, setExportNameDraft] = useState('merged_video')
+  const [exportFormatDraft, setExportFormatDraft] = useState<MergeOutputFormat>('mp4')
+  const [exportValidation, setExportValidation] = useState<ExportValidationResult | null>(null)
+  const [validatedExportKey, setValidatedExportKey] = useState('')
+  const [exportValidating, setExportValidating] = useState(false)
+  const exportValidationRequestRef = useRef(0)
+  const cropSessionRef = useRef<{
+    clipId: string
+    cropEnabled: boolean
+    cropX: number
+    cropY: number
+    cropWidth: number
+    cropHeight: number
+  } | null>(null)
   useEffect(() => {
     const updateViewportHeight = () => setViewportHeight(window.innerHeight)
     window.addEventListener('resize', updateViewportHeight)
@@ -291,6 +392,57 @@ export function MergePage() {
     }
   }, [audioContextMenu, clipContextMenu, textContextMenu, trackContextMenu])
 
+  useEffect(() => {
+    if (!exportDirectoryDialogOpen) return undefined
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setExportDirectoryDialogOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [exportDirectoryDialogOpen])
+
+  useEffect(() => {
+    if (!exportDirectoryDialogOpen) {
+      return undefined
+    }
+    const directory = exportDirectoryDraft.trim()
+    const name = outputNameStem(exportNameDraft)
+    if (!directory || !name) {
+      return undefined
+    }
+
+    const requestId = ++exportValidationRequestRef.current
+    const validationKey = `${directory}\u0000${name}\u0000${exportFormatDraft}`
+    const timer = window.setTimeout(() => {
+      setExportValidating(true)
+      void validateVideoExport(directory, name, exportFormatDraft)
+        .then((result) => {
+          if (requestId === exportValidationRequestRef.current) {
+            setExportValidation(result)
+            setValidatedExportKey(validationKey)
+          }
+        })
+        .catch((error) => {
+          if (requestId !== exportValidationRequestRef.current) return
+          setExportValidation({
+            valid: false,
+            nameTooLong: false,
+            nameConflict: false,
+            suggestedName: '',
+            targetDir: directory,
+            message: normalizeBackendError(error),
+          } as ExportValidationResult)
+          setValidatedExportKey(validationKey)
+        })
+        .finally(() => {
+          if (requestId === exportValidationRequestRef.current) setExportValidating(false)
+        })
+    }, 180)
+    return () => window.clearTimeout(timer)
+  }, [exportDirectoryDialogOpen, exportDirectoryDraft, exportFormatDraft, exportNameDraft])
+
   const videoTrackIds = useMemo(() => merge.videoTracks.map((track) => track.id), [merge.videoTracks])
   const clipLayouts = useMemo(() => {
     return buildClipLayouts(merge.items, videoTrackIds, metadata)
@@ -323,6 +475,9 @@ export function MergePage() {
     () => JSON.stringify({ settings: merge.settings, videos: merge.items, audios: merge.audioItems, texts: merge.textItems }),
     [merge.audioItems, merge.items, merge.settings, merge.textItems],
   )
+  const sourceDirectory = useMemo(() => directoryFromPath(merge.items[0]?.path ?? ''), [merge.items])
+  const exportValidationKey = `${exportDirectoryDraft.trim()}\u0000${outputNameStem(exportNameDraft)}\u0000${exportFormatDraft}`
+  const currentExportValidation = validatedExportKey === exportValidationKey ? exportValidation : null
   const validResolutionPreview = resolutionPreview?.signature === resolutionPreviewSignature ? resolutionPreview : null
   const effectiveResolutionPreviewMode = validResolutionPreview && resolutionPreviewMode === 'computed' ? 'computed' : 'live'
   const timelineContentWidth = timelineViewportWidth || 720
@@ -543,51 +698,57 @@ export function MergePage() {
       lastPlaybackStructureKeyRef.current = structureKey
       setStructuralPlayhead(next)
     }
-    if (layout) {
+    if (layout && !cropEditing) {
       setSelectedClipId((current) => layouts.some((active) => active.item.id === current) ? current : layout.item.id)
     }
 
     const now = Date.now()
     if (!forceMediaUpdate && now - lastScrubMediaUpdateRef.current < scrubMediaIntervalMs) return
+    const activeVideoLayouts = new Map(layouts.map((active) => [active.item.id, active]))
+    const previousVideoIds = activeVideoIdsRef.current
     previewVideoRefs.current.forEach((video, id) => {
-      const active = layouts.find((l) => l.item.id === id)
+      const active = activeVideoLayouts.get(id)
       if (!active) {
-        video.pause()
-        video.playbackRate = 1
-        if (video.readyState >= 1) {
-          try { video.currentTime = 0 } catch { /* decoder may be unloading */ }
-        }
+        // Scrubbing can happen dozens of times per second. Only tear down a
+        // decoder when its active interval actually ended.
+        if (previousVideoIds.has(id)) resetInactiveMedia(video)
         return
       }
+      const targetVolume = active.item.muted ? 0 : (active.item.volume ?? 1)
+      // Keep one predictable audio route. Routing the same element through
+      // WebAudio while also using muted/volume caused silent previews and
+      // made old contexts survive page transitions.
+      syncMediaAttributes(video, {
+        muted: active.item.muted,
+        volume: targetVolume,
+        playbackRate: 1,
+      })
       if (video.readyState < 1) return
       const target = active.item.trimStart + Math.max(0, next - active.start)
       requestMediaSeek(video, target)
-      const targetVolume = active.item.muted ? 0 : (active.item.volume ?? 1)
-      // Keep one predictable audio route.  Routing the same element through
-      // WebAudio while also using muted/volume caused silent previews and
-      // made old contexts survive page transitions.
-      video.muted = active.item.muted
-      video.volume = clamp(targetVolume, 0, 1)
     })
+    activeVideoIdsRef.current = new Set(activeVideoLayouts.keys())
     const activeAudios = playbackIndex.activeAudiosAt(next)
+    const activeAudioLayouts = new Map(activeAudios.map((active) => [active.item.id, active]))
+    const previousAudioIds = activeAudioIdsRef.current
     previewAudioRefs.current.forEach((audio, id) => {
-      const active = activeAudios.find((l) => l.item.id === id)
+      const active = activeAudioLayouts.get(id)
       if (!active) {
-        audio.pause()
-        audio.playbackRate = 1
-        if (audio.readyState >= 1) {
-          try { audio.currentTime = 0 } catch { /* decoder may be unloading */ }
-        }
+        if (previousAudioIds.has(id)) resetInactiveMedia(audio)
         return
       }
+      syncMediaAttributes(audio, {
+        muted: Boolean(active.item.muted),
+        volume: active.item.muted ? 0 : (active.item.volume ?? 1),
+        playbackRate: 1,
+      })
       if (audio.readyState < 1) return
       const target = active.item.trimStart + Math.max(0, next - active.start)
       requestMediaSeek(audio, target)
-      audio.muted = Boolean(active.item.muted)
-      audio.volume = clamp(active.item.muted ? 0 : (active.item.volume ?? 1), 0, 1)
     })
+    activeAudioIdsRef.current = new Set(activeAudioLayouts.keys())
     lastScrubMediaUpdateRef.current = now
-  }, [totalDuration, playbackClock, playbackIndex])
+  }, [cropEditing, totalDuration, playbackClock, playbackIndex])
 
   const seekGlobal = useCallback((time: number, autoPlay = false) => {
     if (!autoPlay && playingRef.current) setPlaying(false)
@@ -606,9 +767,11 @@ export function MergePage() {
     if (!active) return
     const target = targetMediaTime(active.item.trimStart, playheadRef.current, active.start)
     requestMediaSeek(video, target, 0.05)
-    video.playbackRate = 1
-    video.muted = active.item.muted
-    video.volume = clamp(active.item.muted ? 0 : (active.item.volume ?? 1), 0, 1)
+    syncMediaAttributes(video, {
+      muted: active.item.muted,
+      volume: active.item.muted ? 0 : (active.item.volume ?? 1),
+      playbackRate: 1,
+    })
     if (playingRef.current) void video.play().catch(() => undefined)
   })
 
@@ -670,37 +833,34 @@ export function MergePage() {
         id,
       )
     }
-    const resetInactive = (media: HTMLMediaElement) => {
-      media.pause()
-      media.playbackRate = 1
-      if (media.readyState >= 1) {
-        try { media.currentTime = 0 } catch { /* decoder may be unloading */ }
-      }
-    }
     const listeners: Array<() => void> = []
     const activeVideos = playbackIndex.activeVideosAt(playheadRef.current)
+    const activeVideoLayouts = new Map(activeVideos.map((layout) => [layout.item.id, layout]))
     previewVideoRefs.current.forEach((video, id) => {
-      const layout = activeVideos.find((candidate) => candidate.item.id === id)
+      const layout = activeVideoLayouts.get(id)
       if (!layout) {
-        resetInactive(video)
+        resetInactiveMedia(video)
         return
       }
       const sync = () => {
         if (playbackGenerationRef.current !== generation) {
-          resetInactive(video)
+          resetInactiveMedia(video)
           return
         }
-        const currentLayout = playbackIndex.activeVideosAt(playheadRef.current)
-          .find((candidate) => candidate.item.id === id)
+        const currentLayout = new Map(
+          playbackIndex.activeVideosAt(playheadRef.current).map((candidate) => [candidate.item.id, candidate]),
+        ).get(id)
         if (!currentLayout) {
-          resetInactive(video)
+          resetInactiveMedia(video)
           return
         }
         const target = targetMediaTime(currentLayout.item.trimStart, playheadRef.current, currentLayout.start)
         requestMediaSeek(video, target, 0.2)
-        video.playbackRate = 1
-        video.muted = currentLayout.item.muted
-        video.volume = clamp(currentLayout.item.muted ? 0 : (currentLayout.item.volume ?? 1), 0, 1)
+        syncMediaAttributes(video, {
+          muted: currentLayout.item.muted,
+          volume: currentLayout.item.muted ? 0 : (currentLayout.item.volume ?? 1),
+          playbackRate: 1,
+        })
         if (isCurrent(id, 'video')) void video.play().catch(() => undefined)
         else video.pause()
       }
@@ -712,28 +872,32 @@ export function MergePage() {
     })
 
     const activeAudios = playbackIndex.activeAudiosAt(playheadRef.current)
+    const activeAudioLayouts = new Map(activeAudios.map((layout) => [layout.item.id, layout]))
     previewAudioRefs.current.forEach((audio, id) => {
-      const layout = activeAudios.find((candidate) => candidate.item.id === id)
+      const layout = activeAudioLayouts.get(id)
       if (!layout) {
-        resetInactive(audio)
+        resetInactiveMedia(audio)
         return
       }
       const sync = () => {
         if (playbackGenerationRef.current !== generation) {
-          resetInactive(audio)
+          resetInactiveMedia(audio)
           return
         }
-        const currentLayout = playbackIndex.activeAudiosAt(playheadRef.current)
-          .find((candidate) => candidate.item.id === id)
+        const currentLayout = new Map(
+          playbackIndex.activeAudiosAt(playheadRef.current).map((candidate) => [candidate.item.id, candidate]),
+        ).get(id)
         if (!currentLayout) {
-          resetInactive(audio)
+          resetInactiveMedia(audio)
           return
         }
         const target = targetMediaTime(currentLayout.item.trimStart, playheadRef.current, currentLayout.start)
         requestMediaSeek(audio, target, 0.2)
-        audio.playbackRate = 1
-        audio.muted = Boolean(currentLayout.item.muted)
-        audio.volume = clamp(currentLayout.item.muted ? 0 : (currentLayout.item.volume ?? 1), 0, 1)
+        syncMediaAttributes(audio, {
+          muted: Boolean(currentLayout.item.muted),
+          volume: currentLayout.item.muted ? 0 : (currentLayout.item.volume ?? 1),
+          playbackRate: 1,
+        })
         if (isCurrent(id, 'audio')) void audio.play().catch(() => undefined)
         else audio.pause()
       }
@@ -743,37 +907,49 @@ export function MergePage() {
         listeners.push(() => audio.removeEventListener('loadedmetadata', sync))
       }
     })
+    activeVideoIdsRef.current = new Set(activeVideoLayouts.keys())
+    activeAudioIdsRef.current = new Set(activeAudioLayouts.keys())
     return () => listeners.forEach((remove) => remove())
   }, [activeAudioLayoutKey, activeLayoutKey, audioLayouts, playing, audioTrackIds, playbackIndex])
 
   const handlePlaybackFrame = useEventCallback((next: number, timestamp: number) => {
       playheadRef.current = next
       playbackClock.setTime(next)
-      const structureKey = playbackIndex.structureKeyAt(next)
+      // Query each active interval once per frame and reuse the result for
+      // boundary detection and drift correction. The old implementation
+      // repeated both interval searches in the same RAF tick.
+      const layouts = playbackIndex.activeVideosAt(next)
+      const activeVideoLayouts = new Map(layouts.map((layout) => [layout.item.id, layout]))
+      const activeAudios = playbackIndex.activeAudiosAt(next)
+      const activeAudioLayouts = new Map(activeAudios.map((layout) => [layout.item.id, layout]))
+      const previousVideoIds = activeVideoIdsRef.current
+      const previousAudioIds = activeAudioIdsRef.current
+      const structureKey = playbackIndex.structureKeyAt(next, layouts)
       if (structureKey !== lastPlaybackStructureKeyRef.current) {
         lastPlaybackStructureKeyRef.current = structureKey
         setStructuralPlayhead(next)
-        const layouts = playbackIndex.activeVideosAt(next)
-        if (layouts.length > 0) {
+        if (layouts.length > 0 && !cropEditing) {
           setSelectedClipId((current) => layouts.some((active) => active.item.id === current) ? current : layouts[0].item.id)
         }
       }
-      const audioKey = playbackIndex.activeAudiosAt(next).map((layout) => layout.item.id).join('|')
+      const audioKey = activeAudios.map((layout) => layout.item.id).join('|')
       if (audioKey !== lastPlaybackAudioKeyRef.current) {
         lastPlaybackAudioKeyRef.current = audioKey
         // Audio-only boundaries must invalidate stale metadata callbacks too.
         setStructuralPlayhead(next)
       }
+      const nextVideoIds = new Set(activeVideoLayouts.keys())
+      const nextAudioIds = new Set(activeAudioLayouts.keys())
+      activeVideoIdsRef.current = nextVideoIds
+      activeAudioIdsRef.current = nextAudioIds
       if (timestamp - lastPlaybackSyncRef.current > 450) {
-        const layouts = playbackIndex.activeVideosAt(next)
-        previewVideoRefs.current.forEach((video, id) => {
-          const layout = layouts.find((l) => l.item.id === id)
+        const candidateVideoIds = new Set([...previousVideoIds, ...nextVideoIds])
+        candidateVideoIds.forEach((id) => {
+          const video = previewVideoRefs.current.get(id)
+          if (!video) return
+          const layout = activeVideoLayouts.get(id)
           if (!layout) {
-            video.pause()
-            video.playbackRate = 1
-            if (video.readyState >= 1 && video.currentTime > 0.01) {
-              try { video.currentTime = 0 } catch { /* decoder may be unloading */ }
-            }
+            resetInactiveMedia(video)
             return
           }
           if (video.readyState < 1) return
@@ -782,20 +958,20 @@ export function MergePage() {
           if (correction.seek) {
             requestMediaSeek(video, target, 0.4)
           }
-          video.playbackRate = correction.playbackRate
-          video.muted = layout.item.muted
-          video.volume = clamp(layout.item.muted ? 0 : (layout.item.volume ?? 1), 0, 1)
+          syncMediaAttributes(video, {
+            muted: layout.item.muted,
+            volume: layout.item.muted ? 0 : (layout.item.volume ?? 1),
+            playbackRate: correction.playbackRate,
+          })
           if (video.paused && playingRef.current) void video.play().catch(() => undefined)
         })
-        const activeAudios = playbackIndex.activeAudiosAt(next)
-        previewAudioRefs.current.forEach((audio, id) => {
-          const layout = activeAudios.find((l) => l.item.id === id)
+        const candidateAudioIds = new Set([...previousAudioIds, ...nextAudioIds])
+        candidateAudioIds.forEach((id) => {
+          const audio = previewAudioRefs.current.get(id)
+          if (!audio) return
+          const layout = activeAudioLayouts.get(id)
           if (!layout) {
-            audio.pause()
-            audio.playbackRate = 1
-            if (audio.readyState >= 1 && audio.currentTime > 0.01) {
-              try { audio.currentTime = 0 } catch { /* decoder may be unloading */ }
-            }
+            resetInactiveMedia(audio)
             return
           }
           if (audio.readyState < 1) return
@@ -804,9 +980,11 @@ export function MergePage() {
           if (correction.seek) {
             requestMediaSeek(audio, target, 0.4)
           }
-          audio.playbackRate = correction.playbackRate
-          audio.muted = Boolean(layout.item.muted)
-          audio.volume = clamp(layout.item.muted ? 0 : (layout.item.volume ?? 1), 0, 1)
+          syncMediaAttributes(audio, {
+            muted: Boolean(layout.item.muted),
+            volume: layout.item.muted ? 0 : (layout.item.volume ?? 1),
+            playbackRate: correction.playbackRate,
+          })
           if (audio.paused && playingRef.current) void audio.play().catch(() => undefined)
         })
         lastPlaybackSyncRef.current = timestamp
@@ -818,8 +996,8 @@ export function MergePage() {
       lastPlaybackStructureKeyRef.current = playbackIndex.structureKeyAt(playheadRef.current)
       return
     }
-    previewVideoRefs.current.forEach((video) => { video.pause(); video.playbackRate = 1 })
-    previewAudioRefs.current.forEach((audio) => { audio.pause(); audio.playbackRate = 1 })
+    previewVideoRefs.current.forEach((video) => pauseMediaAtCurrentPosition(video))
+    previewAudioRefs.current.forEach((audio) => pauseMediaAtCurrentPosition(audio))
   }, [playing, playbackIndex])
 
   useEffect(() => () => {
@@ -881,7 +1059,7 @@ export function MergePage() {
       const paths = await selectVideoFiles()
       merge.addVideos(paths.map((path) => ({ path, name: fileName(path) })))
     } catch (error) {
-      merge.setError(normalizeBackendError(error))
+      mergeRuntime.setError(normalizeBackendError(error))
     }
   }
 
@@ -890,7 +1068,7 @@ export function MergePage() {
       const paths = await selectAudioFiles()
       merge.addAudioFiles(paths)
     } catch (error) {
-      merge.setError(normalizeBackendError(error))
+      mergeRuntime.setError(normalizeBackendError(error))
     }
   }
 
@@ -929,9 +1107,9 @@ export function MergePage() {
         setSelectedAudioId('')
         setSelectedTextId(lastId)
       }
-      merge.setError(imported > 0 ? `已导入 ${imported} 条字幕。` : '未从字幕文件中解析到有效字幕。')
+      mergeRuntime.setError(imported > 0 ? `已导入 ${imported} 条字幕。` : '未从字幕文件中解析到有效字幕。')
     } catch (error) {
-      merge.setError(normalizeBackendError(error))
+      mergeRuntime.setError(normalizeBackendError(error))
     }
   }
 
@@ -940,7 +1118,7 @@ export function MergePage() {
       const path = await selectOutputDirectory()
       if (path) merge.setSettings({ outputDir: path })
     } catch (error) {
-      merge.setError(normalizeBackendError(error))
+      mergeRuntime.setError(normalizeBackendError(error))
     }
   }
 
@@ -1015,19 +1193,19 @@ export function MergePage() {
     const sourceTime = layout.item.trimStart + clamp(timelineTime - layout.start, 0, layout.duration)
     const nextId = merge.splitVideo(layout.item.id, sourceTime, timelineTime)
     if (!nextId) {
-      merge.setError('播放头距离片段边缘太近，无法拆分。')
+      mergeRuntime.setError('播放头距离片段边缘太近，无法拆分。')
       setClipContextMenu(null)
       return
     }
     setSelectedClipId(nextId)
-    merge.setError('')
+    mergeRuntime.setError('')
     setClipContextMenu(null)
   }
 
   function extractClipAudio(layout: ClipLayout) {
     const exists = merge.audioItems.some((item) => item.sourceClipId === layout.item.id)
     if (exists) {
-      merge.setError('该视频片段的音频已经在音频线中。')
+      mergeRuntime.setError('该视频片段的音频已经在音频线中。')
       setClipContextMenu(null)
       return
     }
@@ -1043,7 +1221,7 @@ export function MergePage() {
     setSelectedAudioId('')
     setSelectedTextId('')
     setSelectedClipId(layout.item.id)
-    merge.setError('')
+    mergeRuntime.setError('')
     setClipContextMenu(null)
   }
 
@@ -1129,7 +1307,7 @@ export function MergePage() {
   )
 
   const alignTimeline = useCallback(() => {
-    if (merge.running || globalTimelineGaps.length === 0) return
+    if (mergeRuntime.running || globalTimelineGaps.length === 0) return
     const videoUpdates = timelineGapPositionUpdates(
       globalTimelineGaps,
       clipLayouts.map((layout) => ({ id: layout.item.id, start: layout.start })),
@@ -1164,7 +1342,7 @@ export function MergePage() {
       clamp(playheadRef.current - removedBeforePlayhead, 0, Math.max(0, totalDuration - removedTotal)),
       true,
     )
-  }, [audioLayouts, clipLayouts, globalTimelineGaps, merge, scrubGlobal, totalDuration])
+  }, [audioLayouts, clipLayouts, globalTimelineGaps, merge, mergeRuntime.running, scrubGlobal, totalDuration])
 
   function removeClip(layout: ClipLayout) {
     // Removing time from the edit is a ripple operation.  Video and audio use
@@ -1270,6 +1448,10 @@ export function MergePage() {
   }
 
   function openTextContextMenu(event: React.MouseEvent, item: MergeTextItem) {
+    if (cropEditing) {
+      rejectCropEditSwitch(event)
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     setSelectedClipId('')
@@ -1285,6 +1467,10 @@ export function MergePage() {
   }
 
   function handlePreviewTextPointerDown(event: React.PointerEvent<HTMLDivElement>, item: MergeTextItem) {
+    if (cropEditing) {
+      rejectCropEditSwitch(event)
+      return
+    }
     if (event.button !== 0 || !outputCanvasRef.current) return
     event.preventDefault()
     event.stopPropagation()
@@ -1318,6 +1504,10 @@ export function MergePage() {
     item: MergeTextItem,
     handle: CropHandle,
   ) {
+    if (cropEditing) {
+      rejectCropEditSwitch(event)
+      return
+    }
     if (event.button !== 0 || !outputCanvasRef.current) return
     event.preventDefault()
     event.stopPropagation()
@@ -1374,7 +1564,7 @@ export function MergePage() {
 
   function applyActiveVideoLayout(mode: 'grid' | 'horizontal' | 'vertical' | 'auto') {
     if (activeLayouts.length < 2) {
-      merge.setError('当前播放位置至少需要两个重叠视频才能设置画面布局。')
+      mergeRuntime.setError('当前播放位置至少需要两个重叠视频才能设置画面布局。')
       return
     }
     merge.beginHistoryTransaction()
@@ -1395,7 +1585,7 @@ export function MergePage() {
     }
     merge.endHistoryTransaction()
     setGroupEditingKey(activeLayoutKey)
-    merge.setError('')
+    mergeRuntime.setError('')
   }
 
   function handlePreviewLayoutPointerDown(
@@ -1495,32 +1685,84 @@ export function MergePage() {
 
   function openCropEditor() {
     if (!previewClip || !cropGeometry) {
-      merge.setError('请先选择一个可预览的视频片段。')
+      mergeRuntime.setError('请先选择一个可预览的视频片段。')
       return
     }
+    if (cropEditing) return
     const current = previewClip.cropEnabled
       ? cropRectFromClip(previewClip, cropGeometry)
       : { x: 0, y: 0, width: cropGeometry.sourceWidth, height: cropGeometry.sourceHeight }
-    merge.updateVideo(previewClip.id, {
-      cropEnabled: true,
-      cropX: current.x,
-      cropY: current.y,
-      cropWidth: current.width,
-      cropHeight: current.height,
-    })
+    cropSessionRef.current = {
+      clipId: previewClip.id,
+      cropEnabled: previewClip.cropEnabled,
+      cropX: previewClip.cropX,
+      cropY: previewClip.cropY,
+      cropWidth: previewClip.cropWidth,
+      cropHeight: previewClip.cropHeight,
+    }
+    merge.beginHistoryTransaction()
+    // Keep the editor draft out of the undo stack until the user confirms.
+    previewEditDraft.set({ crop: { id: previewClip.id, rect: current } })
     setCropEditing(true)
   }
 
   function resetCropSelection() {
     if (!cropGeometry || !previewClip) return
-    merge.updateVideo(previewClip.id, {
+    const reset = {
       cropEnabled: true,
       cropX: 0,
       cropY: 0,
       cropWidth: cropGeometry.sourceWidth,
       cropHeight: cropGeometry.sourceHeight,
-    })
+    }
+    merge.updateVideo(previewClip.id, reset, false)
+    previewEditDraft.set({ crop: { id: previewClip.id, rect: {
+      x: reset.cropX,
+      y: reset.cropY,
+      width: reset.cropWidth,
+      height: reset.cropHeight,
+    } } })
   }
+
+  function confirmCropEditing() {
+    if (!cropEditing) return
+    previewEditDraft.set(null)
+    merge.endHistoryTransaction()
+    cropSessionRef.current = null
+    setCropEditing(false)
+  }
+
+  const cancelCropEditing = useCallback(() => {
+    const session = cropSessionRef.current
+    if (!cropEditing || !session) {
+      setCropEditing(false)
+      return
+    }
+    merge.updateVideo(session.clipId, {
+      cropEnabled: session.cropEnabled,
+      cropX: session.cropX,
+      cropY: session.cropY,
+      cropWidth: session.cropWidth,
+      cropHeight: session.cropHeight,
+    }, false)
+    previewEditDraft.set(null)
+    // The transaction snapshot is restored before closing, so cancelling does
+    // not create an undo entry and does not leave a draft mutation behind.
+    merge.endHistoryTransaction()
+    cropSessionRef.current = null
+    setCropEditing(false)
+  }, [cropEditing, merge, previewEditDraft])
+
+  useEffect(() => {
+    if (!cropEditing) return undefined
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      cancelCropEditing()
+    }
+    window.addEventListener('keydown', cancelOnEscape)
+    return () => window.removeEventListener('keydown', cancelOnEscape)
+  }, [cancelCropEditing, cropEditing])
 
   function handleCropPointerDown(event: React.PointerEvent<HTMLElement>, handle: CropHandle) {
     if (!cropGeometry || !previewClip || event.button !== 0) return
@@ -1541,8 +1783,7 @@ export function MergePage() {
     withPointerLifecycle(event, apply, (pointerEvent) => {
       const point = cropPointFromClient(pointerEvent.clientX, pointerEvent.clientY, canvasRect, cropGeometry)
       const next = resizeCropRect(startRect, startPoint, point, handle, cropGeometry)
-      merge.updateVideo(clipId, { cropEnabled: true, cropX: next.x, cropY: next.y, cropWidth: next.width, cropHeight: next.height }, false)
-      merge.endHistoryTransaction()
+       merge.updateVideo(clipId, { cropEnabled: true, cropX: next.x, cropY: next.y, cropWidth: next.width, cropHeight: next.height }, false)
     }, () => previewEditDraft.set(null))
 
     if (handle === 'draw') {
@@ -1550,7 +1791,12 @@ export function MergePage() {
     }
   }
 
-  const buildMergeConfig = useCallback((previewStart?: number, previewDuration?: number) => ({
+  const buildMergeConfig = useCallback((
+    previewStart?: number,
+    previewDuration?: number,
+    exportName?: string,
+    exportFormat: MergeOutputFormat = 'mp4',
+  ) => ({
     inputs: merge.items.map((item) => ({
       id: item.id,
       path: item.path,
@@ -1593,6 +1839,8 @@ export function MergePage() {
       backgroundColor: item.backgroundColor,
     })),
     ...merge.settings,
+    outputName: outputNameStem(exportName ?? merge.settings.outputName),
+    outputFormat: exportFormat,
     ...(previewStart !== undefined && previewDuration !== undefined ? { previewStart, previewDuration } : {}),
     projectRoot,
     pythonPath,
@@ -1605,7 +1853,7 @@ export function MergePage() {
     if (resolutionPreviewRangeMode === 'clips') {
       const selected = resolutionPreviewClips.filter((clip) => resolutionPreviewClipIds.includes(clip.id))
       if (selected.length === 0) {
-        merge.setError('请至少选择一个视频片段。')
+        mergeRuntime.setError('请至少选择一个视频片段。')
         return
       }
       start = Math.min(...selected.map((clip) => clip.start))
@@ -1613,15 +1861,19 @@ export function MergePage() {
       duration = Math.max(0.05, end - start)
     }
     if (start >= totalDuration - 0.001) {
-      merge.setError('当前播放头已在时间线末尾，没有可计算的内容。')
+      mergeRuntime.setError('当前播放头已在时间线末尾，没有可计算的内容。')
       return
     }
     duration = Math.min(Math.max(0.05, duration), totalDuration - start)
+    // Release browser decoders before the temporary FFmpeg render. The
+    // playhead remains in `playheadRef`, so mounted previews can restore it
+    // when the computed preview is closed.
+    releaseAllPreviewMedia()
     setResolutionPreviewCalculating(true)
     setResolutionPreviewMode('live')
     setResolutionPreview(null)
     setPlaying(false)
-    merge.setError('')
+    mergeRuntime.setError('')
     try {
       const previewConfig = buildMergeConfig(start, duration)
       const rangeEnd = start + duration
@@ -1684,56 +1936,127 @@ export function MergePage() {
       setResolutionPreviewMode('computed')
       setResolutionPreviewDialogOpen(false)
     } catch (error) {
-      merge.setError(normalizeBackendError(error))
+      mergeRuntime.setError(normalizeBackendError(error))
     } finally {
       setResolutionPreviewCalculating(false)
     }
-  }, [audioLayouts, buildMergeConfig, clipLayouts, merge, resolutionPreviewCalculating, resolutionPreviewClipIds, resolutionPreviewClips, resolutionPreviewDuration, resolutionPreviewRangeMode, resolutionPreviewSignature, totalDuration])
+  }, [audioLayouts, buildMergeConfig, clipLayouts, merge, mergeRuntime, releaseAllPreviewMedia, resolutionPreviewCalculating, resolutionPreviewClipIds, resolutionPreviewClips, resolutionPreviewDuration, resolutionPreviewRangeMode, resolutionPreviewSignature, totalDuration])
 
-  async function startMerge() {
+  function openExportDirectoryDialog() {
     if (merge.items.length === 0) {
-      merge.setError('请先向视频线加入至少一个视频。')
+      mergeRuntime.setError('请先向视频线加入至少一个视频。')
       return
     }
-    merge.clearLogs()
-    merge.setError('')
+    const suggestedDirectory = sourceDirectory || merge.settings.outputDir
+    setExportDirectoryDraft(suggestedDirectory)
+    setExportNameDraft(outputNameStem(merge.settings.outputName) || 'merged_video')
+    setExportFormatDraft('mp4')
+    setExportValidation(null)
+    setValidatedExportKey('')
+    setExportDirectoryDialogOpen(true)
+  }
+
+  async function browseExportDirectory() {
+    try {
+      const path = await selectOutputDirectory()
+      if (path) setExportDirectoryDraft(path)
+    } catch (error) {
+      mergeRuntime.setError(normalizeBackendError(error))
+    }
+  }
+
+  async function startMerge(
+    outputDirectory?: string,
+    outputName?: string,
+    outputFormat: MergeOutputFormat = 'mp4',
+  ) {
+    if (merge.items.length === 0) {
+      mergeRuntime.setError('请先向视频线加入至少一个视频。')
+      return
+    }
+    mergeRuntime.clearLogs()
+    mergeRuntime.setError('')
     // An export can be CPU/IO intensive. Invalidate pending media callbacks and
     // stop every decoder before handing control to the backend; the playback
     // RAF then tears down from `playing=false` without competing for frames.
-    ++playbackGenerationRef.current
+    releaseAllPreviewMedia()
     playingRef.current = false
     setPlaying(false)
     setResolutionPreviewMode('live')
-    previewVideoRefs.current.forEach((video) => {
-      video.pause()
-      video.playbackRate = 1
-    })
-    previewAudioRefs.current.forEach((audio) => {
-      audio.pause()
-      audio.playbackRate = 1
-    })
     timelineDragPreview.set(null)
     previewEditDraft.set(null)
-    merge.setRunning(true)
-    merge.setProgress(0, '正在提交导出任务')
+    mergeRuntime.setRunning(true)
+    mergeRuntime.setProgress(0, '正在提交导出任务')
     try {
-      await runVideoMerge(buildMergeConfig())
+      const config = buildMergeConfig(undefined, undefined, outputName, outputFormat)
+      if (outputDirectory !== undefined) config.outputDir = outputDirectory
+      await runVideoMerge(config)
     } catch (error) {
-      merge.setRunning(false)
-      merge.setError(normalizeBackendError(error))
+      mergeRuntime.setRunning(false)
+      mergeRuntime.setError(normalizeBackendError(error))
     }
+  }
+
+  function confirmExportDirectory() {
+    const outputDirectory = exportDirectoryDraft.trim()
+    const outputName = outputNameStem(exportNameDraft)
+    const localError = basicOutputNameError(outputName)
+    if (!outputDirectory) {
+      mergeRuntime.setError('请输入或选择导出文件夹。')
+      return
+    }
+    if (localError) {
+      mergeRuntime.setError(localError)
+      return
+    }
+    if (!canConfirmExport(outputDirectory, outputName, exportValidating, currentExportValidation)) return
+    merge.setSettings({ outputDir: outputDirectory })
+    merge.setSettings({ outputName })
+    setExportDirectoryDialogOpen(false)
+    void startMerge(outputDirectory, outputName, exportFormatDraft)
   }
 
   // Timeline rows are memoized. Keep their high-frequency pointer handlers
   // referentially stable while each invocation still observes current project state.
-  const onTracksPointerDown = timelineInteractions.handleTimelinePointerDown
-  const onPlayheadPointerDown = timelineInteractions.handlePlayheadPointerDown
-  const onVideoPointerDown = timelineInteractions.handleVideoPointerDown
-  const onVideoTrimPointerDown = timelineInteractions.handleVideoTrimPointerDown
-  const onAudioPointerDown = timelineInteractions.handleAudioPointerDown
-  const onAudioTrimPointerDown = timelineInteractions.handleAudioTrimPointerDown
-  const onTextPointerDown = timelineInteractions.handleTextPointerDown
-  const onTextTrimPointerDown = timelineInteractions.handleTextTrimPointerDown
+  // A crop session owns one clip and one history transaction; allowing a second
+  // clip to be selected mid-session would bind the transaction to the wrong item.
+  const rejectCropEditSwitch = useEventCallback((event: React.SyntheticEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    mergeRuntime.setError('请先确认或取消当前视频尺寸调整，再切换其他片段。')
+  })
+  const onTracksPointerDown = useEventCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleTimelinePointerDown(event)
+  })
+  const onPlayheadPointerDown = useEventCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handlePlayheadPointerDown(event)
+  })
+  const onVideoPointerDown = useEventCallback((event: React.PointerEvent, layout: ClipLayout) => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleVideoPointerDown(event, layout)
+  })
+  const onVideoTrimPointerDown = useEventCallback((event: React.PointerEvent, layout: ClipLayout, edge: 'start' | 'end') => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleVideoTrimPointerDown(event, layout, edge)
+  })
+  const onAudioPointerDown = useEventCallback((event: React.PointerEvent, layout: Parameters<typeof timelineInteractions.handleAudioPointerDown>[1]) => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleAudioPointerDown(event, layout)
+  })
+  const onAudioTrimPointerDown = useEventCallback((event: React.PointerEvent, layout: Parameters<typeof timelineInteractions.handleAudioTrimPointerDown>[1], edge: 'start' | 'end') => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleAudioTrimPointerDown(event, layout, edge)
+  })
+  const onTextPointerDown = useEventCallback((event: React.PointerEvent, item: MergeTextItem) => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleTextPointerDown(event, item)
+  })
+  const onTextTrimPointerDown = useEventCallback((event: React.PointerEvent, item: MergeTextItem, edge: 'start' | 'end') => {
+    if (cropEditing) return rejectCropEditSwitch(event)
+    timelineInteractions.handleTextTrimPointerDown(event, item, edge)
+  })
 
   return (
     <Translated>
@@ -1803,10 +2126,10 @@ export function MergePage() {
           >
             <SlidersHorizontal /><span>高级设置</span>
           </NeonButton>
-          {merge.running ? (
+          {mergeRuntime.running ? (
             <NeonButton tone="red" type="button" onClick={() => void cancelVideoMerge()}><Pause />取消导出</NeonButton>
           ) : (
-            <NeonButton type="button" disabled={merge.items.length === 0 || resolutionPreviewCalculating} onClick={() => void startMerge()}><Download />导出视频</NeonButton>
+            <NeonButton type="button" disabled={merge.items.length === 0 || resolutionPreviewCalculating} onClick={openExportDirectoryDialog}><Download />导出视频</NeonButton>
           )}
         </div>
       </GlassPanel>
@@ -1840,12 +2163,12 @@ export function MergePage() {
             playing={playing}
             clock={playbackClock}
             totalDuration={totalDuration}
-            suspendMedia={merge.running || resolutionPreviewCalculating}
+            suspendMedia={mergeRuntime.running || resolutionPreviewCalculating}
             previewStart={previewLayout?.start ?? null}
-            resolutionPreview={merge.running ? null : validResolutionPreview}
+            resolutionPreview={mergeRuntime.running ? null : validResolutionPreview}
             resolutionPreviewMode={effectiveResolutionPreviewMode}
             resolutionPreviewCalculating={resolutionPreviewCalculating}
-            onOpenResolutionPreview={!merge.running ? () => {
+            onOpenResolutionPreview={!mergeRuntime.running ? () => {
               setResolutionPreviewClipIds((current) => {
                 const valid = current.filter((id) => resolutionPreviewClips.some((clip) => clip.id === id))
                 return valid.length > 0 ? valid : resolutionPreviewClips.slice(0, 1).map((clip) => clip.id)
@@ -1863,12 +2186,13 @@ export function MergePage() {
             onGroupLayoutPointerDown={handleGroupLayoutPointerDown}
             onCropPointerDown={handleCropPointerDown}
             onResetCropSelection={resetCropSelection}
+            onCancelCropEditing={cancelCropEditing}
             onPreviewMetadataLoaded={updatePreviewGeometry}
             onPreviewVideoReady={handlePreviewVideoReady}
             onSeek={seekGlobal}
             onTogglePlayback={togglePlayback}
             onNudge={nudgePlayhead}
-            onFullscreenError={(message) => merge.setError(message)}
+            onFullscreenError={(message) => mergeRuntime.setError(message)}
           />
           {showOverlapToolbar && <section className="editor-workspace-controls" aria-label="重叠视频布局">
             <div className="editor-overlap-layout">
@@ -1983,12 +2307,14 @@ export function MergePage() {
               <button
                 type="button"
                 disabled={!previewClip}
-                onClick={() => cropEditing ? setCropEditing(false) : openCropEditor()}
+                onClick={() => cropEditing ? confirmCropEditing() : openCropEditor()}
               >
                 {cropEditing ? <CheckCircle2 /> : <SquareDashedMousePointer />}
 	                {cropEditing ? '调整完成' : previewClip?.cropEnabled ? '编辑红框' : '开始调整'}
               </button>
-              {previewClip?.cropEnabled && (
+              {cropEditing ? (
+                <button type="button" className="subtle" onClick={cancelCropEditing}>取消调整</button>
+              ) : previewClip?.cropEnabled && (
                 <button type="button" className="subtle" onClick={() => {
                   merge.updateVideo(previewClip.id, { cropEnabled: false })
                   setCropEditing(false)
@@ -2012,7 +2338,12 @@ export function MergePage() {
           <ChevronDown aria-hidden="true" />
           <span>{timelineCollapsed ? '展开时间线' : '折叠时间线'}</span>
         </button>
-        <div id="merge-timeline-workspace" className="editor-timeline-content">
+        <div
+          id="merge-timeline-workspace"
+          className="editor-timeline-content"
+          aria-disabled={cropEditing}
+          title={cropEditing ? '当前正在调整视频尺寸，请先确认或取消后再操作时间线。' : undefined}
+        >
           <MergeTimeline
           clock={playbackClock}
           dragPreview={timelineDragPreview}
@@ -2036,22 +2367,34 @@ export function MergePage() {
           draggedAudioId={draggedAudioId}
           draggedTextId={draggedTextId}
           playheadDragging={playheadDragging}
-          canAlignTimeline={!merge.running && globalTimelineGaps.length > 0}
-          alignTimelineDisabledReason={`一键删除所有视频线共同的空白，并同步前移视频、音频与文本片段。${merge.running ? '合并进行中，暂不可使用。' : globalTimelineGaps.length > 0 ? '当前可以执行。' : '当前没有需要对齐的共同空白。'}`}
+          canAlignTimeline={!mergeRuntime.running && globalTimelineGaps.length > 0}
+          alignTimelineDisabledReason={`一键删除所有视频线共同的空白，并同步前移视频、音频与文本片段。${mergeRuntime.running ? '合并进行中，暂不可使用。' : globalTimelineGaps.length > 0 ? '当前可以执行。' : '当前没有需要对齐的共同空白。'}`}
           onAlignTimeline={alignTimeline}
           onTracksPointerDown={onTracksPointerDown}
           onPlayheadPointerDown={onPlayheadPointerDown}
           onTrackContextMenu={(event, kind, trackId) => {
+            if (cropEditing) {
+              rejectCropEditSwitch(event)
+              return
+            }
             event.preventDefault()
             setTrackContextMenu({ x: event.clientX, y: event.clientY, kind, trackId })
           }}
           onTextTrackContextMenu={(event, trackId) => {
+            if (cropEditing) {
+              rejectCropEditSwitch(event)
+              return
+            }
             event.preventDefault()
             const rect = timelineRef.current?.getBoundingClientRect()
             setTrackContextMenu({ x: event.clientX, y: event.clientY, kind: 'text', trackId, time: rect ? timelineTimeFromClientX(event.clientX, rect, totalDuration, timelinePixelsPerSecondFit) : playheadRef.current })
           }}
           onVideoPointerDown={onVideoPointerDown}
           onVideoContextMenu={(event, layout) => {
+            if (cropEditing) {
+              rejectCropEditSwitch(event)
+              return
+            }
             event.preventDefault()
             event.stopPropagation()
             const rect = timelineRef.current?.getBoundingClientRect()
@@ -2067,6 +2410,10 @@ export function MergePage() {
           onAudioPointerDown={onAudioPointerDown}
           onAudioTrimPointerDown={onAudioTrimPointerDown}
           onAudioContextMenu={(event, layout) => {
+            if (cropEditing) {
+              rejectCropEditSwitch(event)
+              return
+            }
             event.preventDefault()
             event.stopPropagation()
             setSelectedClipId('')
@@ -2081,7 +2428,7 @@ export function MergePage() {
           onTextContextMenu={openTextContextMenu}
           />
         </div>
-        {!merge.running && !resolutionPreviewCalculating && merge.audioItems.map((audio) => (
+        {!mergeRuntime.running && !resolutionPreviewCalculating && merge.audioItems.map((audio) => (
           <audio
             key={`probe-${audio.id}`}
             ref={(node) => {
@@ -2103,6 +2450,90 @@ export function MergePage() {
       </GlassPanel>
 
       {dropActive && <div className="editor-drop-overlay"><Upload /><strong>松开以加入视频线或音频线</strong></div>}
+      {exportDirectoryDialogOpen && (
+        <div
+          className="merge-export-directory-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setExportDirectoryDialogOpen(false)
+          }}
+        >
+          <section className="merge-export-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="merge-export-directory-title">
+            <header>
+              <div>
+                <span className="eyebrow">导出位置</span>
+                <h2 id="merge-export-directory-title">选择导出文件夹</h2>
+              </div>
+              <button type="button" className="icon-button" aria-label="关闭导出文件夹选择" onClick={() => setExportDirectoryDialogOpen(false)}>×</button>
+            </header>
+            <p>默认建议使用第一个源视频所在文件夹。确认后才会开始合并。</p>
+            <div className="merge-export-directory-options">
+              <button
+                type="button"
+                className="merge-export-directory-option"
+                disabled={!sourceDirectory}
+                onClick={() => setExportDirectoryDraft(sourceDirectory)}
+              >
+                <FolderOpen />
+                <span><strong>使用源文件夹</strong><small>{sourceDirectory || '当前源视频没有可识别的文件夹'}</small></span>
+              </button>
+              <button type="button" className="merge-export-directory-option" onClick={() => void browseExportDirectory()}>
+                <FolderOpen />
+                <span><strong>浏览选择文件夹</strong><small>打开系统目录选择器</small></span>
+              </button>
+            </div>
+            <label className="merge-export-directory-field">
+              <span>导出文件夹路径</span>
+              <TextInput
+                autoFocus
+                value={exportDirectoryDraft}
+                onChange={(event) => setExportDirectoryDraft(event.target.value)}
+                placeholder="可直接输入完整路径"
+                aria-label="导出文件夹路径"
+              />
+            </label>
+            <label className="merge-export-directory-field">
+              <span>视频导出名称</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <TextInput
+                  value={exportNameDraft}
+                  onChange={(event) => setExportNameDraft(outputNameStem(event.target.value))}
+                  placeholder="例如 merged_video"
+                  aria-label="视频导出名称"
+                  aria-invalid={Boolean(basicOutputNameError(exportNameDraft))}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <strong style={{ color: 'rgba(205, 222, 246, 0.78)', fontSize: 13 }}>.{exportFormatDraft}</strong>
+              </div>
+            </label>
+            <label className="merge-export-directory-field">
+              <span>导出格式</span>
+              <SelectInput
+                value={exportFormatDraft}
+                onChange={(event) => setExportFormatDraft(event.target.value as MergeOutputFormat)}
+                aria-label="导出格式"
+              >
+                {mergeOutputFormats.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}
+              </SelectInput>
+            </label>
+            <p className="merge-message" role="status" aria-live="polite">
+              {basicOutputNameError(exportNameDraft)
+                || (exportValidating ? '正在检查导出文件名与路径…' : '')
+                || (currentExportValidation?.nameConflict ? '导出文件夹有重名，继续导出会在末尾加上10位的秒级时间戳' : '')
+                || (currentExportValidation?.nameTooLong ? (currentExportValidation.message || '导出文件名称或完整路径超过系统可容纳的最长长度。') : '')
+                || (currentExportValidation && !currentExportValidation.valid ? (currentExportValidation.message || '导出文件名称或路径无效，请修改后重试。') : '')}
+            </p>
+            <footer>
+              <button type="button" className="icon-button" onClick={() => setExportDirectoryDialogOpen(false)}>取消</button>
+              <NeonButton
+                type="button"
+                disabled={!canConfirmExport(exportDirectoryDraft, exportNameDraft, exportValidating, currentExportValidation)}
+                onClick={confirmExportDirectory}
+              ><Download />开始导出</NeonButton>
+            </footer>
+          </section>
+        </div>
+      )}
       <MergeTimelineContextMenus
         track={trackContextMenu} clip={clipContextMenu} audio={audioContextMenu} text={textContextMenu}
         trackCount={{ video: merge.videoTracks.length, audio: merge.audioTracks.length, text: merge.textTracks.length }}
@@ -2113,12 +2544,12 @@ export function MergePage() {
         canRestoreClip={Boolean(clipContextMenu && (clipContextMenu.layout.item.trimStart !== 0 || clipContextMenu.layout.item.trimEnd !== 0))}
         onTrackAddText={(track) => addTextAt(track.trackId, track.time ?? playheadRef.current)}
         onTrackAdd={(kind) => { if (kind === 'video') merge.addVideoTrack(); else if (kind === 'audio') merge.addAudioTrack(); else merge.addTextTrack(); setTrackContextMenu(null) }}
-        onTrackRemove={(track) => { const removed = track.kind === 'video' ? merge.removeVideoTrack(track.trackId) : track.kind === 'audio' ? merge.removeAudioTrack(track.trackId) : merge.removeTextTrack(track.trackId); if (!removed) merge.setError(`${trackKindLabel(track.kind)}至少保留一条。`); setTrackContextMenu(null) }}
+        onTrackRemove={(track) => { const removed = track.kind === 'video' ? merge.removeVideoTrack(track.trackId) : track.kind === 'audio' ? merge.removeAudioTrack(track.trackId) : merge.removeTextTrack(track.trackId); if (!removed) mergeRuntime.setError(`${trackKindLabel(track.kind)}至少保留一条。`); setTrackContextMenu(null) }}
         onClipSeek={(clip) => { seekGlobal(clip.time); setClipContextMenu(null) }} onClipPlay={(clip) => { seekGlobal(clip.layout.start, true); setClipContextMenu(null) }} onClipSplit={(clip) => splitClipAt(clip.layout, clip.time)} onClipExtractAudio={(clip) => extractClipAudio(clip.layout)}
         onClipToggleMute={(clip) => { merge.updateVideo(clip.layout.item.id, { muted: !clip.layout.item.muted }); setClipContextMenu(null) }} onClipRotate={(clip) => { rotateClipRight(clip.layout.item); setClipContextMenu(null) }} onClipRestoreRotation={(clip) => { restoreClipRotation(clip.layout.item); setClipContextMenu(null) }}
-        onClipCrop={(clip) => { const info = metadata[normalizePath(clip.layout.item.path)]; setSelectedAudioId(''); setSelectedClipId(clip.layout.item.id); seekGlobal(clip.layout.start); if (!clip.layout.item.cropEnabled && info?.readable) { const dimensions = rotatedDimensions(info.width, info.height, clip.layout.item.rotation); merge.updateVideo(clip.layout.item.id, { cropEnabled: true, cropX: 0, cropY: 0, cropWidth: dimensions.width, cropHeight: dimensions.height }) }; setClipContextMenu(null); window.requestAnimationFrame(() => setCropEditing(true)) }}
-        onClipDuplicate={(clip) => duplicateClip(clip.layout)} onClipMove={(clip, direction) => moveClip(clip.layout, direction)} canClipMove={(clip, direction) => Boolean(previousTrackLayout(clipLayouts, clip.layout, direction))} onClipRestore={(clip) => { merge.updateVideo(clip.layout.item.id, { trimStart: 0, trimEnd: 0 }); setClipContextMenu(null) }} onClipReveal={(clip) => { setClipContextMenu(null); void revealInFolder(clip.layout.item.path).catch((error) => merge.setError(normalizeBackendError(error))) }} onClipRemove={(clip) => removeClip(clip.layout)}
-        onAudioSeek={(audio) => { seekGlobal(audio.layout.start); setAudioContextMenu(null) }} onAudioMoveToPlayhead={(audio) => { merge.updateAudio(audio.layout.item.id, { startTime: playheadRef.current }); setAudioContextMenu(null) }} onAudioMoveToStart={(audio) => { merge.updateAudio(audio.layout.item.id, { startTime: 0 }); setAudioContextMenu(null) }} onAudioEditProperties={(audio) => { setSelectedClipId(''); setSelectedTextId(''); setSelectedAudioId(audio.layout.item.id); setAudioContextMenu(null); setInspectorOpen(true) }} onAudioReveal={(audio) => { setAudioContextMenu(null); void revealInFolder(audio.layout.item.path).catch((error) => merge.setError(normalizeBackendError(error))) }} onAudioRemove={(audio) => { merge.removeAudio(audio.layout.item.id); setSelectedAudioId(''); setAudioContextMenu(null) }}
+          onClipCrop={(clip) => { setSelectedAudioId(''); setSelectedClipId(clip.layout.item.id); seekGlobal(clip.layout.start); setClipContextMenu(null); window.requestAnimationFrame(() => openCropEditor()) }}
+        onClipDuplicate={(clip) => duplicateClip(clip.layout)} onClipMove={(clip, direction) => moveClip(clip.layout, direction)} canClipMove={(clip, direction) => Boolean(previousTrackLayout(clipLayouts, clip.layout, direction))} onClipRestore={(clip) => { merge.updateVideo(clip.layout.item.id, { trimStart: 0, trimEnd: 0 }); setClipContextMenu(null) }} onClipReveal={(clip) => { setClipContextMenu(null); void revealInFolder(clip.layout.item.path).catch((error) => mergeRuntime.setError(normalizeBackendError(error))) }} onClipRemove={(clip) => removeClip(clip.layout)}
+        onAudioSeek={(audio) => { seekGlobal(audio.layout.start); setAudioContextMenu(null) }} onAudioMoveToPlayhead={(audio) => { merge.updateAudio(audio.layout.item.id, { startTime: playheadRef.current }); setAudioContextMenu(null) }} onAudioMoveToStart={(audio) => { merge.updateAudio(audio.layout.item.id, { startTime: 0 }); setAudioContextMenu(null) }} onAudioEditProperties={(audio) => { setSelectedClipId(''); setSelectedTextId(''); setSelectedAudioId(audio.layout.item.id); setAudioContextMenu(null); setInspectorOpen(true) }} onAudioReveal={(audio) => { setAudioContextMenu(null); void revealInFolder(audio.layout.item.path).catch((error) => mergeRuntime.setError(normalizeBackendError(error))) }} onAudioRemove={(audio) => { merge.removeAudio(audio.layout.item.id); setSelectedAudioId(''); setAudioContextMenu(null) }}
         onTextSeek={(text) => { seekGlobal(text.text.startTime); setTextContextMenu(null) }} onTextMoveToPlayhead={(text) => { merge.updateText(text.text.id, { startTime: playheadRef.current }); setTextContextMenu(null) }} onTextEditProperties={(text) => { setTextContextMenu(null); setTextPropertiesId(text.text.id) }} onTextRemove={(text) => { merge.removeText(text.text.id); setSelectedTextId(''); setTextContextMenu(null) }}
       />
       <MergeResolutionSimulationDialog
@@ -2149,4 +2580,16 @@ function trackKindLabel(kind: 'video' | 'audio' | 'text') {
 	  if (kind === 'video') return '视频线'
 	  if (kind === 'audio') return '音频线'
 	  return '文本线'
+}
+
+function directoryFromPath(path: string) {
+  const trimmed = path.trim().replace(/[\\/]+$/, '')
+  if (!trimmed) return ''
+  const separatorIndex = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
+  if (separatorIndex < 0) return ''
+  // Keep the root separator for paths such as `C:\\video.mp4`, `/video.mp4`,
+  // and UNC paths while avoiding a trailing separator for ordinary folders.
+  if (separatorIndex === 2 && /^[A-Za-z]:/.test(trimmed)) return trimmed.slice(0, 3)
+  if (separatorIndex === 0) return trimmed.slice(0, 1)
+  return trimmed.slice(0, separatorIndex)
 }

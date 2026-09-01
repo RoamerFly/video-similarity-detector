@@ -38,6 +38,17 @@ export interface UpdateDownloadProgress {
   stage: string
 }
 
+export interface DownloadTaskStatus {
+  task: string
+  running: boolean
+  cancelRequested: boolean
+  cancelled?: boolean
+  progress: number
+  downloadedBytes: number
+  totalBytes: number
+  stage: string
+}
+
 export interface ClipModelStatus {
   installed: boolean
   modelDir: string
@@ -147,6 +158,7 @@ export interface VideoMergeConfig {
   textTracks: VideoMergeTextItem[]
   outputDir: string
   outputName: string
+  outputFormat: VideoExportFormat
   width: number
   height: number
   fitMode: 'contain' | 'cover' | 'stretch'
@@ -167,6 +179,17 @@ export interface VideoMergeConfig {
   pythonPath?: string
   previewStart?: number
   previewDuration?: number
+}
+
+export type VideoExportFormat = 'mp4' | 'mkv' | 'mov'
+
+export interface VideoExportValidation {
+  valid: boolean
+  nameTooLong: boolean
+  nameConflict: boolean
+  suggestedName: string
+  targetDir: string
+  message?: string
 }
 
 export interface MergeProgressPayload {
@@ -479,6 +502,25 @@ export async function getAppInfo() {
   return invoke<AppInfo>('get_app_info')
 }
 
+export const PROJECT_REPOSITORY_URL = 'https://github.com/RoamerFly/video-similarity-detector'
+export const PROJECT_ISSUES_URL = `${PROJECT_REPOSITORY_URL}/issues`
+export const PROJECT_LICENSE_URL = `${PROJECT_REPOSITORY_URL}/blob/main/LICENSE`
+
+const PROJECT_PAGE_URLS = [PROJECT_REPOSITORY_URL, PROJECT_ISSUES_URL, PROJECT_LICENSE_URL] as const
+
+export function isProjectPageUrl(url: string): url is (typeof PROJECT_PAGE_URLS)[number] {
+  return PROJECT_PAGE_URLS.includes(url as (typeof PROJECT_PAGE_URLS)[number])
+}
+
+export async function openProjectPage(url: string) {
+  if (!isProjectPageUrl(url)) throw new Error('项目页面地址不受信任。')
+  if (!hasTauriRuntime()) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return
+  }
+  return invoke<void>('open_project_page', { url })
+}
+
 export async function checkForUpdates(proxyUrl?: string) {
   if (!hasTauriRuntime()) {
     return {
@@ -509,6 +551,21 @@ export async function downloadAndInstallUpdate(proxyUrl?: string) {
 export async function cancelUpdateDownload() {
   if (!hasTauriRuntime()) return
   return invoke<void>('cancel_update_download')
+}
+
+export async function getUpdateDownloadStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      task: 'application-update',
+      running: false,
+      cancelRequested: false,
+      progress: 0,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      stage: '',
+    } satisfies DownloadTaskStatus
+  }
+  return invoke<DownloadTaskStatus>('get_update_download_status')
 }
 
 export async function openReleasePage(url: string) {
@@ -559,6 +616,21 @@ export async function cancelRuntimeInstall() {
   return invoke<void>('cancel_runtime_install')
 }
 
+export async function getRuntimeDownloadStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      task: '',
+      running: false,
+      cancelRequested: false,
+      progress: 0,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      stage: '',
+    } satisfies DownloadTaskStatus
+  }
+  return invoke<DownloadTaskStatus>('get_runtime_download_status')
+}
+
 export async function getMergeRuntimeStatus() {
   if (!hasTauriRuntime()) {
     return {
@@ -606,6 +678,26 @@ export async function installClipModel(proxyUrl?: string) {
   return invoke<ClipModelStatus>('install_clip_model', { proxyUrl: proxyUrl?.trim() || null })
 }
 
+export async function cancelClipModelInstall() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('cancel_clip_model_install')
+}
+
+export async function getClipModelDownloadStatus() {
+  if (!hasTauriRuntime()) {
+    return {
+      task: 'clip-model',
+      running: false,
+      cancelRequested: false,
+      progress: 0,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      stage: '',
+    } satisfies DownloadTaskStatus
+  }
+  return invoke<DownloadTaskStatus>('get_clip_model_download_status')
+}
+
 export async function selectVideoDirectory() {
   if (!hasTauriRuntime()) throw new Error('目录选择需要在 Tauri 应用中运行。')
   return invoke<string | null>('select_video_directory')
@@ -634,6 +726,27 @@ export async function selectOutputDirectory() {
 export async function selectPythonExecutable() {
   if (!hasTauriRuntime()) throw new Error('Python 路径选择需要在 Tauri 应用中运行。')
   return invoke<string | null>('select_python_executable')
+}
+
+export async function validateVideoExport(
+  targetDir: string,
+  outputName: string,
+  outputFormat: VideoExportFormat = 'mp4',
+) {
+  if (!hasTauriRuntime()) {
+    return {
+      valid: true,
+      nameTooLong: false,
+      nameConflict: false,
+      suggestedName: `${outputName}.${outputFormat}`,
+      targetDir,
+    } satisfies VideoExportValidation
+  }
+  return invoke<VideoExportValidation>('validate_video_export', {
+    targetDir,
+    outputName,
+    outputFormat,
+  })
 }
 
 export async function scanVideos(inputDir: string, recursive = true) {

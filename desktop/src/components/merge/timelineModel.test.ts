@@ -166,7 +166,8 @@ describe('timeline layout behavior', () => {
     const index = createTimelinePlaybackIndex(layouts, [], ['video-1'])
 
     expect(index.activeVideosAt(7_654.5).map((layout) => layout.item.id)).toEqual(['clip-7654'])
-    expect(index.structureKeyAt(7_654.5)).toBe('clip-7654::')
+    const active = index.activeVideosAt(7_654.5)
+    expect(index.structureKeyAt(7_654.5, active)).toBe('clip-7654::')
     expect(index.activeVideosAt(10_000)).toEqual([])
   })
 

@@ -100,8 +100,8 @@ export function createTimelinePlaybackIndex(
   return {
     activeVideosAt,
     activeAudiosAt: (time: number) => audios.query(time),
-    structureKeyAt(time: number) {
-      const videoKey = activeVideosAt(time).map((layout) => layout.item.id).join('|')
+    structureKeyAt(time: number, activeVideoLayouts?: ClipLayout[]) {
+      const videoKey = (activeVideoLayouts ?? activeVideosAt(time)).map((layout) => layout.item.id).join('|')
       const textKey = texts.query(time).map((item) => item.id).join('|')
       return `${videoKey}::${textKey}`
     },

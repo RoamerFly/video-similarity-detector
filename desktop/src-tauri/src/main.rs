@@ -38,6 +38,15 @@ const RELEASES_LATEST_PAGE_URL: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest";
 const CLIP_MODEL_DOWNLOAD_URL: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download/clip-vit-base-patch32.zip";
+const PROJECT_REPOSITORY_URL: &str = "https://github.com/RoamerFly/video-similarity-detector";
+const PROJECT_ISSUES_URL: &str = "https://github.com/RoamerFly/video-similarity-detector/issues";
+const PROJECT_LICENSE_URL: &str =
+    "https://github.com/RoamerFly/video-similarity-detector/blob/main/LICENSE";
+const PROJECT_PAGE_URLS: &[&str] = &[
+    PROJECT_REPOSITORY_URL,
+    PROJECT_ISSUES_URL,
+    PROJECT_LICENSE_URL,
+];
 const CLIP_MODEL_DIR_NAME: &str = "clip-vit-base-patch32";
 const CLIP_MODEL_FILE_HASHES: &[(&str, &str)] = &[
     (
@@ -56,6 +65,15 @@ const CLIP_MODEL_FILE_HASHES: &[(&str, &str)] = &[
 const ANALYSIS_VIDEO_CONTEXT_PREFIX: &str = "ANALYSIS_VIDEO_CONTEXT|";
 const ANALYSIS_VIDEO_QUARANTINED_PREFIX: &str = "ANALYSIS_VIDEO_QUARANTINED|";
 static CLOSE_BEHAVIOR: AtomicU8 = AtomicU8::new(CLOSE_BEHAVIOR_ASK);
+// Exporting, previewing, and replacing the media runtime all compete for the
+// same FFmpeg files and machine resources.  Keep one process-wide reservation
+// so a preview cannot silently double the memory footprint of an export.
+static MEDIA_OPERATION_BUSY: AtomicBool = AtomicBool::new(false);
+static MERGE_TASK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const MERGE_LOG_BATCH_LIMIT: usize = 32;
+const MERGE_LOG_BATCH_INTERVAL: Duration = Duration::from_millis(120);
+const MERGE_PREVIEW_TASK_PREFIX: &str = "merge-preview-";
+const MERGE_OUTPUT_FORMATS: &[&str] = &["mp4", "mkv", "mov"];
 
 #[derive(Default)]
 struct TaskState {
@@ -67,7 +85,141 @@ struct TaskState {
 
 #[derive(Default)]
 struct UpdateCancelState {
-    cancel_requested: AtomicBool,
+    is_running: AtomicBool,
+    cancel_requested: Arc<AtomicBool>,
+    status: Mutex<DownloadTaskStatus>,
+}
+
+impl UpdateCancelState {
+    fn try_begin(&self) -> bool {
+        if self
+            .is_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut status) = self.status.lock() {
+            *status = DownloadTaskStatus {
+                task: "application-update".to_string(),
+                running: true,
+                ..DownloadTaskStatus::default()
+            };
+        }
+        true
+    }
+
+    fn finish(&self, stage: &str, cancelled: bool) {
+        self.is_running.store(false, Ordering::SeqCst);
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut status) = self.status.lock() {
+            status.running = false;
+            status.cancel_requested = false;
+            status.cancelled = cancelled;
+            status.stage = stage.to_string();
+        }
+    }
+
+    fn cancel(&self) {
+        if self.is_running.load(Ordering::SeqCst) {
+            self.cancel_requested.store(true, Ordering::SeqCst);
+            if let Ok(mut status) = self.status.lock() {
+                status.cancel_requested = true;
+                status.stage = "正在取消下载".to_string();
+            }
+        }
+    }
+
+    fn snapshot(&self) -> DownloadTaskStatus {
+        self.status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default()
+    }
+
+    fn update_progress(&self, downloaded: u64, total: u64, progress: f64, stage: &str) {
+        if let Ok(mut status) = self.status.lock() {
+            status.downloaded_bytes = downloaded;
+            status.total_bytes = total;
+            status.progress = progress.clamp(0.0, 100.0);
+            status.stage = stage.to_string();
+            status.cancel_requested = self.cancel_requested.load(Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClipModelDownloadState {
+    is_running: AtomicBool,
+    cancel_requested: Arc<AtomicBool>,
+    status: Mutex<DownloadTaskStatus>,
+}
+
+impl ClipModelDownloadState {
+    fn try_begin(&self) -> bool {
+        if self
+            .is_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut status) = self.status.lock() {
+            *status = DownloadTaskStatus {
+                task: "clip-model".to_string(),
+                running: true,
+                ..DownloadTaskStatus::default()
+            };
+        }
+        true
+    }
+
+    fn finish(&self, stage: &str, cancelled: bool) {
+        self.is_running.store(false, Ordering::SeqCst);
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut status) = self.status.lock() {
+            status.running = false;
+            status.cancel_requested = false;
+            status.cancelled = cancelled;
+            status.stage = stage.to_string();
+        }
+    }
+
+    fn cancel(&self) {
+        if self.is_running.load(Ordering::SeqCst) {
+            self.cancel_requested.store(true, Ordering::SeqCst);
+            if let Ok(mut status) = self.status.lock() {
+                status.cancel_requested = true;
+                status.stage = "正在取消下载".to_string();
+            }
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    fn snapshot(&self) -> DownloadTaskStatus {
+        self.status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct DownloadTaskStatus {
+    task: String,
+    running: bool,
+    cancel_requested: bool,
+    cancelled: bool,
+    progress: f64,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    stage: String,
 }
 
 #[derive(Default)]
@@ -75,8 +227,10 @@ struct MergeTaskState {
     current_pid: Mutex<Option<u32>>,
     cancel_requested: Mutex<bool>,
     is_running: Mutex<bool>,
+    task_id: Mutex<Option<String>>,
     config_path: Mutex<Option<PathBuf>>,
     result_path: Mutex<Option<PathBuf>>,
+    temporary_output_dir: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1088,6 +1242,8 @@ struct VideoMergeConfig {
     text_tracks: Vec<MergeTextItem>,
     output_dir: String,
     output_name: String,
+    #[serde(default = "default_output_format")]
+    output_format: String,
     width: u32,
     height: u32,
     fit_mode: String,
@@ -1119,12 +1275,26 @@ struct VideoMergeConfig {
     preview_duration: Option<f64>,
 }
 
+pub(crate) fn try_acquire_media_operation() -> bool {
+    MEDIA_OPERATION_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+pub(crate) fn release_media_operation() {
+    MEDIA_OPERATION_BUSY.store(false, Ordering::SeqCst);
+}
+
 fn default_canvas_background() -> String {
     "black".to_string()
 }
 
 fn default_video_encoder() -> String {
     "h264".to_string()
+}
+
+fn default_output_format() -> String {
+    "mp4".to_string()
 }
 
 fn default_rate_control() -> String {
@@ -1145,6 +1315,317 @@ fn default_layout_size() -> f64 {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct VideoExportValidation {
+    valid: bool,
+    name_too_long: bool,
+    name_conflict: bool,
+    suggested_name: String,
+    target_dir: String,
+    message: Option<String>,
+}
+
+fn normalize_merge_output_format(value: Option<&str>) -> Result<String, String> {
+    let normalized = value
+        .unwrap_or("mp4")
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    if MERGE_OUTPUT_FORMATS.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "不支持的输出格式：{}，当前仅支持 mp4、mkv、mov。",
+            if normalized.is_empty() {
+                "空"
+            } else {
+                &normalized
+            }
+        ))
+    }
+}
+
+fn normalize_merge_output_stem(value: &str, format: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("导出文件名不能为空。".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("导出文件名不能是目录名称。".to_string());
+    }
+    if trimmed.chars().any(|character| {
+        character == '/'
+            || character == '\\'
+            || character == ':'
+            || character == '\0'
+            || character.is_control()
+    }) {
+        return Err("导出文件名包含非法字符或目录路径。".to_string());
+    }
+    if trimmed.ends_with(['.', ' ']) {
+        return Err("导出文件名不能以空格或句点结尾。".to_string());
+    }
+
+    let mut stem = trimmed.to_string();
+    for candidate in MERGE_OUTPUT_FORMATS {
+        let suffix = format!(".{candidate}");
+        if stem.to_ascii_lowercase().ends_with(&suffix) {
+            if *candidate != format {
+                return Err(format!(
+                    "文件名扩展名 .{candidate} 与所选输出格式 .{format} 不一致。"
+                ));
+            }
+            stem.truncate(stem.len() - suffix.len());
+            if stem.is_empty() {
+                return Err("导出文件名不能为空。".to_string());
+            }
+            break;
+        }
+    }
+
+    // Keep names portable even when a project is moved between Windows and
+    // Unix. Windows device names are invalid even when an extension is added.
+    let reserved = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(
+        reserved.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err("导出文件名使用了 Windows 保留设备名。".to_string());
+    }
+    if stem.is_empty() {
+        return Err("导出文件名不能为空。".to_string());
+    }
+    Ok(stem)
+}
+
+fn merge_output_component_length(value: &str) -> usize {
+    #[cfg(windows)]
+    {
+        value.encode_utf16().count()
+    }
+    #[cfg(not(windows))]
+    {
+        value.len()
+    }
+}
+
+fn merge_output_path_length(path: &Path) -> usize {
+    #[cfg(windows)]
+    {
+        path.to_string_lossy().encode_utf16().count()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().len()
+    }
+}
+
+fn merge_output_path_limit() -> usize {
+    // FFmpeg, Explorer, and older Windows APIs still commonly enforce the
+    // 260-character path limit even when the filesystem supports long paths.
+    #[cfg(windows)]
+    {
+        260
+    }
+    #[cfg(not(windows))]
+    {
+        4096
+    }
+}
+
+fn merge_output_name_fits_target(target: &Path, stem: &str, format: &str) -> bool {
+    // The native launcher writes into a private directory below the selected
+    // destination, e.g. `target/.merge-<timestamp>-<sequence>-output`, and
+    // the finalizer may add the required timestamp (and, for a same-second
+    // collision, a sequence) to the file name.  Validate all of those paths
+    // before starting FFmpeg.  The validation command does not know the task
+    // id that will be allocated later, so reserve the longest representable
+    // task-id suffix here instead of only checking the final destination.
+    let filename_variants = [
+        format!("{stem}.{format}"),
+        format!("{stem}_{}.{}", merge_output_timestamp(), format),
+        format!(
+            "{stem}_{}_{}.{}",
+            merge_output_timestamp(),
+            u64::MAX,
+            format
+        ),
+    ];
+    let temporary_target = target.join(format!(".merge-{}-{}-output", u128::MAX, u64::MAX));
+
+    filename_variants.iter().all(|filename| {
+        merge_output_component_length(filename) <= 255
+            && merge_output_path_length(&target.join(filename)) <= merge_output_path_limit()
+            && merge_output_path_length(&temporary_target.join(filename))
+                <= merge_output_path_limit()
+    })
+}
+
+fn merge_output_timestamp() -> String {
+    format!("{:010}", timestamp_millis() / 1000)
+        .chars()
+        .rev()
+        .take(10)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn resolve_export_target_directory(root: &Path, target: &str) -> Result<PathBuf, String> {
+    let path = resolve_user_path(root, target.trim());
+    if path.as_os_str().is_empty() {
+        return Err("导出文件夹不能为空。".to_string());
+    }
+    validate_export_path_chain(&path)?;
+    if path.exists() {
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|e| format!("读取导出文件夹失败: {e}"))?;
+        if metadata_is_link_or_reparse(&metadata) {
+            return Err("导出文件夹不能是符号链接或重解析点。".to_string());
+        }
+        if !metadata.is_dir() {
+            return Err("导出路径不是文件夹。".to_string());
+        }
+        return fs::canonicalize(&path).map_err(|e| format!("解析导出文件夹失败: {e}"));
+    }
+
+    // A user may choose a folder that does not exist yet. Validate the nearest
+    // existing ancestor now without creating anything during pre-validation.
+    let mut ancestor = path.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "无法解析导出文件夹。".to_string())?;
+    }
+    let metadata =
+        fs::symlink_metadata(ancestor).map_err(|e| format!("读取导出文件夹父路径失败: {e}"))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err("导出文件夹父路径不是安全的普通文件夹。".to_string());
+    }
+    // Keep the user-selected leaf in the returned contract even when it has
+    // not been created yet; only the existing ancestor is canonicalized for
+    // safety validation.
+    fs::canonicalize(ancestor).map_err(|e| format!("解析导出文件夹父路径失败: {e}"))?;
+    Ok(path)
+}
+
+/// Validate every existing lexical component without following links.  A
+/// canonicalized path alone is insufficient here: it would hide a junction
+/// or symlink in the user-provided parent path.  Missing leaf components are
+/// allowed and are checked again after the directory is created by the merge
+/// launcher/finalizer.
+fn validate_export_path_chain(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            std::path::Component::RootDir => current.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                current.pop();
+            }
+            std::path::Component::Normal(name) => current.push(name),
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata_is_link_or_reparse(&metadata) {
+                    return Err("导出文件夹路径链不能包含符号链接或重解析点。".to_string());
+                }
+                if !metadata.is_dir() {
+                    return Err("导出文件夹路径链包含非文件夹项。".to_string());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Once an ordinary missing component is reached, all later
+                // components are necessarily missing as well.  There is no
+                // filesystem object to inspect yet.
+                break;
+            }
+            Err(error) => {
+                return Err(format!("读取导出文件夹路径失败: {error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn validate_video_export(
+    app: tauri::AppHandle,
+    target_dir: String,
+    output_name: String,
+    output_format: Option<String>,
+) -> Result<VideoExportValidation, String> {
+    let root = resolve_config_project_root(&app, None)?;
+    let target_path = resolve_export_target_directory(&root, &target_dir)?;
+    let format = normalize_merge_output_format(output_format.as_deref())?;
+    let stem = match normalize_merge_output_stem(&output_name, &format) {
+        Ok(stem) => stem,
+        Err(message) => {
+            return Ok(VideoExportValidation {
+                valid: false,
+                name_too_long: false,
+                name_conflict: false,
+                suggested_name: String::new(),
+                target_dir: path_to_string(target_path),
+                message: Some(message),
+            });
+        }
+    };
+    let filename = format!("{stem}.{format}");
+    let name_too_long = !merge_output_name_fits_target(&target_path, &stem, &format);
+    let candidate = target_path.join(&filename);
+    let name_conflict = fs::symlink_metadata(&candidate).is_ok();
+    let suggested_name = if name_conflict {
+        format!("{}_{}.{}", stem, merge_output_timestamp(), format)
+    } else {
+        filename.clone()
+    };
+    let message = if name_too_long {
+        Some("导出文件名过长，请缩短文件名后重试。".to_string())
+    } else if name_conflict {
+        Some("导出文件夹有重名，继续导出会在末尾加上10位的秒级时间戳。".to_string())
+    } else {
+        None
+    };
+    Ok(VideoExportValidation {
+        valid: !name_too_long,
+        name_too_long,
+        name_conflict,
+        suggested_name,
+        target_dir: path_to_string(target_path),
+        message,
+    })
 }
 
 #[derive(Default)]
@@ -1276,16 +1757,61 @@ async fn download_and_install_update(
     cancel_state: State<'_, UpdateCancelState>,
     proxy_url: Option<String>,
 ) -> Result<(), String> {
-    cancel_state.cancel_requested.store(false, Ordering::SeqCst);
+    if !cancel_state.try_begin() {
+        return Err("应用更新下载任务已经在执行。".to_string());
+    }
+    let result = download_and_install_update_impl(&app, &cancel_state, proxy_url.as_deref()).await;
+    // A cancellation request that races with the final installer hand-off
+    // must not be reported as a cancellation after the update has already
+    // been installed successfully.  The implementation only returns an
+    // error for cancellation before that non-interruptible boundary.
+    let cancelled = result.is_err() && cancel_state.cancel_requested.load(Ordering::SeqCst);
+    let result = if cancelled {
+        Err("下载已被用户取消".to_string())
+    } else {
+        result
+    };
+    cancel_state.finish(
+        if cancelled {
+            "应用更新已取消"
+        } else if result.is_err() {
+            "应用更新失败"
+        } else {
+            "更新包已验证，正在启动安装器"
+        },
+        cancelled,
+    );
+    if result.is_ok() {
+        // Publish the terminal event only after finish() has made the task
+        // non-running.  Consumers can therefore safely treat progress=100
+        // as a completed, cancellable=false state.
+        cancel_state.update_progress(0, 0, 100.0, "更新完成");
+        let _ = app.emit(
+            "update-download-progress",
+            UpdateDownloadProgress {
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                progress: 100.0,
+                stage: "更新完成".to_string(),
+            },
+        );
+    }
+    result
+}
 
-    let root = resolve_project_root(&app)?;
+async fn download_and_install_update_impl(
+    app: &tauri::AppHandle,
+    cancel_state: &UpdateCancelState,
+    proxy_url: Option<&str>,
+) -> Result<(), String> {
+    let root = resolve_project_root(app)?;
     let build_flavor = detect_build_flavor(&root);
     let install_root = resolve_install_root()?;
     let mut updater_builder = app.updater_builder();
     if let Some(target) = updater_target_for_build(&build_flavor) {
         updater_builder = updater_builder.target(target);
     }
-    updater_builder = apply_updater_proxy(updater_builder, proxy_url.as_deref())?;
+    updater_builder = apply_updater_proxy(updater_builder, proxy_url)?;
     #[cfg(target_os = "windows")]
     {
         // The updater plugin already supplies the standard NSIS /P, /R and
@@ -1298,19 +1824,26 @@ async fn download_and_install_update(
         .build()
         .map_err(|e| format!("初始化更新器失败: {e}"))?;
 
-    let update = updater
-        .check()
-        .await
-        .map_err(updater_install_error_message)?
-        .ok_or_else(|| "没有可用的更新。".to_string())?;
+    let update = tokio::select! {
+        result = updater.check() => result
+            .map_err(updater_install_error_message)?
+            .ok_or_else(|| "没有可用的更新。".to_string())?,
+        _ = wait_update_cancel(cancel_state) => {
+            return Err("下载已被用户取消".to_string());
+        }
+    };
 
     let progress_app = app.clone();
     let finished_app = app.clone();
+    let cancel_for_callback = cancel_state.cancel_requested.clone();
     let total = Arc::new(std::sync::Mutex::new(None::<u64>));
     let total_for_cb = total.clone();
     let mut downloaded = 0u64;
 
-    let download_future = update.download_and_install(
+    // Download and install are deliberately separate.  The updater's combined
+    // helper starts the installer as soon as the bytes are downloaded, leaving
+    // no cancellation checkpoint between signature verification and install.
+    let download_future = update.download(
         move |chunk_len, content_len| {
             downloaded += chunk_len as u64;
             if content_len.is_some() {
@@ -1324,20 +1857,35 @@ async fn download_and_install_update(
                     total_bytes: total.unwrap_or(0),
                     progress: total
                         .filter(|t| *t > 0)
-                        .map(|t| downloaded as f64 / t as f64 * 100.0)
+                        .map(|t| (downloaded as f64 / t as f64 * 100.0).min(99.0))
                         .unwrap_or(0.0),
                     stage: "正在下载并验证更新安装包".to_string(),
                 },
             );
+            let total_value = total.unwrap_or(0);
+            let progress_value = if total_value > 0 {
+                (downloaded as f64 / total_value as f64 * 100.0).min(99.0)
+            } else {
+                0.0
+            };
+            cancel_state.update_progress(
+                downloaded,
+                total_value,
+                progress_value,
+                "正在下载并验证更新安装包",
+            );
         },
         move || {
+            if cancel_for_callback.load(Ordering::SeqCst) {
+                return;
+            }
             let _ = finished_app.emit(
                 "update-download-progress",
                 UpdateDownloadProgress {
                     downloaded_bytes: 0,
                     total_bytes: 0,
-                    progress: 100.0,
-                    stage: "更新包已验证，正在启动安装器".to_string(),
+                    progress: 99.0,
+                    stage: "正在校验更新安装包".to_string(),
                 },
             );
         },
@@ -1345,10 +1893,35 @@ async fn download_and_install_update(
 
     tokio::select! {
         result = download_future => {
-            result.map_err(updater_install_error_message)?;
+            let bytes = result.map_err(updater_install_error_message)?;
+            if cancel_state.cancel_requested.load(Ordering::SeqCst) {
+                return Err("下载已被用户取消".to_string());
+            }
+            cancel_state.update_progress(
+                bytes.len() as u64,
+                bytes.len() as u64,
+                99.0,
+                "正在安装更新",
+            );
+            let _ = app.emit(
+                "update-download-progress",
+                UpdateDownloadProgress {
+                    downloaded_bytes: bytes.len() as u64,
+                    total_bytes: bytes.len() as u64,
+                    progress: 99.0,
+                    stage: "正在安装更新".to_string(),
+                },
+            );
+            // `install` is the updater's non-interruptible hand-off.  Check
+            // once immediately before it, but never claim a cancellation
+            // after this call has succeeded.
+            if cancel_state.cancel_requested.load(Ordering::SeqCst) {
+                return Err("下载已被用户取消".to_string());
+            }
+            update.install(bytes).map_err(updater_install_error_message)?;
             Ok(())
         }
-        _ = cancel_check(cancel_state) => {
+        _ = wait_update_cancel(cancel_state) => {
             Err("下载已被用户取消".to_string())
         }
     }
@@ -1370,9 +1943,47 @@ fn get_clip_model_status(app: tauri::AppHandle) -> Result<ClipModelStatus, Strin
 #[tauri::command]
 async fn install_clip_model(
     app: tauri::AppHandle,
+    state: State<'_, ClipModelDownloadState>,
     proxy_url: Option<String>,
 ) -> Result<ClipModelStatus, String> {
-    let root = runtime_manager::asset_root(&app)?;
+    if !state.try_begin() {
+        return Err("离线 CLIP 模型下载任务已经在执行。".to_string());
+    }
+    let install_result = install_clip_model_impl(&app, &state, proxy_url.as_deref()).await;
+    let committed = matches!(install_result, Ok((_, true)));
+    let result = install_result.map(|(status, _)| status);
+    let cancelled = !committed && result.is_err() && state.is_cancelled();
+    state.finish(
+        if cancelled {
+            "离线 CLIP 模型安装已取消"
+        } else if result.is_err() {
+            "离线 CLIP 模型安装失败"
+        } else {
+            "离线 CLIP 模型已安装"
+        },
+        cancelled,
+    );
+    if cancelled {
+        cleanup_clip_model_downloads(&app);
+    }
+    if result.is_ok() && committed {
+        emit_model_progress(&app, 0, 0, 100.0, "离线 CLIP 模型已安装");
+    }
+    result
+}
+
+#[tauri::command]
+fn cancel_clip_model_install(state: State<'_, ClipModelDownloadState>) -> Result<(), String> {
+    state.cancel();
+    Ok(())
+}
+
+async fn install_clip_model_impl(
+    app: &tauri::AppHandle,
+    state: &ClipModelDownloadState,
+    proxy_url: Option<&str>,
+) -> Result<(ClipModelStatus, bool), String> {
+    let root = runtime_manager::asset_root(app)?;
     let model_root = root.join("models");
     fs::create_dir_all(&model_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
 
@@ -1389,48 +2000,65 @@ async fn install_clip_model(
         .connect_timeout(Duration::from_secs(20))
         .pool_max_idle_per_host(4)
         .tcp_nodelay(true);
-    let client = apply_reqwest_proxy(client, proxy_url.as_deref())?
+    let client = apply_reqwest_proxy(client, proxy_url)?
         .build()
         .map_err(|e| format!("初始化模型下载客户端失败: {e}"))?;
-    let (downloaded_bytes, total_bytes) = download_clip_model_zip(&app, &client, &zip_path).await?;
+    let (downloaded_bytes, total_bytes) =
+        download_clip_model_zip(app, state, &client, &zip_path).await?;
+    if state.is_cancelled() {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Err("离线 CLIP 模型安装已取消。".to_string());
+    }
 
     let root_for_extract = root.clone();
     let temp_for_extract = temp_root.clone();
     let zip_for_extract = zip_path.clone();
+    let cancel_token = state.cancel_requested.clone();
     emit_model_progress(
-        &app,
+        app,
         downloaded_bytes,
         total_bytes,
         72.0,
         "正在解压并校验模型",
     );
     let install_result = tauri::async_runtime::spawn_blocking(move || {
-        install_clip_model_zip(&root_for_extract, &temp_for_extract, &zip_for_extract)
+        install_clip_model_zip_cancelable(
+            &root_for_extract,
+            &temp_for_extract,
+            &zip_for_extract,
+            &cancel_token,
+        )
     })
     .await
     .map_err(|e| format!("模型安装任务异常: {e}"))
     .and_then(|result| result);
-    if let Err(error) = install_result {
+    let committed = match install_result {
+        Ok(committed) => committed,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            let _ = fs::remove_file(&zip_path);
+            return Err(error);
+        }
+    };
+
+    // Keep cancellation authoritative through the final verification/event
+    // boundary. The cancel-aware installer has already rolled back safely if
+    // cancellation happened during extraction or replacement.
+    if !committed && state.is_cancelled() {
         let _ = fs::remove_dir_all(&temp_root);
         let _ = fs::remove_file(&zip_path);
-        return Err(error);
+        return Err("离线 CLIP 模型安装已取消。".to_string());
     }
 
     let _ = fs::remove_dir_all(&temp_root);
     let _ = fs::remove_file(&zip_path);
     let _ = fs::remove_file(zip_path.with_extension("zip.part"));
-    emit_model_progress(
-        &app,
-        downloaded_bytes,
-        total_bytes,
-        100.0,
-        "离线 CLIP 模型已安装",
-    );
-    Ok(clip_model_status_for_root(&root))
+    Ok((clip_model_status_for_root(&root), committed))
 }
 
 async fn download_clip_model_zip(
     app: &tauri::AppHandle,
+    state: &ClipModelDownloadState,
     client: &reqwest::Client,
     zip_path: &Path,
 ) -> Result<(u64, u64), String> {
@@ -1443,13 +2071,14 @@ async fn download_clip_model_zip(
     }
 
     emit_model_progress(app, 0, 0, 2.0, "正在连接 GitHub Releases 最新模型");
-    download_file_with_resume(app, client, CLIP_MODEL_DOWNLOAD_URL, zip_path)
+    download_file_with_resume(app, state, client, CLIP_MODEL_DOWNLOAD_URL, zip_path)
         .await
-        .map_err(|error| format!("模型下载失败，已保留未完成的 .part 文件供下次续传。{error}"))
+        .map_err(|error| format!("模型下载失败：{error}"))
 }
 
 async fn download_file_with_resume(
     app: &tauri::AppHandle,
+    state: &ClipModelDownloadState,
     client: &reqwest::Client,
     url: &str,
     destination: &Path,
@@ -1464,7 +2093,13 @@ async fn download_file_with_resume(
         request = request.header(reqwest::header::RANGE, format!("bytes={existing_bytes}-"));
     }
 
-    let mut response = request.send().await.map_err(|e| format!("连接失败: {e}"))?;
+    let mut response = tokio::select! {
+        result = request.send() => result.map_err(|e| format!("连接失败: {e}"))?,
+        _ = wait_clip_model_cancel(state) => {
+            let _ = fs::remove_file(&part_path);
+            return Err("离线 CLIP 模型下载已取消。".to_string());
+        }
+    };
     let status = response.status();
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
@@ -1508,11 +2143,21 @@ async fn download_file_with_resume(
         },
     );
 
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("读取下载数据失败: {e}"))?
-    {
+    loop {
+        let chunk = tokio::select! {
+            result = response.chunk() => result.map_err(|e| format!("读取下载数据失败: {e}"))?,
+            _ = wait_clip_model_cancel(state) => {
+                drop(output);
+                let _ = fs::remove_file(&part_path);
+                return Err("离线 CLIP 模型下载已取消。".to_string());
+            }
+        };
+        let Some(chunk) = chunk else { break };
+        if state.is_cancelled() {
+            drop(output);
+            let _ = fs::remove_file(&part_path);
+            return Err("离线 CLIP 模型下载已取消。".to_string());
+        }
         output
             .write_all(&chunk)
             .map_err(|e| format!("写入模型下载缓存失败: {e}"))?;
@@ -1550,7 +2195,13 @@ async fn download_file_with_resume(
     Ok((downloaded_bytes, total_bytes.max(downloaded_bytes)))
 }
 
-async fn cancel_check(cancel_state: State<'_, UpdateCancelState>) {
+async fn wait_clip_model_cancel(state: &ClipModelDownloadState) {
+    while !state.cancel_requested.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_update_cancel(cancel_state: &UpdateCancelState) {
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if cancel_state.cancel_requested.load(Ordering::SeqCst) {
@@ -1561,8 +2212,18 @@ async fn cancel_check(cancel_state: State<'_, UpdateCancelState>) {
 
 #[tauri::command]
 fn cancel_update_download(cancel_state: State<'_, UpdateCancelState>) -> Result<(), String> {
-    cancel_state.cancel_requested.store(true, Ordering::SeqCst);
+    cancel_state.cancel();
     Ok(())
+}
+
+#[tauri::command]
+fn get_update_download_status(state: State<'_, UpdateCancelState>) -> DownloadTaskStatus {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn get_clip_model_download_status(state: State<'_, ClipModelDownloadState>) -> DownloadTaskStatus {
+    state.snapshot()
 }
 
 #[tauri::command]
@@ -1595,6 +2256,43 @@ fn open_release_page(url: String) -> Result<(), String> {
     command
         .spawn()
         .map_err(|e| format!("打开 GitHub 发布页失败: {e}"))?;
+    Ok(())
+}
+
+fn is_trusted_project_page_url(url: &str) -> bool {
+    PROJECT_PAGE_URLS.contains(&url)
+}
+
+#[tauri::command]
+fn open_project_page(url: String) -> Result<(), String> {
+    if !is_trusted_project_page_url(&url) {
+        return Err("项目页面地址不受信任。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&url);
+        command
+    };
+
+    command
+        .spawn()
+        .map_err(|e| format!("打开 GitHub 项目页面失败: {e}"))?;
     Ok(())
 }
 
@@ -2906,6 +3604,72 @@ fn run_batch_compare(
     Ok(payload)
 }
 
+struct MergeTaskReservation {
+    app: tauri::AppHandle,
+    active: bool,
+}
+
+impl MergeTaskReservation {
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for MergeTaskReservation {
+    fn drop(&mut self) {
+        if self.active {
+            reset_merge_task_state(&self.app);
+        }
+    }
+}
+
+fn next_merge_task_id(prefix: &str) -> String {
+    let sequence = MERGE_TASK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{}-{sequence}", timestamp_millis())
+}
+
+fn reserve_merge_task(
+    app: &tauri::AppHandle,
+    state: &MergeTaskState,
+    task_id: &str,
+) -> Result<MergeTaskReservation, String> {
+    let mut running = state
+        .is_running
+        .lock()
+        .map_err(|_| "合并任务状态锁定失败".to_string())?;
+    if *running {
+        return Err("已有视频合并或分辨率预览任务正在运行".to_string());
+    }
+    if !try_acquire_media_operation() {
+        return Err("已有视频合并或运行环境安装任务正在执行".to_string());
+    }
+    *running = true;
+    drop(running);
+
+    if let Ok(mut pid) = state.current_pid.lock() {
+        *pid = None;
+    }
+    if let Ok(mut cancelled) = state.cancel_requested.lock() {
+        *cancelled = false;
+    }
+    if let Ok(mut id) = state.task_id.lock() {
+        *id = Some(task_id.to_string());
+    }
+    if let Ok(mut path) = state.config_path.lock() {
+        *path = None;
+    }
+    if let Ok(mut path) = state.result_path.lock() {
+        *path = None;
+    }
+    if let Ok(mut path) = state.temporary_output_dir.lock() {
+        *path = None;
+    }
+    Ok(MergeTaskReservation {
+        app: app.clone(),
+        active: true,
+    })
+}
+
 #[tauri::command]
 fn run_video_merge(
     app: tauri::AppHandle,
@@ -2922,21 +3686,20 @@ fn run_video_merge(
         return Err(format!("找不到视频合并脚本: {}", script.display()));
     }
 
-    {
-        let running = merge_state
-            .is_running
-            .lock()
-            .map_err(|_| "合并任务状态锁定失败".to_string())?;
-        if *running {
-            return Err("已有视频合并任务正在运行".to_string());
-        }
+    let output_format = normalize_merge_output_format(Some(&config.output_format))?;
+    let output_stem = normalize_merge_output_stem(&config.output_name, &output_format)?;
+    let output_dir = resolve_export_target_directory(&root, &config.output_dir)?;
+    fs::create_dir_all(&output_dir).map_err(|e| format!("创建合并输出目录失败: {e}"))?;
+    // Re-check after creation so a path that was replaced by a junction or
+    // symlink between validation and mkdir cannot redirect the export.
+    let output_dir = resolve_export_target_directory(&root, &path_to_string(&output_dir))?;
+    if !merge_output_name_fits_target(&output_dir, &output_stem, &output_format) {
+        return Err("导出文件名或完整路径过长，请缩短名称或选择更短的输出文件夹。".to_string());
     }
 
-    let output_dir = resolve_user_path(&root, &config.output_dir);
-    fs::create_dir_all(&output_dir).map_err(|e| format!("创建合并输出目录失败: {e}"))?;
-
     let mut normalized_config = config.clone();
-    normalized_config.output_dir = path_to_string(output_dir);
+    normalized_config.output_name = output_stem;
+    normalized_config.output_format = output_format;
     normalized_config.inputs = config
         .inputs
         .iter()
@@ -2985,12 +3748,33 @@ fn run_video_merge(
 
     let runtime_dir = root.join("data").join(".runtime");
     fs::create_dir_all(&runtime_dir).map_err(|e| format!("创建合并运行目录失败: {e}"))?;
-    let task_id = format!("merge-{}", timestamp_millis());
+    let task_id = next_merge_task_id("merge");
+    let reservation = reserve_merge_task(&app, &merge_state, &task_id)?;
     let config_path = runtime_dir.join(format!("{task_id}.json"));
     let result_path = runtime_dir.join(format!("{task_id}.result.json"));
-    let config_json = serde_json::to_vec_pretty(&normalized_config)
-        .map_err(|e| format!("生成合并配置失败: {e}"))?;
-    fs::write(&config_path, config_json).map_err(|e| format!("写入合并配置失败: {e}"))?;
+    // Keep partial files out of the user's output directory.  The directory is
+    // inside the final destination so successful files can be renamed without
+    // a second full-size copy across volumes.
+    let temporary_output_dir = output_dir.join(format!(".{task_id}-output"));
+    if let Err(error) = fs::create_dir_all(&temporary_output_dir) {
+        drop(reservation);
+        return Err(format!("创建合并临时输出目录失败: {error}"));
+    }
+    normalized_config.output_dir = path_to_string(&temporary_output_dir);
+    let config_json = match serde_json::to_vec_pretty(&normalized_config) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temporary_output_dir);
+            drop(reservation);
+            return Err(format!("生成合并配置失败: {error}"));
+        }
+    };
+    if let Err(error) = fs::write(&config_path, config_json) {
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&temporary_output_dir);
+        drop(reservation);
+        return Err(format!("写入合并配置失败: {error}"));
+    }
 
     let python = resolve_python(&app, &root, config.python_path.as_deref());
     let args = vec![
@@ -3007,44 +3791,35 @@ fn run_video_merge(
     command
         .current_dir(&root)
         .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_python_command(&mut command, &root, &python);
+    configure_merge_process_command(&mut command);
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000 | 0x00004000);
-    }
-
-    {
-        let mut running = merge_state
-            .is_running
-            .lock()
-            .map_err(|_| "合并任务状态锁定失败".to_string())?;
-        if *running {
-            let _ = fs::remove_file(&config_path);
-            return Err("已有视频合并任务正在运行".to_string());
-        }
-        *running = true;
-    }
-    if let Ok(mut pid) = merge_state.current_pid.lock() {
-        *pid = None;
-    }
-    if let Ok(mut cancelled) = merge_state.cancel_requested.lock() {
-        *cancelled = false;
-    }
     if let Ok(mut path) = merge_state.config_path.lock() {
         *path = Some(config_path.clone());
     }
     if let Ok(mut path) = merge_state.result_path.lock() {
         *path = Some(result_path.clone());
     }
+    if let Ok(mut path) = merge_state.temporary_output_dir.lock() {
+        *path = Some(temporary_output_dir.clone());
+    }
 
     emit_merge_progress(&app, 1.0, "合并任务已启动");
+    reservation.disarm();
     let app_for_task = app.clone();
+    let final_output_dir = output_dir.clone();
     thread::spawn(move || {
-        run_video_merge_process(app_for_task, command, config_path, result_path);
+        run_video_merge_process(
+            app_for_task,
+            command,
+            config_path,
+            result_path,
+            temporary_output_dir,
+            final_output_dir,
+        );
     });
     Ok(task_id)
 }
@@ -3076,123 +3851,293 @@ fn render_video_merge_preview_blocking(
         return Err(format!("找不到视频合并脚本: {}", script.display()));
     }
 
-    let preview_dir = root.join("data").join("cache").join("merge-preview");
-    fs::create_dir_all(&preview_dir).map_err(|e| format!("创建预览缓存目录失败: {e}"))?;
-    if let Ok(entries) = fs::read_dir(&preview_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && path.file_name().and_then(|name| name.to_str()).map(|name| name.starts_with("resolution-preview-") && name.ends_with(".mp4")).unwrap_or(false)
-            {
-                let _ = fs::remove_file(path);
-            }
-        }
+    let task_id = next_merge_task_id("merge-preview");
+    let reservation = reserve_merge_task(&app, &app.state::<MergeTaskState>(), &task_id)?;
+    let preview_root = root.join("data").join("cache").join("merge-preview");
+    let preview_dir = preview_root.join(&task_id);
+    if let Err(error) = fs::create_dir_all(&preview_dir) {
+        drop(reservation);
+        return Err(format!("创建预览缓存目录失败: {error}"));
     }
     let mut normalized_config = config.clone();
-    normalized_config.output_dir = path_to_string(preview_dir);
-    normalized_config.output_name = format!("resolution-preview-{}", timestamp_millis());
+    normalized_config.output_dir = path_to_string(&preview_dir);
+    normalized_config.output_name = format!("resolution-preview-{task_id}");
+    normalized_config.output_format = "mp4".to_string();
     normalized_config.split_mode = "none".to_string();
     normalized_config.two_pass = false;
-    normalized_config.inputs = config.inputs.iter().map(|item| MergeVideoItem {
-        id: item.id.clone(),
-        path: path_to_string(resolve_user_path(&root, &item.path)),
-        start_time: item.start_time,
-        track_index: item.track_index,
-        trim_start: item.trim_start,
-        trim_end: item.trim_end,
-        muted: item.muted,
-        volume: item.volume,
-        rotation: item.rotation,
-        crop_enabled: item.crop_enabled,
-        crop_x: item.crop_x,
-        crop_y: item.crop_y,
-        crop_width: item.crop_width,
-        crop_height: item.crop_height,
-        layout_custom: item.layout_custom,
-        layout_x: item.layout_x,
-        layout_y: item.layout_y,
-        layout_width: item.layout_width,
-        layout_height: item.layout_height,
-    }).collect();
-    normalized_config.audio_tracks = config.audio_tracks.iter().map(|item| MergeAudioItem {
-        path: path_to_string(resolve_user_path(&root, &item.path)),
-        start_time: item.start_time,
-        trim_start: item.trim_start,
-        trim_end: item.trim_end,
-        volume: item.volume,
-        muted: item.muted,
-        source_type: item.source_type.clone(),
-        source_clip_id: item.source_clip_id.clone(),
-    }).collect();
+    normalized_config.inputs = config
+        .inputs
+        .iter()
+        .map(|item| MergeVideoItem {
+            id: item.id.clone(),
+            path: path_to_string(resolve_user_path(&root, &item.path)),
+            start_time: item.start_time,
+            track_index: item.track_index,
+            trim_start: item.trim_start,
+            trim_end: item.trim_end,
+            muted: item.muted,
+            volume: item.volume,
+            rotation: item.rotation,
+            crop_enabled: item.crop_enabled,
+            crop_x: item.crop_x,
+            crop_y: item.crop_y,
+            crop_width: item.crop_width,
+            crop_height: item.crop_height,
+            layout_custom: item.layout_custom,
+            layout_x: item.layout_x,
+            layout_y: item.layout_y,
+            layout_width: item.layout_width,
+            layout_height: item.layout_height,
+        })
+        .collect();
+    normalized_config.audio_tracks = config
+        .audio_tracks
+        .iter()
+        .map(|item| MergeAudioItem {
+            path: path_to_string(resolve_user_path(&root, &item.path)),
+            start_time: item.start_time,
+            trim_start: item.trim_start,
+            trim_end: item.trim_end,
+            volume: item.volume,
+            muted: item.muted,
+            source_type: item.source_type.clone(),
+            source_clip_id: item.source_clip_id.clone(),
+        })
+        .collect();
     for item in &normalized_config.inputs {
         let path = PathBuf::from(&item.path);
         if !path.is_file() {
+            let _ = fs::remove_dir_all(&preview_dir);
+            drop(reservation);
             return Err(format!("视频文件不存在: {}", path.display()));
         }
     }
 
     let runtime_dir = root.join("data").join(".runtime");
-    fs::create_dir_all(&runtime_dir).map_err(|e| format!("创建预览运行目录失败: {e}"))?;
-    let task_id = format!("merge-preview-{}", timestamp_millis());
+    if let Err(error) = fs::create_dir_all(&runtime_dir) {
+        let _ = fs::remove_dir_all(&preview_dir);
+        drop(reservation);
+        return Err(format!("创建预览运行目录失败: {error}"));
+    }
     let config_path = runtime_dir.join(format!("{task_id}.json"));
     let result_path = runtime_dir.join(format!("{task_id}.result.json"));
-    let config_json = serde_json::to_vec_pretty(&normalized_config)
-        .map_err(|e| format!("生成预览配置失败: {e}"))?;
-    fs::write(&config_path, config_json).map_err(|e| format!("写入预览配置失败: {e}"))?;
+    let config_json = match serde_json::to_vec_pretty(&normalized_config) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&preview_dir);
+            drop(reservation);
+            return Err(format!("生成预览配置失败: {error}"));
+        }
+    };
+    if let Err(error) = fs::write(&config_path, config_json) {
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&preview_dir);
+        drop(reservation);
+        return Err(format!("写入预览配置失败: {error}"));
+    }
 
     let python = resolve_python(&app, &root, config.python_path.as_deref());
     let mut command = Command::new(&python);
-    command.current_dir(&root).args([
-        "-u".into(), script_arg(&script), "--config".into(), script_arg(&config_path),
-        "--result".into(), script_arg(&result_path), "--project-root".into(), script_arg(&root),
-    ]).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .current_dir(&root)
+        .args([
+            "-u".into(),
+            script_arg(&script),
+            "--config".into(),
+            script_arg(&config_path),
+            "--result".into(),
+            script_arg(&result_path),
+            "--project-root".into(),
+            script_arg(&root),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     configure_python_command(&mut command, &root, &python);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000 | 0x00004000);
+    configure_merge_process_command(&mut command);
+    if is_merge_cancel_requested(&app) {
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&preview_dir);
+        drop(reservation);
+        return Err("视频合并预览已取消".to_string());
     }
-    let output = command.output().map_err(|e| format!("无法启动真实分辨率预览计算: {e}"));
-    let outcome = output.and_then(|output| {
-        if !output.status.success() {
-            return Err(format!("真实分辨率预览计算失败，退出码: {}", output.status.code().map_or_else(|| "未知".to_string(), |code| code.to_string())));
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(&config_path);
+            let _ = fs::remove_dir_all(&preview_dir);
+            drop(reservation);
+            return Err(format!("无法启动真实分辨率预览计算: {error}"));
         }
-        let content = fs::read_to_string(&result_path).map_err(|e| format!("读取预览结果失败: {e}"))?;
-        let payload: MergeFinishedPayload = serde_json::from_str(&content)
-            .map_err(|e| format!("解析预览结果失败: {e}"))?;
-        payload.output_paths.into_iter().next().ok_or_else(|| "预览计算没有生成视频文件".to_string())
+    };
+    if let Ok(mut pid) = app.state::<MergeTaskState>().current_pid.lock() {
+        *pid = Some(child.id());
+    }
+    if is_merge_cancel_requested(&app) {
+        let _ = kill_merge_process_tree(child.id());
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("等待真实分辨率预览计算失败: {error}"));
+    let cancelled = is_merge_cancel_requested(&app);
+    let outcome = output.and_then(|output| {
+        if cancelled {
+            return Err("视频合并预览已取消".to_string());
+        }
+        if !output.status.success() {
+            return Err(format!(
+                "真实分辨率预览计算失败，退出码: {}",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "未知".to_string(), |code| code.to_string())
+            ));
+        }
+        let content =
+            fs::read_to_string(&result_path).map_err(|e| format!("读取预览结果失败: {e}"))?;
+        let payload: MergeFinishedPayload =
+            serde_json::from_str(&content).map_err(|e| format!("解析预览结果失败: {e}"))?;
+        let output_path = payload
+            .output_paths
+            .into_iter()
+            .next()
+            .ok_or_else(|| "预览计算没有生成视频文件".to_string())?;
+        let output_path = PathBuf::from(output_path);
+        if !output_path.starts_with(&preview_dir) || !output_path.is_file() {
+            return Err("预览计算生成了无效的视频文件路径".to_string());
+        }
+        Ok(path_to_string(output_path))
     });
     let _ = fs::remove_file(config_path);
     let _ = fs::remove_file(result_path);
+    if outcome.is_err() {
+        let _ = fs::remove_dir_all(&preview_dir);
+    } else {
+        // Keep the successful preview that the editor is currently using, but
+        // do not let every recalculation leave another full-size MP4 behind.
+        // The cleanup helper only accepts directories created by our exact
+        // task-id format and never traverses outside this preview root.
+        let _ = cleanup_stale_merge_preview_dirs(&preview_root, &preview_dir);
+    }
+    drop(reservation);
     outcome
+}
+
+fn cleanup_stale_merge_preview_dirs(preview_root: &Path, keep_dir: &Path) -> Result<usize, String> {
+    let root_metadata = match fs::symlink_metadata(preview_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("读取预览缓存目录失败: {error}")),
+    };
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err("预览缓存目录不是安全的本地目录，已跳过旧缓存清理".to_string());
+    }
+
+    let keep_name = keep_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "当前预览任务目录名无效，已跳过旧缓存清理".to_string())?;
+    if keep_dir.parent() != Some(preview_root) || !is_merge_preview_task_dir_name(keep_name) {
+        return Err("当前预览任务目录不在预览缓存白名单内".to_string());
+    }
+
+    let mut removed = 0;
+    for entry in
+        fs::read_dir(preview_root).map_err(|error| format!("读取预览缓存目录失败: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("读取预览缓存条目失败: {error}"))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == keep_name || !is_merge_preview_task_dir_name(name) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("读取预览缓存条目失败: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        fs::remove_dir_all(&path)
+            .map_err(|error| format!("清理旧预览缓存失败 {}: {error}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn is_merge_preview_task_dir_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(MERGE_PREVIEW_TASK_PREFIX) else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    let Some(timestamp) = parts.next() else {
+        return false;
+    };
+    let Some(sequence) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !timestamp.is_empty()
+        && timestamp
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && !sequence.is_empty()
+        && sequence.chars().all(|character| character.is_ascii_digit())
 }
 
 #[tauri::command]
 fn cancel_video_merge(
     app: tauri::AppHandle,
-    merge_state: State<'_, MergeTaskState>,
+    _merge_state: State<'_, MergeTaskState>,
 ) -> Result<(), String> {
-    let is_running = merge_state
-        .is_running
-        .lock()
-        .map(|guard| *guard)
-        .unwrap_or(false);
-    if !is_running {
+    if !request_merge_task_cancel(&app) {
         return Ok(());
-    }
-    if let Ok(mut cancelled) = merge_state.cancel_requested.lock() {
-        *cancelled = true;
-    }
-    let pid = merge_state
-        .current_pid
-        .lock()
-        .map_err(|_| "合并任务状态锁定失败".to_string())?
-        .to_owned();
-    if let Some(pid) = pid {
-        let _ = kill_process_tree(pid);
     }
     emit_merge_progress(&app, 1.0, "正在取消合并任务");
     Ok(())
+}
+
+fn is_merge_cancel_requested(app: &tauri::AppHandle) -> bool {
+    app.state::<MergeTaskState>()
+        .cancel_requested
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or(true)
+}
+
+fn request_merge_task_cancel(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<MergeTaskState>();
+    let is_running = state.is_running.lock().map(|guard| *guard).unwrap_or(false);
+    if !is_running {
+        return false;
+    }
+    if let Ok(mut cancelled) = state.cancel_requested.lock() {
+        *cancelled = true;
+    }
+    let pid = state.current_pid.lock().ok().and_then(|guard| *guard);
+    if let Some(pid) = pid {
+        let _ = kill_merge_process_tree(pid);
+    }
+    true
+}
+
+fn wait_for_merge_task_shutdown(app: &tauri::AppHandle, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let running = app
+            .state::<MergeTaskState>()
+            .is_running
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(false);
+        if !running {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
 }
 
 #[tauri::command]
@@ -3636,11 +4581,16 @@ fn run_video_merge_process(
     mut command: Command,
     config_path: PathBuf,
     result_path: PathBuf,
+    temporary_output_dir: PathBuf,
+    final_output_dir: PathBuf,
 ) {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             emit_merge_error(&app, &format!("无法启动视频合并进程: {error}"));
+            let _ = fs::remove_file(&config_path);
+            let _ = fs::remove_file(&result_path);
+            let _ = fs::remove_dir_all(&temporary_output_dir);
             reset_merge_task_state(&app);
             return;
         }
@@ -3656,7 +4606,7 @@ fn run_video_merge_process(
         .map(|guard| *guard)
         .unwrap_or(false);
     if cancelled_before_pid_ready {
-        let _ = kill_process_tree(child.id());
+        let _ = kill_merge_process_tree(child.id());
     }
 
     let stdout_handle = child
@@ -3690,18 +4640,347 @@ fn run_video_merge_process(
                 serde_json::from_str::<MergeFinishedPayload>(&content)
                     .map_err(|e| format!("解析合并结果失败: {e}"))
             })
-            .map(|payload| {
-                emit_merge_progress(&app, 100.0, &payload.message);
-                let _ = app.emit("merge-finished", payload);
+            .and_then(|payload| {
+                finalize_merge_outputs(payload, &temporary_output_dir, &final_output_dir)
             }),
     };
 
-    if let Err(message) = outcome {
-        emit_merge_error(&app, &message);
+    match outcome {
+        Ok(payload) => {
+            let _ = fs::remove_dir_all(&temporary_output_dir);
+            emit_merge_progress(&app, 100.0, &payload.message);
+            let _ = app.emit("merge-finished", payload);
+        }
+        Err(message) => {
+            let _ = fs::remove_dir_all(&temporary_output_dir);
+            emit_merge_error(&app, &message);
+        }
     }
     let _ = fs::remove_file(config_path);
     let _ = fs::remove_file(result_path);
     reset_merge_task_state(&app);
+}
+
+fn configure_merge_process_command(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Put Python and its FFmpeg child in a private process group so a
+        // cancel/exit request cannot leave the encoder behind on Unix.
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+        command.creation_flags(
+            CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS,
+        );
+    }
+}
+
+fn finalize_merge_outputs(
+    payload: MergeFinishedPayload,
+    temporary_output_dir: &Path,
+    final_output_dir: &Path,
+) -> Result<MergeFinishedPayload, String> {
+    if payload.output_paths.is_empty() {
+        return Err("合并结果没有输出文件".to_string());
+    }
+
+    // Python normally writes absolute paths, but older scripts and interrupted
+    // runs may leave a relative path in the result file.  Resolve every path
+    // against this task's private directory and validate the complete set
+    // before moving anything.  This is important both for safety and for
+    // avoiding a half-finalized multi-part export.
+    let temporary_output_dir = validate_merge_task_directory(temporary_output_dir)
+        .map_err(|error| format!("合并临时目录无效: {error}"))?;
+
+    let mut validated_sources = Vec::with_capacity(payload.output_paths.len());
+    let mut seen_sources = BTreeSet::new();
+    for path_text in payload.output_paths {
+        let source_text = path_text.trim();
+        let source_candidate = resolve_merge_result_path(source_text, &temporary_output_dir)
+            .map_err(|error| format!("合并结果路径无效「{source_text}」: {error}"))?;
+        // FFmpeg writes outputs directly into the task directory.  Requiring
+        // the lexical parent to be that exact directory also blocks a
+        // symlink/junction alias such as `.task-output\alias\merged.mp4`
+        // before canonicalization could hide it.
+        let candidate_parent = source_candidate
+            .parent()
+            .ok_or_else(|| format!("合并结果缺少父目录「{}」", source_candidate.display()))?;
+        if !merge_paths_equal(candidate_parent, &temporary_output_dir) {
+            return Err(format!(
+                "合并结果必须是当前任务目录的直接文件「{}」",
+                source_candidate.display()
+            ));
+        }
+        let source_metadata = fs::symlink_metadata(&source_candidate).map_err(|error| {
+            format!(
+                "合并结果文件不存在或无法读取「{}」: {error}",
+                source_candidate.display()
+            )
+        })?;
+        if metadata_is_link_or_reparse(&source_metadata) {
+            return Err(format!(
+                "合并结果拒绝使用符号链接或重解析点「{}」",
+                source_candidate.display()
+            ));
+        }
+        if !source_metadata.is_file() {
+            return Err(format!(
+                "合并结果不是普通文件「{}」",
+                source_candidate.display()
+            ));
+        }
+
+        let source = fs::canonicalize(&source_candidate).map_err(|error| {
+            format!(
+                "无法解析合并临时文件「{}」: {error}",
+                source_candidate.display()
+            )
+        })?;
+        let source_parent = source
+            .parent()
+            .ok_or_else(|| format!("合并结果缺少父目录「{}」", source.display()))?;
+        if !merge_paths_equal(source_parent, &temporary_output_dir) {
+            return Err(format!(
+                "合并结果位于当前任务目录之外「{}」，任务目录为「{}」",
+                source.display(),
+                temporary_output_dir.display()
+            ));
+        }
+        let source_key = merge_path_key(&source);
+        if !seen_sources.insert(source_key) {
+            return Err(format!(
+                "合并结果重复引用同一个临时文件「{}」",
+                source.display()
+            ));
+        }
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| format!("合并结果缺少输出文件名「{}」", source.display()))?
+            .to_owned();
+        validated_sources.push((source, file_name));
+    }
+
+    // Do not create a new destination directory until every result path has
+    // passed validation.  This keeps a malformed result from leaving even a
+    // seemingly successful-looking output folder behind.
+    let final_output_dir = prepare_merge_final_directory(final_output_dir)
+        .map_err(|error| format!("最终输出目录无效: {error}"))?;
+    let validated = validated_sources
+        .into_iter()
+        .map(|(source, file_name)| {
+            let destination = unique_merge_output_path(&final_output_dir, &file_name);
+            (source, destination)
+        })
+        .collect::<Vec<_>>();
+
+    let mut moved_paths = Vec::with_capacity(validated.len());
+    let result = (|| {
+        for (source, initial_destination) in &validated {
+            let mut destination = initial_destination.clone();
+            loop {
+                match move_merge_output_noreplace(source, &destination) {
+                    Ok(()) => {
+                        moved_paths.push(destination);
+                        break;
+                    }
+                    Err(error) if error == "目标文件已存在" => {
+                        // A file can appear after unique_merge_output_path's
+                        // check. Generate a new timestamped candidate and
+                        // retry the atomic no-replace move.
+                        destination = unique_merge_output_path(
+                            &final_output_dir,
+                            source.file_name().unwrap_or_default(),
+                        );
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "移动合并输出失败「{}」→「{}」: {error}",
+                            source.display(),
+                            destination.display()
+                        ));
+                    }
+                }
+            }
+        }
+
+        let absolute_paths = moved_paths
+            .iter()
+            .map(|path| {
+                fs::canonicalize(path)
+                    .map(path_to_string)
+                    .map_err(|error| format!("无法确认最终输出文件「{}」: {error}", path.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(MergeFinishedPayload {
+            output_paths: absolute_paths,
+            message: payload.message,
+        })
+    })();
+    if result.is_err() {
+        for path in &moved_paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+    result
+}
+
+fn validate_merge_task_directory(path: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata_is_link_or_reparse(&metadata) {
+        return Err("目录是符号链接或重解析点".to_string());
+    }
+    if !metadata.is_dir() {
+        return Err("路径不是目录".to_string());
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    let canonical_metadata = fs::symlink_metadata(&canonical).map_err(|error| error.to_string())?;
+    if metadata_is_link_or_reparse(&canonical_metadata) || !canonical_metadata.is_dir() {
+        return Err("解析后的目录不是安全的普通目录".to_string());
+    }
+    Ok(canonical)
+}
+
+fn prepare_merge_final_directory(path: &Path) -> Result<PathBuf, String> {
+    validate_export_path_chain(path)?;
+    fs::create_dir_all(path).map_err(|error| error.to_string())?;
+    // Canonicalizing after creation makes both relative outputDir values and
+    // paths containing `..` deterministic, and ensures returned paths are
+    // absolute.  A symlink/reparse destination is rejected instead of
+    // silently redirecting the export somewhere else.
+    validate_merge_task_directory(path)
+}
+
+fn resolve_merge_result_path(
+    path_text: &str,
+    temporary_output_dir: &Path,
+) -> Result<PathBuf, String> {
+    if path_text.is_empty() {
+        return Err("路径为空".to_string());
+    }
+    let normalized = normalize_display_path(path_text);
+    let raw = PathBuf::from(normalized);
+    if raw.is_absolute() {
+        Ok(raw)
+    } else {
+        if raw
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("相对路径包含目录穿越".to_string());
+        }
+        Ok(temporary_output_dir.join(raw))
+    }
+}
+
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT is intentionally kept local so this
+        // check does not add a Windows-only dependency just for validation.
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn merge_path_key(path: &Path) -> String {
+    let value = normalize_display_path(&path.to_string_lossy());
+    #[cfg(windows)]
+    {
+        value
+            .replace('/', r"\")
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
+}
+
+fn merge_paths_equal(left: &Path, right: &Path) -> bool {
+    merge_path_key(left) == merge_path_key(right)
+}
+
+fn move_merge_output_noreplace(source: &Path, destination: &Path) -> Result<(), String> {
+    // A hard link is an atomic, no-replace move on the normal same-volume
+    // path used by run_video_merge.  It avoids copying multi-gigabyte output.
+    if fs::hard_link(source, destination).is_ok() {
+        return fs::remove_file(source).map_err(|error| {
+            let _ = fs::remove_file(destination);
+            format!("清理临时文件失败: {error}")
+        });
+    }
+
+    // Hard links can be disabled by a filesystem policy or unavailable across
+    // volumes.  Create the destination atomically and copy into that handle;
+    // create_new guarantees an existing destination is never overwritten.
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "目标文件已存在".to_string()
+            } else {
+                format!("创建不覆盖的目标文件失败: {error}")
+            }
+        })?;
+    let copy_result = (|| {
+        let mut source_file = File::open(source).map_err(|error| error.to_string())?;
+        std::io::copy(&mut source_file, &mut destination_file)
+            .map_err(|error| error.to_string())?;
+        destination_file
+            .sync_all()
+            .map_err(|error| format!("刷新目标文件失败: {error}"))?;
+        fs::remove_file(source).map_err(|error| format!("清理临时文件失败: {error}"))
+    })();
+    if copy_result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    copy_result
+}
+
+fn unique_merge_output_path(directory: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let candidate = directory.join(file_name);
+    if fs::symlink_metadata(&candidate).is_err() {
+        return candidate;
+    }
+    let file_name = Path::new(file_name);
+    let stem = file_name
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("merged_video");
+    let extension = file_name
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    loop {
+        let sequence = MERGE_TASK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let timestamp = merge_output_timestamp();
+        let suffix = if sequence == 0 {
+            timestamp
+        } else {
+            format!("{timestamp}_{sequence}")
+        };
+        let candidate = directory.join(format!("{stem}_{suffix}{extension}"));
+        if fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+    }
 }
 
 fn spawn_merge_stream_thread<S>(
@@ -3714,13 +4993,15 @@ where
 {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
+        let mut batch = MergeLogBatch::new(app.clone(), stream_name);
         for line in reader.lines().map_while(Result::ok) {
             let cleaned = strip_ansi_sequences(&line);
             if let Some(payload) = cleaned.strip_prefix("MERGE_PROGRESS|") {
                 let mut parts = payload.splitn(2, '|');
                 if let (Some(progress), Some(stage)) = (parts.next(), parts.next()) {
                     if let Ok(progress) = progress.parse::<f64>() {
-                        emit_merge_progress(&app, progress, stage);
+                        let (progress, stage) = normalize_merge_progress_event(progress, stage);
+                        emit_merge_progress(&app, progress, &stage);
                         continue;
                     }
                 }
@@ -3728,16 +5009,70 @@ where
             if cleaned.trim().is_empty() {
                 continue;
             }
-            let _ = app.emit(
-                "merge-log",
-                AnalysisLogPayload {
-                    stream: stream_name.to_string(),
-                    line: cleaned,
-                    timestamp: timestamp_millis(),
-                },
-            );
+            batch.push(cleaned);
         }
+        batch.flush();
     })
+}
+
+/// Python writes its result manifest before the native layer validates and
+/// moves every output into the user's selected directory.  Keep the progress
+/// stream non-terminal until that finalization has succeeded; the only
+/// terminal merge progress event is emitted below by
+/// `run_video_merge_process` after `finalize_merge_outputs` returns `Ok`.
+fn normalize_merge_progress_event(progress: f64, stage: &str) -> (f64, String) {
+    let finite_progress = if progress.is_finite() {
+        progress.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    if finite_progress >= 100.0 {
+        return (99.0, "正在整理输出文件".to_string());
+    }
+    (finite_progress.min(99.0), stage.to_string())
+}
+
+struct MergeLogBatch {
+    app: tauri::AppHandle,
+    stream_name: &'static str,
+    lines: Vec<String>,
+    last_flush: std::time::Instant,
+}
+
+impl MergeLogBatch {
+    fn new(app: tauri::AppHandle, stream_name: &'static str) -> Self {
+        Self {
+            app,
+            stream_name,
+            lines: Vec::with_capacity(MERGE_LOG_BATCH_LIMIT),
+            last_flush: std::time::Instant::now(),
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        self.lines.push(line);
+        if self.lines.len() >= MERGE_LOG_BATCH_LIMIT
+            || self.last_flush.elapsed() >= MERGE_LOG_BATCH_INTERVAL
+        {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let line = self.lines.drain(..).collect::<Vec<_>>().join("\n");
+        let _ = self.app.emit(
+            "merge-log",
+            AnalysisLogPayload {
+                stream: self.stream_name.to_string(),
+                line,
+                timestamp: timestamp_millis(),
+            },
+        );
+        self.last_flush = std::time::Instant::now();
+    }
 }
 
 fn emit_merge_progress<R: tauri::Runtime>(app: &tauri::AppHandle<R>, progress: f64, stage: &str) {
@@ -3767,6 +5102,9 @@ fn reset_merge_task_state(app: &tauri::AppHandle) {
     if let Ok(mut running) = state.is_running.lock() {
         *running = false;
     }
+    if let Ok(mut id) = state.task_id.lock() {
+        *id = None;
+    }
     if let Ok(mut cancelled) = state.cancel_requested.lock() {
         *cancelled = false;
     }
@@ -3776,6 +5114,10 @@ fn reset_merge_task_state(app: &tauri::AppHandle) {
     if let Ok(mut path) = state.result_path.lock() {
         *path = None;
     };
+    if let Ok(mut path) = state.temporary_output_dir.lock() {
+        *path = None;
+    }
+    release_media_operation();
 }
 
 fn python_exit_message(code: i32) -> String {
@@ -4004,7 +5346,10 @@ fn read_report(app: tauri::AppHandle, request: ReportPathRequest) -> Result<Valu
 /// 执行会卡死主线程（表现为界面冻结、无法退出）。这里改为 async + spawn_blocking，让磁盘
 /// 读取与 JSON 解析在阻塞线程池中完成，主线程始终保持响应。
 #[tauri::command]
-async fn read_report_overview(app: tauri::AppHandle, request: ReportPathRequest) -> Result<Value, String> {
+async fn read_report_overview(
+    app: tauri::AppHandle,
+    request: ReportPathRequest,
+) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = resolve_project_root(&app)?;
         let path = resolve_user_path(&root, &request.path);
@@ -4016,7 +5361,10 @@ async fn read_report_overview(app: tauri::AppHandle, request: ReportPathRequest)
 }
 
 #[tauri::command]
-async fn read_text_file(app: tauri::AppHandle, request: ReportPathRequest) -> Result<String, String> {
+async fn read_text_file(
+    app: tauri::AppHandle,
+    request: ReportPathRequest,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = resolve_project_root(&app)?;
         let path = resolve_user_path(&root, &request.path);
@@ -4027,7 +5375,10 @@ async fn read_text_file(app: tauri::AppHandle, request: ReportPathRequest) -> Re
 }
 
 #[tauri::command]
-async fn path_status(app: tauri::AppHandle, request: ReportPathRequest) -> Result<PathStatus, String> {
+async fn path_status(
+    app: tauri::AppHandle,
+    request: ReportPathRequest,
+) -> Result<PathStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = resolve_project_root(&app)?;
         let raw_path = PathBuf::from(&request.path);
@@ -5359,6 +6710,14 @@ fn close_window(
         window.hide().map_err(|e| format!("最小化到托盘失败: {e}"))
     } else {
         set_tray_visible(&app, false);
+        if request_merge_task_cancel(&app)
+            && !wait_for_merge_task_shutdown(&app, Duration::from_secs(5))
+        {
+            // A second request is deliberately allowed to force the private
+            // process group down if Python did not run its signal handler.
+            let _ = request_merge_task_cancel(&app);
+            let _ = wait_for_merge_task_shutdown(&app, Duration::from_secs(2));
+        }
         app.exit(0);
         Ok(())
     }
@@ -5431,6 +6790,7 @@ fn main() {
         }))
         .manage(TaskState::default())
         .manage(UpdateCancelState::default())
+        .manage(ClipModelDownloadState::default())
         .manage(MergeTaskState::default())
         .manage(FileMoveState::default())
         .manage(runtime_manager::RuntimeManagerState::default())
@@ -5473,14 +6833,19 @@ fn main() {
             check_for_updates,
             download_and_install_update,
             cancel_update_download,
+            get_update_download_status,
+            get_clip_model_download_status,
             open_release_page,
+            open_project_page,
             get_clip_model_status,
             install_clip_model,
+            cancel_clip_model_install,
             runtime_manager::get_runtime_status,
             runtime_manager::install_runtime,
             runtime_manager::migrate_legacy_runtime,
             runtime_manager::remove_legacy_runtime,
             runtime_manager::cancel_runtime_install,
+            runtime_manager::get_runtime_download_status,
             runtime_manager::get_merge_runtime_status,
             runtime_manager::install_merge_runtime,
             runtime_manager::cancel_merge_runtime_install,
@@ -5490,6 +6855,7 @@ fn main() {
             select_subtitle_files,
             select_output_directory,
             select_python_executable,
+            validate_video_export,
             scan_videos,
             probe_video_metadata,
             check_python_env,
@@ -6594,7 +7960,7 @@ fn report_pairs_csv(report: &Value) -> String {
                 csv_cell(json_text(pair, "raw_similarity_p95")),
                 csv_cell(json_text(pair, "matched_segment_count")),
             ]
-                .join(","),
+            .join(","),
         );
     }
     rows.join("\n")
@@ -6806,6 +8172,97 @@ fn unix_file_uri(path: &Path) -> String {
     format!("file://{encoded}")
 }
 
+fn kill_merge_process_tree(pid: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|error| format!("取消视频合并失败: {error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        Err("取消视频合并失败，进程可能已经退出".to_string())
+    }
+
+    #[cfg(unix)]
+    {
+        let group_pid = format!("-{pid}");
+        let group_status = Command::new("kill")
+            .args(["-TERM", "--", &group_pid])
+            .status()
+            .map_err(|error| format!("取消视频合并失败: {error}"))?;
+        if group_status.success() {
+            if wait_for_merge_process_group_exit(pid, Duration::from_secs(2)) {
+                return Ok(());
+            }
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &group_pid])
+                .status();
+            if wait_for_merge_process_group_exit(pid, Duration::from_secs(2)) {
+                return Ok(());
+            }
+            return Err("取消视频合并超时，进程组仍在运行".to_string());
+        }
+
+        // Keep cancellation compatible with a process started by an older
+        // build that did not create a private process group.
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        if wait_for_merge_process_exit(pid, Duration::from_secs(2)) {
+            return Ok(());
+        }
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        if wait_for_merge_process_exit(pid, Duration::from_secs(2)) {
+            return Ok(());
+        }
+        Err("取消视频合并超时，进程仍在运行".to_string())
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_merge_process_group_exit(pid: u32, timeout: Duration) -> bool {
+    let group_pid = format!("-{pid}");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let alive = Command::new("kill")
+            .args(["-0", "--", &group_pid])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_merge_process_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+}
+
 fn kill_process_tree(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let status = Command::new("taskkill")
@@ -6969,7 +8426,12 @@ fn clip_model_status_for_root(root: &Path) -> ClipModelStatus {
     }
 }
 
-fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Result<(), String> {
+fn install_clip_model_zip_cancelable(
+    root: &Path,
+    temp_root: &Path,
+    zip_path: &Path,
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
     let extract_root = temp_root.join("extracted");
     if extract_root.exists() {
         fs::remove_dir_all(&extract_root).map_err(|e| format!("清理临时模型目录失败: {e}"))?;
@@ -6980,6 +8442,7 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
     let mut archive =
         zip::ZipArchive::new(zip_file).map_err(|e| format!("读取模型 zip 失败: {e}"))?;
     for index in 0..archive.len() {
+        check_clip_cancel(cancel)?;
         let mut file = archive
             .by_index(index)
             .map_err(|e| format!("读取模型 zip 条目失败: {e}"))?;
@@ -6997,7 +8460,8 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
         }
         let mut output =
             File::create(&destination).map_err(|e| format!("写入模型文件失败: {e}"))?;
-        std::io::copy(&mut file, &mut output).map_err(|e| format!("解压模型文件失败: {e}"))?;
+        copy_clip_with_cancel(&mut file, &mut output, cancel)
+            .map_err(|e| format!("解压模型文件失败: {e}"))?;
     }
 
     let extracted_model = if is_complete_clip_model(&extract_root) {
@@ -7009,7 +8473,7 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
         let missing = clip_model_missing_files(&extracted_model).join(", ");
         return Err(format!("模型 zip 校验失败，缺少文件: {missing}"));
     }
-    verify_clip_model_hashes(&extracted_model)?;
+    verify_clip_model_hashes_cancelable(&extracted_model, cancel)?;
 
     let models_root = root.join("models");
     fs::create_dir_all(&models_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
@@ -7019,15 +8483,50 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
         CLIP_MODEL_DIR_NAME,
         timestamp_millis()
     ));
+    commit_clip_model_directory(
+        &extracted_model,
+        &target,
+        &old,
+        cancel,
+        || {},
+        |path| fs::remove_dir_all(path),
+    )
+}
+
+/// Switch the staged CLIP model into place.  The target rename (or a fully
+/// completed copy fallback) is the commit point.  Cancellation is checked
+/// before that point and never turns a committed model back into a failure.
+fn commit_clip_model_directory<F, C>(
+    extracted_model: &Path,
+    target: &Path,
+    old: &Path,
+    cancel: &AtomicBool,
+    after_commit: F,
+    cleanup_backup: C,
+) -> Result<bool, String>
+where
+    F: FnOnce(),
+    C: FnOnce(&Path) -> std::io::Result<()>,
+{
+    check_clip_cancel(cancel)?;
     if target.exists() {
         if old.exists() {
-            fs::remove_dir_all(&old).map_err(|e| format!("清理旧模型备份失败: {e}"))?;
+            fs::remove_dir_all(old).map_err(|e| format!("清理旧模型备份失败: {e}"))?;
         }
-        fs::rename(&target, &old).map_err(|e| format!("备份旧模型目录失败: {e}"))?;
+        fs::rename(target, old).map_err(|e| format!("备份旧模型目录失败: {e}"))?;
     }
-    if let Err(rename_error) = fs::rename(&extracted_model, &target) {
-        if let Err(copy_error) = copy_dir_recursive(&extracted_model, &target) {
-            if let Err(restore_error) = restore_clip_model_backup(&target, &old) {
+    if let Err(error) = check_clip_cancel(cancel) {
+        if old.exists() {
+            if let Err(restore_error) = restore_clip_model_backup(target, old) {
+                return Err(format!("{error}; {restore_error}"));
+            }
+        }
+        return Err(error);
+    }
+
+    if let Err(rename_error) = fs::rename(extracted_model, target) {
+        if let Err(copy_error) = copy_dir_recursive_cancelable(extracted_model, target, cancel) {
+            if let Err(restore_error) = restore_clip_model_backup(target, old) {
                 return Err(format!(
                     "安装模型失败: {rename_error}; 复制回退失败: {copy_error}; 恢复旧模型也失败: {restore_error}"
                 ));
@@ -7036,18 +8535,29 @@ fn install_clip_model_zip(root: &Path, temp_root: &Path, zip_path: &Path) -> Res
                 "安装模型失败: {rename_error}; 复制回退失败: {copy_error}"
             ));
         }
-        let _ = fs::remove_dir_all(&extracted_model);
+        let _ = fs::remove_dir_all(extracted_model);
     }
+
+    // Commit point.  Do not inspect cancellation after this callback: the
+    // newly activated model is authoritative even if the user clicked cancel
+    // during the final hand-off.
+    after_commit();
     if old.exists() {
-        fs::remove_dir_all(&old).map_err(|e| format!("清理旧模型备份失败: {e}"))?;
+        if let Err(error) = cleanup_backup(old) {
+            eprintln!("清理旧 CLIP 模型备份失败（新模型已生效，稍后可重试）: {error}");
+        }
     }
-    Ok(())
+    Ok(true)
 }
 
-fn verify_clip_model_hashes(model_dir: &Path) -> Result<(), String> {
+fn verify_clip_model_hashes_cancelable(
+    model_dir: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     for (name, expected) in CLIP_MODEL_FILE_HASHES {
+        check_clip_cancel(cancel)?;
         let path = model_dir.join(name);
-        let actual = sha256_file(&path)?;
+        let actual = sha256_clip_file_cancelable(&path, cancel)?;
         if actual != *expected {
             return Err(format!(
                 "模型文件校验失败：{name} 的 SHA-256 不匹配，请重新下载"
@@ -7057,7 +8567,7 @@ fn verify_clip_model_hashes(model_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+fn sha256_clip_file_cancelable(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     use sha2::{Digest, Sha256};
 
     let mut file =
@@ -7065,6 +8575,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 1024 * 1024];
     loop {
+        check_clip_cancel(cancel)?;
         let read = file
             .read(&mut buffer)
             .map_err(|e| format!("读取模型文件失败 {}: {e}", path.display()))?;
@@ -7086,19 +8597,29 @@ fn restore_clip_model_backup(target: &Path, backup: &Path) -> Result<(), String>
     Ok(())
 }
 
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+fn copy_dir_recursive_cancelable(
+    source: &Path,
+    target: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    check_clip_cancel(cancel)?;
     if target.exists() {
         fs::remove_dir_all(target).map_err(|e| format!("清理目标模型目录失败: {e}"))?;
     }
     fs::create_dir_all(target).map_err(|e| format!("创建目标模型目录失败: {e}"))?;
     for entry in fs::read_dir(source).map_err(|e| format!("读取模型目录失败: {e}"))? {
+        check_clip_cancel(cancel)?;
         let entry = entry.map_err(|e| format!("读取模型目录项失败: {e}"))?;
         let source_path = entry.path();
         let target_path = target.join(entry.file_name());
         if source_path.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
+            copy_dir_recursive_cancelable(&source_path, &target_path, cancel)?;
         } else {
-            fs::copy(&source_path, &target_path).map_err(|e| {
+            let mut source_file = File::open(&source_path)
+                .map_err(|e| format!("打开模型文件失败 {}: {e}", source_path.display()))?;
+            let mut target_file = File::create(&target_path)
+                .map_err(|e| format!("创建模型文件失败 {}: {e}", target_path.display()))?;
+            copy_clip_with_cancel(&mut source_file, &mut target_file, cancel).map_err(|e| {
                 format!(
                     "复制模型文件失败 {} -> {}: {e}",
                     source_path.display(),
@@ -7108,6 +8629,34 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn check_clip_cancel(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::SeqCst) {
+        Err("离线 CLIP 模型安装已取消。".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn copy_clip_with_cancel<R: Read, W: Write>(
+    source: &mut R,
+    destination: &mut W,
+    cancel: &AtomicBool,
+) -> Result<u64, String> {
+    let mut buffer = [0u8; 1024 * 1024];
+    let mut copied = 0u64;
+    loop {
+        check_clip_cancel(cancel)?;
+        let read = source.read(&mut buffer).map_err(|e| e.to_string())?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|e| e.to_string())?;
+        copied = copied.saturating_add(read as u64);
+    }
 }
 
 fn directory_size(path: &Path) -> std::io::Result<u64> {
@@ -7132,6 +8681,15 @@ fn emit_model_progress<R: tauri::Runtime>(
     progress: f64,
     stage: &str,
 ) {
+    if let Some(state) = app.try_state::<ClipModelDownloadState>() {
+        if let Ok(mut status) = state.status.lock() {
+            status.downloaded_bytes = downloaded_bytes;
+            status.total_bytes = total_bytes;
+            status.progress = progress.clamp(0.0, 100.0);
+            status.stage = stage.to_string();
+            status.cancel_requested = state.is_cancelled();
+        }
+    }
     let _ = app.emit(
         "clip-model-install-progress",
         UpdateDownloadProgress {
@@ -7141,6 +8699,24 @@ fn emit_model_progress<R: tauri::Runtime>(
             stage: stage.to_string(),
         },
     );
+}
+
+fn cleanup_clip_model_downloads(app: &tauri::AppHandle) {
+    let Ok(root) = runtime_manager::asset_root(app) else {
+        return;
+    };
+    let download_root = root.join("models").join(".downloads");
+    let Ok(entries) = fs::read_dir(download_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if metadata.is_file() && !metadata.file_type().is_symlink() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 fn timestamp_millis() -> u128 {
@@ -7306,18 +8882,51 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_task_match_key, estimated_windows_command_line_len, is_decord_seek_warning_line,
-        is_h264_decoder_log_line, parse_analysis_video_context, parse_analysis_video_quarantined,
-        python_spawn_error_message, report_pairs_csv, sha256_file,
-        update_report_entries_for_resolved_path,
-        AnalysisVideoContext, AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator,
-        PythonLaunchDiagnostics, ReportPairIdentity,
-        VideoMergeConfig,
+        cleanup_stale_merge_preview_dirs, compact_task_match_key,
+        estimated_windows_command_line_len, finalize_merge_outputs,
+        install_clip_model_zip_cancelable, is_decord_seek_warning_line, is_h264_decoder_log_line,
+        is_trusted_project_page_url, merge_output_component_length, merge_output_name_fits_target,
+        merge_output_path_length, merge_output_path_limit, merge_output_timestamp,
+        move_merge_output_noreplace, next_merge_task_id, normalize_merge_output_format,
+        normalize_merge_output_stem, normalize_merge_progress_event, parse_analysis_video_context,
+        parse_analysis_video_quarantined, python_spawn_error_message, report_pairs_csv,
+        sha256_clip_file_cancelable, unique_merge_output_path,
+        update_report_entries_for_resolved_path, validate_export_path_chain, AnalysisVideoContext,
+        AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator, MergeFinishedPayload,
+        PythonLaunchDiagnostics, ReportPairIdentity, UpdateCancelState, VideoMergeConfig,
+        CLIP_MODEL_DIR_NAME,
     };
     use serde_json::json;
     use std::fs;
     #[cfg(target_os = "windows")]
     use std::path::Path;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn project_page_allowlist_requires_exact_urls() {
+        assert!(is_trusted_project_page_url(
+            "https://github.com/RoamerFly/video-similarity-detector"
+        ));
+        assert!(is_trusted_project_page_url(
+            "https://github.com/RoamerFly/video-similarity-detector/issues"
+        ));
+        assert!(is_trusted_project_page_url(
+            "https://github.com/RoamerFly/video-similarity-detector/blob/main/LICENSE"
+        ));
+
+        assert!(!is_trusted_project_page_url(
+            "https://github.com/RoamerFly/video-similarity-detector/"
+        ));
+        assert!(!is_trusted_project_page_url(
+            "https://github.com/RoamerFly/video-similarity-detector/issues?redirect=https://example.com"
+        ));
+        assert!(!is_trusted_project_page_url(
+            "https://github.com/RoamerFly/video-similarity-detector.evil.example/issues"
+        ));
+    }
 
     #[test]
     fn merge_config_preserves_text_and_extracted_audio_identity() {
@@ -7336,12 +8945,437 @@ mod tests {
             "outputDir": "D:/out", "outputName": "merged", "width": 1920, "height": 1080,
             "fitMode": "contain", "splitMode": "none", "splitValue": 600, "fps": 30,
             "crf": 23, "encoderPreset": "medium", "includeAudio": true
-        })).expect("parse merge config");
+        }))
+        .expect("parse merge config");
 
         assert_eq!(config.inputs[0].id, "clip-1");
-        assert_eq!(config.audio_tracks[0].source_clip_id.as_deref(), Some("clip-1"));
+        assert_eq!(
+            config.audio_tracks[0].source_clip_id.as_deref(),
+            Some("clip-1")
+        );
         assert_eq!(config.audio_tracks[0].source_type.as_deref(), Some("video"));
         assert_eq!(config.text_tracks[0].text, "字幕");
+    }
+
+    #[test]
+    fn merge_task_ids_are_unique_for_concurrent_requests() {
+        let first = next_merge_task_id("merge");
+        let second = next_merge_task_id("merge");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("merge-"));
+        assert!(second.starts_with("merge-"));
+    }
+
+    #[test]
+    fn merge_progress_stays_non_terminal_until_outputs_are_finalized() {
+        assert_eq!(
+            normalize_merge_progress_event(100.0, "已生成 1 个视频文件"),
+            (99.0, "正在整理输出文件".to_string())
+        );
+        assert_eq!(
+            normalize_merge_progress_event(120.0, "完成"),
+            (99.0, "正在整理输出文件".to_string())
+        );
+        assert_eq!(
+            normalize_merge_progress_event(98.765, "正在合并"),
+            (98.765, "正在合并".to_string())
+        );
+        assert_eq!(
+            normalize_merge_progress_event(f64::NAN, "未知"),
+            (0.0, "未知".to_string())
+        );
+    }
+
+    #[test]
+    fn update_progress_stays_below_terminal_until_install_succeeds() {
+        let state = UpdateCancelState::default();
+        assert!(state.try_begin());
+        state.update_progress(99, 100, 99.0, "正在校验更新安装包");
+        let before_install = state.snapshot();
+        assert!(before_install.running);
+        assert_eq!(before_install.progress, 99.0);
+        assert_eq!(before_install.stage, "正在校验更新安装包");
+
+        // The install boundary is represented by the final state transition;
+        // callers must not publish a terminal event before this point.
+        state.update_progress(100, 100, 99.0, "正在安装更新");
+        assert_eq!(state.snapshot().progress, 99.0);
+        state.finish("更新完成", false);
+        let completed = state.snapshot();
+        assert!(!completed.running);
+        assert!(!completed.cancelled);
+        assert_eq!(completed.stage, "更新完成");
+    }
+
+    #[test]
+    fn merge_output_destination_does_not_overwrite_existing_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-output-{}",
+            next_merge_task_id("test")
+        ));
+        fs::create_dir_all(&directory).expect("create output fixture directory");
+        let existing = directory.join("merged.mp4");
+        fs::write(&existing, b"existing").expect("write existing output fixture");
+
+        let destination = unique_merge_output_path(&directory, std::ffi::OsStr::new("merged.mp4"));
+
+        assert_ne!(destination, existing);
+        assert!(!destination.exists());
+        fs::remove_dir_all(&directory).expect("remove output fixture directory");
+    }
+
+    #[test]
+    fn merge_export_name_and_format_are_portable_and_bounded() {
+        assert_eq!(normalize_merge_output_format(None).unwrap(), "mp4");
+        assert_eq!(normalize_merge_output_format(Some(".MKV")).unwrap(), "mkv");
+        assert_eq!(
+            normalize_merge_output_stem("merged.mkv", "mkv").unwrap(),
+            "merged"
+        );
+        assert!(normalize_merge_output_stem("CON", "mp4").is_err());
+        assert!(normalize_merge_output_stem("bad/name", "mp4").is_err());
+        assert!(normalize_merge_output_stem("bad. ", "mp4").is_err());
+        assert_eq!(merge_output_timestamp().len(), 10);
+        assert!(merge_output_component_length("merged.mp4") < 255);
+    }
+
+    #[test]
+    fn merge_export_path_validation_accounts_for_full_name_and_parents() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-export-path-{}",
+            next_merge_task_id("test")
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(!merge_output_name_fits_target(
+            &root,
+            &"a".repeat(252),
+            "mp4"
+        ));
+        assert!(validate_export_path_chain(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn merge_export_path_validation_accounts_for_task_temporary_directory() {
+        let target = PathBuf::from("C:\\").join("a".repeat(190));
+        let final_path = target.join("merged.mp4");
+        assert!(merge_output_path_length(&final_path) <= merge_output_path_limit());
+        assert!(!merge_output_name_fits_target(&target, "merged", "mp4"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_export_path_validation_rejects_symlink_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-export-link-{}",
+            next_merge_task_id("test")
+        ));
+        let outside = root.join("outside");
+        let link = root.join("link");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &link).unwrap();
+        let error = super::resolve_export_target_directory(&root, "link/exports")
+            .expect_err("symlink parent must be rejected");
+        assert!(error.contains("符号链接") || error.contains("重解析"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_merge_finalization_never_overwrites_existing_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-export-race-{}",
+            next_merge_task_id("test")
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("merged.mp4");
+        let first = root.join("first.tmp");
+        let second = root.join("second.tmp");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [first, second]
+            .into_iter()
+            .map(|source| {
+                let barrier = barrier.clone();
+                let destination = destination.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    move_merge_output_noreplace(&source, &destination)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let destination_bytes = fs::read(&destination).unwrap();
+        assert!(destination_bytes == b"first" || destination_bytes == b"second");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_clip_model_install_keeps_previous_model_and_staging_is_disposable() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-clip-cancel-{}",
+            next_merge_task_id("test")
+        ));
+        let model = root.join("models").join(CLIP_MODEL_DIR_NAME);
+        let temp = root.join("temporary");
+        let archive_path = root.join("clip.zip");
+        fs::create_dir_all(&model).unwrap();
+        fs::write(model.join("old-model.bin"), b"old").unwrap();
+        fs::create_dir_all(&temp).unwrap();
+
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        archive
+            .start_file(
+                "clip-vit-base-patch32/config.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        std::io::Write::write_all(&mut archive, b"new").unwrap();
+        archive.finish().unwrap();
+
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let result = install_clip_model_zip_cancelable(&root, &temp, &archive_path, &cancelled);
+        assert!(result.is_err());
+        assert_eq!(fs::read(model.join("old-model.bin")).unwrap(), b"old");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finalize_merge_outputs_moves_only_files_from_task_directory() {
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-finalize-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let final_output_dir = task_directory.join("final");
+        fs::create_dir_all(&temporary_output_dir).expect("create temporary output fixture");
+        let source = temporary_output_dir.join("merged.mp4");
+        fs::write(&source, b"merged").expect("write merged output fixture");
+
+        let payload = MergeFinishedPayload {
+            output_paths: vec![source.to_string_lossy().into_owned()],
+            message: "完成".to_string(),
+        };
+        let finalized = finalize_merge_outputs(payload, &temporary_output_dir, &final_output_dir)
+            .expect("finalize output fixture");
+
+        assert!(!source.exists());
+        assert_eq!(finalized.output_paths.len(), 1);
+        let finalized_path = PathBuf::from(&finalized.output_paths[0]);
+        assert!(finalized_path.is_absolute());
+        assert!(finalized_path.is_file());
+        fs::remove_dir_all(&task_directory).expect("remove finalize fixture directory");
+    }
+
+    #[test]
+    fn finalize_merge_outputs_accepts_relative_file_names() {
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-relative-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let final_output_dir = task_directory.join("final");
+        fs::create_dir_all(&temporary_output_dir).expect("create relative output fixture");
+        let source = temporary_output_dir.join("merged.mp4");
+        fs::write(&source, b"relative merged").expect("write relative output fixture");
+
+        let finalized = finalize_merge_outputs(
+            MergeFinishedPayload {
+                output_paths: vec!["merged.mp4".to_string()],
+                message: "完成".to_string(),
+            },
+            &temporary_output_dir,
+            &final_output_dir,
+        )
+        .expect("finalize relative output fixture");
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(&finalized.output_paths[0]).unwrap(),
+            b"relative merged"
+        );
+        assert!(PathBuf::from(&finalized.output_paths[0]).is_absolute());
+        fs::remove_dir_all(&task_directory).expect("remove relative output fixture");
+    }
+
+    #[test]
+    fn finalize_merge_outputs_rejects_directory_traversal() {
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-traversal-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let final_output_dir = task_directory.join("final");
+        let outside = task_directory.join("outside.mp4");
+        fs::create_dir_all(&temporary_output_dir).expect("create traversal fixture");
+        fs::write(&outside, b"must remain").expect("write traversal fixture");
+
+        let error = finalize_merge_outputs(
+            MergeFinishedPayload {
+                output_paths: vec!["../outside.mp4".to_string()],
+                message: "完成".to_string(),
+            },
+            &temporary_output_dir,
+            &final_output_dir,
+        )
+        .expect_err("directory traversal must be rejected");
+
+        assert!(error.contains("目录穿越"));
+        assert_eq!(fs::read(&outside).unwrap(), b"must remain");
+        assert!(!final_output_dir.exists());
+        fs::remove_dir_all(&task_directory).expect("remove traversal fixture");
+    }
+
+    #[test]
+    fn finalize_merge_outputs_rejects_file_from_another_task() {
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-task-boundary-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let other_task_dir = task_directory.join("other-task-output");
+        let final_output_dir = task_directory.join("final");
+        fs::create_dir_all(&temporary_output_dir).expect("create task boundary fixture");
+        fs::create_dir_all(&other_task_dir).expect("create other task fixture");
+        let other_source = other_task_dir.join("merged.mp4");
+        fs::write(&other_source, b"other task").expect("write other task fixture");
+
+        let error = finalize_merge_outputs(
+            MergeFinishedPayload {
+                output_paths: vec![other_source.to_string_lossy().into_owned()],
+                message: "完成".to_string(),
+            },
+            &temporary_output_dir,
+            &final_output_dir,
+        )
+        .expect_err("another task output must be rejected");
+
+        assert!(error.contains("当前任务目录"));
+        assert!(other_source.exists());
+        assert!(!final_output_dir.exists());
+        fs::remove_dir_all(&task_directory).expect("remove task boundary fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_merge_outputs_rejects_symlink_output() {
+        use std::os::unix::fs::symlink;
+
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-symlink-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let final_output_dir = task_directory.join("final");
+        let outside = task_directory.join("outside.mp4");
+        let link = temporary_output_dir.join("merged.mp4");
+        fs::create_dir_all(&temporary_output_dir).expect("create symlink fixture");
+        fs::write(&outside, b"outside target").expect("write symlink target fixture");
+        symlink(&outside, &link).expect("create symlink fixture");
+
+        let error = finalize_merge_outputs(
+            MergeFinishedPayload {
+                output_paths: vec![link.to_string_lossy().into_owned()],
+                message: "完成".to_string(),
+            },
+            &temporary_output_dir,
+            &final_output_dir,
+        )
+        .expect_err("symlink output must be rejected");
+
+        assert!(error.contains("符号链接"));
+        assert!(link.exists());
+        assert!(outside.exists());
+        fs::remove_dir_all(&task_directory).expect("remove symlink fixture");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn finalize_merge_outputs_accepts_windows_case_and_separator_variants() {
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-windows-path-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let final_output_dir = task_directory.join("final");
+        fs::create_dir_all(&temporary_output_dir).expect("create Windows path fixture");
+        let source = temporary_output_dir.join("merged.mp4");
+        fs::write(&source, b"windows merged").expect("write Windows path fixture");
+        let windows_variant = source
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_uppercase();
+
+        let finalized = finalize_merge_outputs(
+            MergeFinishedPayload {
+                output_paths: vec![windows_variant],
+                message: "完成".to_string(),
+            },
+            &temporary_output_dir,
+            &final_output_dir,
+        )
+        .expect("finalize Windows path fixture");
+
+        assert_eq!(
+            fs::read(&finalized.output_paths[0]).unwrap(),
+            b"windows merged"
+        );
+        fs::remove_dir_all(&task_directory).expect("remove Windows path fixture");
+    }
+
+    #[test]
+    fn cleanup_stale_merge_preview_dirs_keeps_current_and_unrelated_entries() {
+        let preview_root = std::env::temp_dir().join(format!(
+            "video-similarity-merge-preview-cleanup-{}",
+            next_merge_task_id("test")
+        ));
+        let current = preview_root.join("merge-preview-100-1");
+        let stale = preview_root.join("merge-preview-101-2");
+        let malformed = preview_root.join("merge-preview-not-a-task");
+        let unrelated = preview_root.join("keep-me");
+        for directory in [&current, &stale, &malformed, &unrelated] {
+            fs::create_dir_all(directory).expect("create preview cleanup fixture");
+        }
+        fs::write(stale.join("resolution-preview.mp4"), b"stale")
+            .expect("write stale preview fixture");
+
+        let removed = cleanup_stale_merge_preview_dirs(&preview_root, &current)
+            .expect("cleanup stale preview fixtures");
+
+        assert_eq!(removed, 1);
+        assert!(current.is_dir());
+        assert!(!stale.exists());
+        assert!(malformed.is_dir());
+        assert!(unrelated.is_dir());
+        fs::remove_dir_all(&preview_root).expect("remove preview cleanup fixture");
+    }
+
+    #[test]
+    fn cleanup_stale_merge_preview_dirs_rejects_invalid_keep_path() {
+        let preview_root = std::env::temp_dir().join(format!(
+            "video-similarity-merge-preview-safe-{}",
+            next_merge_task_id("test")
+        ));
+        let stale = preview_root.join("merge-preview-100-1");
+        fs::create_dir_all(&stale).expect("create preview safety fixture");
+
+        let result = cleanup_stale_merge_preview_dirs(
+            &preview_root,
+            &preview_root.join("not-a-preview-task"),
+        );
+
+        assert!(result.is_err());
+        assert!(stale.is_dir());
+        fs::remove_dir_all(&preview_root).expect("remove preview safety fixture");
     }
 
     #[test]
@@ -7351,7 +9385,8 @@ mod tests {
             super::timestamp_millis()
         ));
         fs::write(&path, b"video-similarity").expect("write hash fixture");
-        let actual = sha256_file(&path).expect("hash fixture");
+        let actual =
+            sha256_clip_file_cancelable(&path, &AtomicBool::new(false)).expect("hash fixture");
         fs::remove_file(&path).expect("remove hash fixture");
 
         assert_eq!(

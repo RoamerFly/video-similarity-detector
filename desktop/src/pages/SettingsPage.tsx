@@ -10,6 +10,7 @@ import {
   FileSearch,
   Film,
   FolderOpen,
+  Github,
   Info,
   PackageCheck,
   RefreshCw,
@@ -51,7 +52,11 @@ import {
   listenClipModelInstallProgress,
   listenUpdateDownloadProgress,
   normalizeBackendError,
+  openProjectPage,
   openReleasePage,
+  PROJECT_ISSUES_URL,
+  PROJECT_LICENSE_URL,
+  PROJECT_REPOSITORY_URL,
   scanCache,
   saveConfigTemplate,
   selectOutputDirectory,
@@ -66,6 +71,7 @@ import {
   type UpdateDownloadProgress,
   type UpdateInfo,
 } from '@/services/backend'
+import * as backendApi from '@/services/backend'
 import { useEnvironmentStore } from '@/stores/environmentStore'
 import { analysisPresetFromSettings, settingsSnapshotFromState, useSettingsStore } from '@/stores/settingsStore'
 import type {
@@ -88,6 +94,199 @@ import { analysisPresetOptions, errorToleranceOptions } from '@/types/config'
 import { parameterHints, withEnglish } from '@/utils/parameterHints'
 
 type SettingsTab = 'base' | 'analysis' | 'error_tolerance' | 'video_scan'
+
+type DownloadTaskKind = 'clip-model' | 'update'
+
+interface DownloadTaskSnapshot {
+  active: boolean
+  progress: UpdateDownloadProgress | null
+  error: string
+  terminal?: 'success' | 'cancelled' | 'failed'
+  generation: number
+}
+
+interface BackendDownloadTaskStatus {
+  task?: string
+  phase?: string
+  stage?: string
+  running?: boolean
+  cancelled?: boolean
+  cancelRequested?: boolean
+  progress?: number
+  downloadedBytes?: number
+  totalBytes?: number
+}
+
+type DownloadTaskStatusApi = {
+  getDownloadTaskStatus?: (task: string) => Promise<BackendDownloadTaskStatus>
+  getClipModelDownloadStatus?: () => Promise<BackendDownloadTaskStatus>
+  getUpdateDownloadStatus?: () => Promise<BackendDownloadTaskStatus>
+  cancelDownloadTask?: (task: string) => Promise<void>
+  cancelClipModelDownload?: () => Promise<void>
+  cancelClipModelInstall?: () => Promise<void>
+}
+
+const optionalDownloadApi = backendApi as typeof backendApi & DownloadTaskStatusApi
+
+async function queryDownloadTaskStatus(kind: DownloadTaskKind) {
+  const task = kind === 'clip-model' ? 'clip-model' : 'update'
+  const status = optionalDownloadApi.getDownloadTaskStatus
+    ? await optionalDownloadApi.getDownloadTaskStatus(task)
+    : kind === 'clip-model' && optionalDownloadApi.getClipModelDownloadStatus
+      ? await optionalDownloadApi.getClipModelDownloadStatus()
+      : kind === 'update' && optionalDownloadApi.getUpdateDownloadStatus
+        ? await optionalDownloadApi.getUpdateDownloadStatus()
+        : null
+  return status
+}
+
+async function cancelDownloadTask(kind: DownloadTaskKind) {
+  const task = kind === 'clip-model' ? 'clip-model' : 'update'
+  if (optionalDownloadApi.cancelDownloadTask) {
+    await optionalDownloadApi.cancelDownloadTask(task)
+    return
+  }
+  if (kind === 'clip-model') {
+    if (optionalDownloadApi.cancelClipModelDownload) {
+      await optionalDownloadApi.cancelClipModelDownload()
+      return
+    }
+    if (optionalDownloadApi.cancelClipModelInstall) {
+      await optionalDownloadApi.cancelClipModelInstall()
+      return
+    }
+  }
+  if (kind === 'update') {
+    await cancelUpdateDownload()
+    return
+  }
+  throw new Error('当前版本不支持取消离线模型下载。')
+}
+
+function progressFromDownloadStatus(status: BackendDownloadTaskStatus): UpdateDownloadProgress {
+  return {
+    downloadedBytes: Number.isFinite(status.downloadedBytes) ? Number(status.downloadedBytes) : 0,
+    totalBytes: Number.isFinite(status.totalBytes) ? Number(status.totalBytes) : 0,
+    progress: Number.isFinite(status.progress) ? Number(status.progress) : 0,
+    stage: status.stage || status.phase || '',
+  }
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function downloadStatusIsActive(status: BackendDownloadTaskStatus) {
+  // A cancellation request is asynchronous: keep the button in its cancel
+  // state until the backend has actually released the task, avoiding a race
+  // where a second install starts while the first task is still unwinding.
+  return status.running === true && status.cancelled !== true
+}
+
+type DownloadTerminal = 'success' | 'cancelled' | 'failed'
+
+// A progress event is only a hint: the native installer can emit 100% before
+// verification, extraction, or the OS installer has finished. The status
+// endpoint is the source of truth for releasing the action button.
+// eslint-disable-next-line react-refresh/only-export-components
+export function downloadStatusTerminal(
+  kind: DownloadTaskKind,
+  status: BackendDownloadTaskStatus,
+): DownloadTerminal | null {
+  const stage = (status.stage || status.phase || '').trim()
+  if (status.running === true || /正在取消/.test(stage)) return null
+  if (status.cancelled === true || /已取消|取消完成/.test(stage)) return 'cancelled'
+  if (/失败|错误/.test(stage)) return 'failed'
+  if (kind === 'update' && /已安装|安装完成|更新完成|更新已完成|应用已更新|应用即将退出|已完成/.test(stage)) return 'success'
+  if (kind === 'clip-model' && /已安装|安装完成|模型下载完成|已完成/.test(stage)) return 'success'
+  return null
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function downloadStatusHasSettled(
+  kind: DownloadTaskKind,
+  status: BackendDownloadTaskStatus,
+  expected?: DownloadTerminal,
+) {
+  const terminal = downloadStatusTerminal(kind, status)
+  return terminal !== null && (expected === undefined || terminal === expected)
+}
+
+/**
+ * Progress events do not carry the backend's `running` flag.  In particular,
+ * update installation emits 100% when the archive has been verified, before
+ * the installer is launched.  Only an explicit terminal stage may end the
+ * task here; the numeric percentage is never used as a terminal signal.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function downloadProgressIsTerminal(
+  kind: DownloadTaskKind,
+  progress: UpdateDownloadProgress,
+) {
+  const stage = progress.stage.trim()
+  if (!stage) return false
+  // "正在取消" is still a running backend task. Keep the action disabled
+  // from starting a second task until the status query reports stopped.
+  if (/失败|错误|已取消|取消完成/.test(stage)) return true
+  if (kind === 'update') {
+    return /已安装|安装完成|更新完成|更新已完成|应用已更新|应用即将退出|已完成/.test(stage)
+  }
+  return /已安装|安装完成|模型下载完成|已完成/.test(stage)
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function downloadProgressEventIsActive(
+  kind: DownloadTaskKind,
+  progress: UpdateDownloadProgress,
+) {
+  return !downloadProgressIsTerminal(kind, progress)
+}
+
+async function waitForDownloadTaskSettlement(
+  kind: DownloadTaskKind,
+  expected?: DownloadTerminal,
+) {
+  let latest: BackendDownloadTaskStatus | null = null
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    latest = await queryDownloadTaskStatus(kind).catch(() => null)
+    if (latest && downloadStatusHasSettled(kind, latest, expected)) return latest
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 100))
+  }
+  return latest
+}
+
+// Keep download state outside the dialog component tree.  Dialogs are
+// intentionally ephemeral (and may be closed while a download continues), so
+// local modal state must never be the source of truth for the action button.
+const downloadTaskSnapshots: Record<DownloadTaskKind, DownloadTaskSnapshot> = {
+  'clip-model': { active: false, progress: null, error: '', generation: 0 },
+  update: { active: false, progress: null, error: '', generation: 0 },
+}
+
+function getDownloadTaskSnapshot(kind: DownloadTaskKind): DownloadTaskSnapshot {
+  const snapshot = downloadTaskSnapshots[kind]
+  return {
+    active: snapshot.active,
+    progress: snapshot.progress ? { ...snapshot.progress } : null,
+    error: snapshot.error,
+    terminal: snapshot.terminal,
+    generation: snapshot.generation,
+  }
+}
+
+function setDownloadTaskSnapshot(kind: DownloadTaskKind, patch: Partial<DownloadTaskSnapshot>) {
+  downloadTaskSnapshots[kind] = {
+    ...downloadTaskSnapshots[kind],
+    ...patch,
+  }
+}
+
+function beginDownloadTask(kind: DownloadTaskKind) {
+  const generation = downloadTaskSnapshots[kind].generation + 1
+  setDownloadTaskSnapshot(kind, { generation, active: true, terminal: undefined })
+  return generation
+}
+
+function isCurrentDownloadGeneration(kind: DownloadTaskKind, generation: number) {
+  return downloadTaskSnapshots[kind].generation === generation
+}
 
 interface ErrorToleranceTemplateConfig {
   errorTolerancePreset: ErrorTolerancePreset
@@ -600,14 +799,26 @@ function BaseSettings({
   const settings = useSettingsStore()
   const [modelStatus, setModelStatus] = useState<ClipModelStatus | null>(null)
   const [modelLoading, setModelLoading] = useState(false)
-  const [modelInstalling, setModelInstalling] = useState(false)
-  const [modelProgress, setModelProgress] = useState<UpdateDownloadProgress | null>(null)
-  const [modelError, setModelError] = useState('')
+  const [modelInstalling, setModelInstalling] = useState(() => getDownloadTaskSnapshot('clip-model').active)
+  const [modelProgress, setModelProgress] = useState<UpdateDownloadProgress | null>(() => getDownloadTaskSnapshot('clip-model').progress)
+  const modelOperationRef = useRef(0)
+  const modelStatusRequestRef = useRef(0)
+  const [modelError, setModelError] = useState(() => getDownloadTaskSnapshot('clip-model').error)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [runtimeLoading, setRuntimeLoading] = useState(false)
   const [mergeRuntimeStatus, setMergeRuntimeStatus] = useState<MergeRuntimeStatus | null>(null)
   const [mergeRuntimeLoading, setMergeRuntimeLoading] = useState(false)
   const [resourceDialog, setResourceDialog] = useState<'about' | 'runtime' | 'clip-model' | 'merge' | null>(null)
+  const [aboutError, setAboutError] = useState('')
+
+  const handleOpenProjectPage = useCallback(async (url: string) => {
+    setAboutError('')
+    try {
+      await openProjectPage(url)
+    } catch (err) {
+      setAboutError(normalizeBackendError(err))
+    }
+  }, [])
 
   const refreshRuntimeStatuses = useCallback(async () => {
     setRuntimeLoading(true)
@@ -634,7 +845,38 @@ function BaseSettings({
     }
   }, [])
 
+  const syncModelDownloadStatus = useCallback(async () => {
+    const request = modelStatusRequestRef.current + 1
+    modelStatusRequestRef.current = request
+    try {
+      const status = await queryDownloadTaskStatus('clip-model')
+      if (!status || request !== modelStatusRequestRef.current) return
+      const currentSnapshot = getDownloadTaskSnapshot('clip-model')
+      // A delayed status response from the previous request must not reopen
+      // a task after its successful install has already settled locally.
+      if (currentSnapshot.terminal === 'success' && status.running === true) return
+      const settled = downloadStatusHasSettled('clip-model', status)
+      // A status response with running=false but no terminal stage can be a
+      // stale response during extraction. Do not unlock a new install then.
+      const active = status.running === true || (currentSnapshot.active && !settled)
+      const nextProgress = progressFromDownloadStatus(status)
+      setDownloadTaskSnapshot('clip-model', {
+        active,
+        progress: nextProgress.stage ? nextProgress : currentSnapshot.progress,
+        terminal: settled ? downloadStatusTerminal('clip-model', status) || undefined : active ? undefined : currentSnapshot.terminal,
+      })
+      setModelInstalling(active)
+      if (nextProgress.stage) setModelProgress(nextProgress)
+    } catch {
+      // Status polling is best-effort.  The progress event and install
+      // promise remain authoritative when running against an older backend.
+    }
+  }, [])
+
   const closeResourceDialog = useCallback(() => {
+    // Closing a resource dialog is presentation-only.  In particular, it
+    // must not cancel a download; the module-level task snapshot keeps the
+    // action button in sync when the dialog is opened again.
     setResourceDialog(null)
     void refreshRuntimeStatuses()
     void refreshClipModelStatus()
@@ -646,6 +888,19 @@ function BaseSettings({
   }, [refreshClipModelStatus])
 
   useEffect(() => {
+    let active = true
+    const sync = () => {
+      if (active) void syncModelDownloadStatus()
+    }
+    sync()
+    const timer = window.setInterval(sync, 1000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [syncModelDownloadStatus])
+
+  useEffect(() => {
     const timer = window.setTimeout(() => void refreshRuntimeStatuses(), 0)
     return () => window.clearTimeout(timer)
   }, [refreshRuntimeStatuses])
@@ -655,7 +910,34 @@ function BaseSettings({
     let stop = () => undefined
     void listenClipModelInstallProgress((payload) => {
       if (!active) return
+      const terminal = downloadProgressIsTerminal('clip-model', payload)
+      const generation = getDownloadTaskSnapshot('clip-model').generation
+      setDownloadTaskSnapshot('clip-model', {
+        // Never unlock from an event alone. The native task may emit 100%
+        // before its final install/cleanup work has released the lock.
+        active: true,
+        progress: payload,
+        error: '',
+        terminal: undefined,
+      })
       setModelProgress(payload)
+      setModelInstalling(true)
+      if (terminal) {
+        const expected = /取消/.test(payload.stage) ? 'cancelled' : /失败|错误/.test(payload.stage) ? 'failed' : 'success'
+        void waitForDownloadTaskSettlement('clip-model', expected).then((finalStatus) => {
+          if (!active || !isCurrentDownloadGeneration('clip-model', generation) || !finalStatus) return
+          if (!downloadStatusHasSettled('clip-model', finalStatus, expected)) return
+          const settledProgress = progressFromDownloadStatus(finalStatus)
+          setModelProgress(settledProgress.stage ? settledProgress : payload)
+          setDownloadTaskSnapshot('clip-model', {
+            active: false,
+            progress: settledProgress.stage ? settledProgress : payload,
+            error: '',
+            terminal: expected,
+          })
+          setModelInstalling(false)
+        })
+      }
     })
       .then((unlisten) => {
         if (!active) unlisten()
@@ -671,33 +953,108 @@ function BaseSettings({
   }, [])
 
   async function handleInstallClipModel() {
+    if (modelInstalling) return
     const confirmed = window.confirm(
       modelStatus?.installed
         ? '将重新下载并替换本地离线 CLIP 模型，原模型会在安装成功后清理。是否继续？'
         : '将从 GitHub Releases 下载离线 CLIP 模型，体积较大。是否继续？',
     )
     if (!confirmed) return
+    const operation = modelOperationRef.current + 1
+    modelOperationRef.current = operation
+    const generation = beginDownloadTask('clip-model')
+    modelStatusRequestRef.current += 1
     setModelInstalling(true)
+    setDownloadTaskSnapshot('clip-model', { active: true, error: '', terminal: undefined })
     setModelError('')
-    setModelProgress({
+    const initialProgress = {
       downloadedBytes: 0,
       totalBytes: 0,
       progress: 0,
       stage: '正在准备模型安装',
-    })
+    }
+    setModelProgress(initialProgress)
+    setDownloadTaskSnapshot('clip-model', { progress: initialProgress })
     try {
       const status = await installClipModel(settings.networkProxy)
+      if (operation !== modelOperationRef.current || !isCurrentDownloadGeneration('clip-model', generation)) return
       setModelStatus(status)
-      setModelProgress((current) => ({
-        downloadedBytes: current?.downloadedBytes ?? status.sizeBytes,
-        totalBytes: current?.totalBytes ?? status.sizeBytes,
+      const currentProgress = getDownloadTaskSnapshot('clip-model').progress
+      const completedProgress = {
+        downloadedBytes: currentProgress?.downloadedBytes ?? status.sizeBytes,
+        totalBytes: currentProgress?.totalBytes ?? status.sizeBytes,
         progress: 100,
         stage: '离线 CLIP 模型已安装',
-      }))
+      }
+      setModelProgress(completedProgress)
+      setDownloadTaskSnapshot('clip-model', { active: true, progress: completedProgress, error: '', terminal: undefined })
+      const finalStatus = await waitForDownloadTaskSettlement('clip-model', 'success')
+      if (operation !== modelOperationRef.current || !isCurrentDownloadGeneration('clip-model', generation)) return
+      if (finalStatus && downloadStatusHasSettled('clip-model', finalStatus, 'success')) {
+        const settledProgress = progressFromDownloadStatus(finalStatus)
+        const finalProgress = settledProgress.stage ? settledProgress : completedProgress
+        setModelProgress(finalProgress)
+        setDownloadTaskSnapshot('clip-model', { active: false, progress: finalProgress, error: '', terminal: 'success' })
+        setModelInstalling(false)
+      }
     } catch (err) {
-      setModelError(normalizeBackendError(err))
-    } finally {
+      if (operation !== modelOperationRef.current) return
+      const message = normalizeBackendError(err)
+      if (operation !== modelOperationRef.current || !isCurrentDownloadGeneration('clip-model', generation)) return
+      setModelError(message)
+      const finalStatus = await waitForDownloadTaskSettlement('clip-model')
+      if (operation !== modelOperationRef.current || !isCurrentDownloadGeneration('clip-model', generation)) return
+      if (finalStatus && downloadStatusHasSettled('clip-model', finalStatus)) {
+        const terminal = downloadStatusTerminal('clip-model', finalStatus) || 'failed'
+        setDownloadTaskSnapshot('clip-model', { active: false, error: terminal === 'cancelled' ? '' : message, terminal })
+        setModelInstalling(false)
+      }
+    }
+  }
+
+  async function handleCancelClipModel() {
+    if (!modelInstalling) return
+    modelOperationRef.current += 1
+    modelStatusRequestRef.current += 1
+    setModelError('')
+    const cancellingProgress: UpdateDownloadProgress = {
+      ...(getDownloadTaskSnapshot('clip-model').progress || {
+        downloadedBytes: 0,
+        totalBytes: 0,
+        progress: 0,
+      }),
+      stage: '正在取消模型下载',
+    }
+    setModelProgress(cancellingProgress)
+    setDownloadTaskSnapshot('clip-model', { progress: cancellingProgress })
+    try {
+      await cancelDownloadTask('clip-model')
+      const finalStatus = await waitForDownloadTaskSettlement('clip-model', 'cancelled')
+      const cancelledProgress = { ...cancellingProgress, stage: '离线 CLIP 模型下载已取消' }
+      if (finalStatus) {
+        const settledProgress = progressFromDownloadStatus(finalStatus)
+        cancelledProgress.downloadedBytes = settledProgress.downloadedBytes
+        cancelledProgress.totalBytes = settledProgress.totalBytes
+        cancelledProgress.progress = settledProgress.progress
+      }
+      if (!finalStatus || finalStatus.running || !downloadStatusHasSettled('clip-model', finalStatus, 'cancelled')) {
+        // The backend may still be unwinding a blocked network read or
+        // extraction after accepting cancellation. Keep the cancel state
+        // visible and let the existing status poll/event listener settle it;
+        // never expose the install action while the task is still running.
+        const pendingProgress = { ...cancellingProgress, stage: '正在取消模型下载' }
+        setModelInstalling(true)
+        setModelProgress(pendingProgress)
+        setDownloadTaskSnapshot('clip-model', { active: true, progress: pendingProgress })
+        return
+      }
       setModelInstalling(false)
+      setModelProgress(cancelledProgress)
+      setDownloadTaskSnapshot('clip-model', { active: false, progress: cancelledProgress, error: '', terminal: 'cancelled' })
+    } catch (err) {
+      const message = normalizeBackendError(err)
+      setModelError(message)
+      setDownloadTaskSnapshot('clip-model', { error: message })
     }
   }
 
@@ -801,8 +1158,31 @@ function BaseSettings({
             <div><span>应用版本</span><strong title={`v${appInfo?.version ?? '0.1.0'}`}>v{appInfo?.version ?? '0.1.0'}</strong></div>
             <div><span>运行版本</span><strong>{appInfo?.buildFlavor === 'gpu' ? 'GPU / CUDA' : 'CPU'}</strong></div>
             <div><span>安装方式</span><strong>{appInfo?.installType === 'installed' ? '安装版' : '便携版'}</strong></div>
+            <div><span>开发者</span><strong>RoamerFly</strong></div>
             <div><span>界面框架</span><strong title="桌面界面(Tauri + React)">桌面界面(Tauri + React)</strong></div>
             <div><span>核心引擎</span><strong title="Python 视频相似度引擎(Python Video Similarity Engine)">Python 视频相似度引擎(Python Video Similarity Engine)</strong></div>
+          </div>
+          <div className="about-project-links">
+            <div className="about-project-heading">
+              <Github size={18} />
+              <div><span>开源项目</span><strong>video-similarity-detector</strong></div>
+            </div>
+            <p className="about-project-url" title={PROJECT_REPOSITORY_URL}>{PROJECT_REPOSITORY_URL}</p>
+            <div className="about-project-actions">
+              <NeonButton variant="outline" type="button" onClick={() => void handleOpenProjectPage(PROJECT_REPOSITORY_URL)}>
+                <Github size={15} />
+                项目主页
+              </NeonButton>
+              <NeonButton variant="outline" type="button" onClick={() => void handleOpenProjectPage(PROJECT_ISSUES_URL)}>
+                <ExternalLink size={15} />
+                问题反馈
+              </NeonButton>
+              <NeonButton variant="outline" type="button" onClick={() => void handleOpenProjectPage(PROJECT_LICENSE_URL)}>
+                <ExternalLink size={15} />
+                开源许可
+              </NeonButton>
+            </div>
+            {aboutError ? <p className="inline-error about-project-error" role="alert">{aboutError}</p> : null}
           </div>
         </div>
       </SettingsResourceDialog>
@@ -820,6 +1200,7 @@ function BaseSettings({
           progressValue={modelProgressValue}
           onRefresh={() => void refreshClipModelStatus()}
           onInstall={() => void handleInstallClipModel()}
+          onCancel={() => void handleCancelClipModel()}
         />
       </SettingsResourceDialog>
       <SettingsResourceDialog open={resourceDialog === 'merge'} title="视频合并环境" icon={<Film size={21} />} onClose={closeResourceDialog}>
@@ -852,6 +1233,7 @@ function ClipModelSettingsCard({
   progressValue,
   onRefresh,
   onInstall,
+  onCancel,
 }: {
   status: ClipModelStatus | null
   loading: boolean
@@ -862,6 +1244,7 @@ function ClipModelSettingsCard({
   progressValue: number
   onRefresh: () => void
   onInstall: () => void
+  onCancel: () => void
 }) {
   return (
     <div className="settings-about-card">
@@ -883,8 +1266,13 @@ function ClipModelSettingsCard({
         <NeonButton variant="outline" type="button" onClick={onRefresh} disabled={loading || installing}>
           <RefreshCw size={17} />刷新
         </NeonButton>
-        <NeonButton variant="primary" type="button" onClick={onInstall} disabled={installing}>
-          <Download size={17} />{status?.installed ? '重装模型' : '安装模型'}
+        <NeonButton
+          variant={installing ? 'outline' : 'primary'}
+          type="button"
+          onClick={installing ? onCancel : onInstall}
+        >
+          {installing ? <CircleStop size={17} /> : <Download size={17} />}
+          {installing ? '取消下载' : status?.installed ? '重装模型' : '安装模型'}
         </NeonButton>
       </div>
     </div>
@@ -940,11 +1328,14 @@ function UpdateDialog({
 }) {
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [checking, setChecking] = useState(false)
-  const [installing, setInstalling] = useState(false)
-  const [progress, setProgress] = useState<UpdateDownloadProgress | null>(null)
-  const [error, setError] = useState('')
+  const [installing, setInstalling] = useState(() => getDownloadTaskSnapshot('update').active)
+  const [progress, setProgress] = useState<UpdateDownloadProgress | null>(() => getDownloadTaskSnapshot('update').progress)
+  const [error, setError] = useState(() => getDownloadTaskSnapshot('update').error)
+  const updateOperationRef = useRef(0)
+  const updateStatusRequestRef = useRef(0)
 
   const handleCheckUpdate = useCallback(async () => {
+    if (getDownloadTaskSnapshot('update').active) return
     setChecking(true)
     setError('')
     setUpdate(null)
@@ -958,12 +1349,62 @@ function UpdateDialog({
     }
   }, [proxyUrl])
 
+  const syncUpdateDownloadStatus = useCallback(async () => {
+    const request = updateStatusRequestRef.current + 1
+    updateStatusRequestRef.current = request
+    try {
+      const status = await queryDownloadTaskStatus('update')
+      if (!status || request !== updateStatusRequestRef.current) return
+      const currentSnapshot = getDownloadTaskSnapshot('update')
+      // The updater can answer one last `running` snapshot while the native
+      // installer has already been launched. Never let that stale response
+      // turn the completed action back into a second cancellable download.
+      if (currentSnapshot.terminal === 'success' && status.running === true) return
+      const settled = downloadStatusHasSettled('update', status)
+      const active = status.running === true || (currentSnapshot.active && !settled)
+      const nextProgress = progressFromDownloadStatus(status)
+      setDownloadTaskSnapshot('update', {
+        active,
+        progress: nextProgress.stage ? nextProgress : currentSnapshot.progress,
+        terminal: settled ? downloadStatusTerminal('update', status) || undefined : active ? undefined : currentSnapshot.terminal,
+      })
+      setInstalling(active)
+      if (nextProgress.stage) setProgress(nextProgress)
+    } catch {
+      // Older backends do not expose a status query.  Event updates and the
+      // download promise continue to provide the normal behavior there.
+    }
+  }, [])
+
   useEffect(() => {
     let active = true
     let stop = () => undefined
     void listenUpdateDownloadProgress((payload) => {
       if (!active) return
+      const terminal = downloadProgressIsTerminal('update', payload)
+      const generation = getDownloadTaskSnapshot('update').generation
+      setDownloadTaskSnapshot('update', {
+        // 100% can mean verified/downloaded, not that the updater has
+        // stopped. Wait for the status endpoint before enabling "立即更新".
+        active: true,
+        progress: payload,
+        error: '',
+        terminal: undefined,
+      })
       setProgress(payload)
+      setInstalling(true)
+      if (terminal) {
+        const expected = /取消/.test(payload.stage) ? 'cancelled' : /失败|错误/.test(payload.stage) ? 'failed' : 'success'
+        void waitForDownloadTaskSettlement('update', expected).then((finalStatus) => {
+          if (!active || !isCurrentDownloadGeneration('update', generation) || !finalStatus) return
+          if (!downloadStatusHasSettled('update', finalStatus, expected)) return
+          const settledProgress = progressFromDownloadStatus(finalStatus)
+          const finalProgress = settledProgress.stage ? settledProgress : payload
+          setProgress(finalProgress)
+          setDownloadTaskSnapshot('update', { active: false, progress: finalProgress, error: '', terminal: expected })
+          setInstalling(false)
+        })
+      }
     })
       .then((unlisten) => {
         if (!active) unlisten()
@@ -980,29 +1421,135 @@ function UpdateDialog({
 
   useEffect(() => {
     if (!open) return undefined
-    const timer = window.setTimeout(() => void handleCheckUpdate(), 0)
-    return () => window.clearTimeout(timer)
-  }, [handleCheckUpdate, open])
+    const checkTimer = window.setTimeout(() => {
+      void syncUpdateDownloadStatus()
+      if (!getDownloadTaskSnapshot('update').active) void handleCheckUpdate()
+    }, 0)
+    const statusTimer = window.setInterval(() => void syncUpdateDownloadStatus(), 1000)
+    return () => {
+      window.clearTimeout(checkTimer)
+      window.clearInterval(statusTimer)
+    }
+  }, [handleCheckUpdate, open, syncUpdateDownloadStatus])
 
   async function handleInstallUpdate() {
-    if (!update?.canAutoInstall) return
+    if (!update?.canAutoInstall || installing) return
     const confirmed = window.confirm(
       `将下载 ${update.buildFlavor.toUpperCase()} 安装包，完成后自动退出并覆盖安装到：\n${update.installRoot}\n\n数据、报告、缓存和设置不会被删除。是否继续？`,
     )
     if (!confirmed) return
+    const operation = updateOperationRef.current + 1
+    updateOperationRef.current = operation
+    const generation = beginDownloadTask('update')
+    updateStatusRequestRef.current += 1
     setInstalling(true)
+    setDownloadTaskSnapshot('update', { active: true, error: '', terminal: undefined })
     setError('')
-    setProgress({
+    const initialProgress = {
       downloadedBytes: 0,
       totalBytes: update.assetSize,
       progress: 0,
       stage: '正在连接 GitHub Releases',
-    })
+    }
+    setProgress(initialProgress)
+    setDownloadTaskSnapshot('update', { progress: initialProgress })
     try {
       await downloadAndInstallUpdate(proxyUrl)
+      if (operation !== updateOperationRef.current || !isCurrentDownloadGeneration('update', generation)) return
+      const completedProgress: UpdateDownloadProgress = {
+        ...(getDownloadTaskSnapshot('update').progress || initialProgress),
+        progress: 100,
+        stage: '更新已安装，等待应用重启',
+      }
+      setProgress(completedProgress)
+      setError('')
+      setUpdate((current) => current
+        ? { ...current, message: '更新已安装，等待应用重启。' }
+        : current)
+      setDownloadTaskSnapshot('update', {
+        active: true,
+        progress: completedProgress,
+        error: '',
+        terminal: undefined,
+      })
+      const finalStatus = await waitForDownloadTaskSettlement('update', 'success')
+      if (operation !== updateOperationRef.current || !isCurrentDownloadGeneration('update', generation)) return
+      if (finalStatus && downloadStatusHasSettled('update', finalStatus, 'success')) {
+        const settledProgress = progressFromDownloadStatus(finalStatus)
+        const finalProgress = settledProgress.stage ? settledProgress : completedProgress
+        setProgress(finalProgress)
+        setInstalling(false)
+        setDownloadTaskSnapshot('update', { active: false, progress: finalProgress, error: '', terminal: 'success' })
+      }
     } catch (err) {
+      if (operation !== updateOperationRef.current || !isCurrentDownloadGeneration('update', generation)) return
+      const message = normalizeBackendError(err)
+      const finalStatus = await waitForDownloadTaskSettlement('update')
+      if (!finalStatus || finalStatus.running || !downloadStatusHasSettled('update', finalStatus)) {
+        if (finalStatus?.stage) setProgress(progressFromDownloadStatus(finalStatus))
+        setInstalling(true)
+        setDownloadTaskSnapshot('update', { active: true, error: message })
+        return
+      }
+      const terminal = downloadStatusTerminal('update', finalStatus)
+      const cancelled = terminal === 'cancelled'
       setInstalling(false)
-      setError(normalizeBackendError(err))
+      setDownloadTaskSnapshot('update', {
+        active: false,
+        error: cancelled || terminal === 'success' ? '' : message,
+        terminal: terminal || 'failed',
+      })
+      setError(cancelled || terminal === 'success' ? '' : message)
+      if (cancelled) {
+        const cancelledProgress = {
+          ...(getDownloadTaskSnapshot('update').progress || initialProgress),
+          stage: '更新下载已取消',
+        }
+        setProgress(cancelledProgress)
+        setDownloadTaskSnapshot('update', { progress: cancelledProgress })
+      }
+    }
+  }
+
+  async function handleCancelUpdate() {
+    if (!getDownloadTaskSnapshot('update').active) return
+    updateOperationRef.current += 1
+    updateStatusRequestRef.current += 1
+    try {
+      await cancelUpdateDownload()
+      const finalStatus = await waitForDownloadTaskSettlement('update')
+      const cancelledProgress: UpdateDownloadProgress = {
+        ...(getDownloadTaskSnapshot('update').progress || {
+          downloadedBytes: 0,
+          totalBytes: 0,
+          progress: 0,
+        }),
+        stage: '更新下载已取消',
+      }
+      if (finalStatus) {
+        const settledProgress = progressFromDownloadStatus(finalStatus)
+        cancelledProgress.downloadedBytes = settledProgress.downloadedBytes
+        cancelledProgress.totalBytes = settledProgress.totalBytes
+        cancelledProgress.progress = settledProgress.progress
+      }
+      if (!finalStatus || finalStatus.running || !downloadStatusHasSettled('update', finalStatus)) {
+        const pendingProgress = {
+          ...(getDownloadTaskSnapshot('update').progress || cancelledProgress),
+          stage: '正在取消更新下载',
+        }
+        setInstalling(true)
+        setProgress(pendingProgress)
+        setDownloadTaskSnapshot('update', { active: true, progress: pendingProgress })
+        return
+      }
+      const terminal = downloadStatusTerminal('update', finalStatus)
+      setProgress(cancelledProgress)
+      setDownloadTaskSnapshot('update', { active: false, progress: cancelledProgress, error: '', terminal: terminal || 'cancelled' })
+      setInstalling(false)
+    } catch (err) {
+      const message = normalizeBackendError(err)
+      setError(message)
+      setDownloadTaskSnapshot('update', { error: message })
     }
   }
 
@@ -1035,7 +1582,7 @@ function UpdateDialog({
             <Download size={24} />
             <h3>检查更新</h3>
           </div>
-          <button type="button" onClick={onClose} disabled={installing} aria-label="关闭检查更新">
+          <button type="button" onClick={onClose} aria-label="关闭检查更新">
             <X size={18} />
           </button>
         </div>
@@ -1119,11 +1666,7 @@ function UpdateDialog({
         {installing ? (
           <NeonButton
             type="button"
-            onClick={() => {
-              cancelUpdateDownload().catch(() => {})
-              setInstalling(false)
-              setProgress(null)
-            }}
+            onClick={() => void handleCancelUpdate()}
           >
             <CircleStop size={17} />
             取消下载

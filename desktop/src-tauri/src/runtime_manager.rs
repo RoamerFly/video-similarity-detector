@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 
@@ -17,7 +18,135 @@ const RELEASE_DOWNLOAD_ROOT: &str =
 #[derive(Default)]
 pub struct RuntimeManagerState {
     installing: AtomicBool,
-    cancel_requested: AtomicBool,
+    cancel_requested: Arc<AtomicBool>,
+    active_task: Mutex<Option<String>>,
+    status: Mutex<RuntimeDownloadStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDownloadStatus {
+    pub task: String,
+    pub running: bool,
+    pub cancel_requested: bool,
+    pub cancelled: bool,
+    pub progress: f64,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub stage: String,
+}
+
+impl RuntimeManagerState {
+    fn try_begin(&self, task: &str) -> bool {
+        if self
+            .installing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut active) = self.active_task.lock() {
+            *active = Some(task.to_string());
+        }
+        if let Ok(mut status) = self.status.lock() {
+            *status = RuntimeDownloadStatus {
+                task: task.to_string(),
+                running: true,
+                ..RuntimeDownloadStatus::default()
+            };
+        }
+        true
+    }
+
+    fn finish(&self, stage: &str, cancelled: bool) {
+        self.installing.store(false, Ordering::SeqCst);
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut status) = self.status.lock() {
+            status.running = false;
+            status.cancel_requested = false;
+            status.cancelled = cancelled;
+            status.stage = stage.to_string();
+            status.progress = if stage.contains("取消") {
+                0.0
+            } else {
+                status.progress
+            };
+        }
+        if let Ok(mut active) = self.active_task.lock() {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self, task: &str) {
+        let matches = self
+            .active_task
+            .lock()
+            .map(|active| active.as_deref() == Some(task))
+            .unwrap_or(false);
+        if matches {
+            self.cancel_requested.store(true, Ordering::SeqCst);
+            if let Ok(mut status) = self.status.lock() {
+                status.cancel_requested = true;
+                status.stage = "正在取消下载".to_string();
+            }
+        }
+    }
+
+    /// Runtime migration and legacy cleanup use the same command and status
+    /// channel as installation.  Keep their task names explicit so cancelling
+    /// an AI-runtime task cannot accidentally cancel the independent FFmpeg
+    /// runtime task.
+    fn cancel_runtime_family(&self) {
+        let matches = self
+            .active_task
+            .lock()
+            .map(|active| {
+                matches!(
+                    active.as_deref(),
+                    Some("runtime") | Some("runtime-migration") | Some("runtime-cleanup")
+                )
+            })
+            .unwrap_or(false);
+        if matches {
+            self.cancel_requested.store(true, Ordering::SeqCst);
+            if let Ok(mut status) = self.status.lock() {
+                status.cancel_requested = true;
+                status.stage = "正在取消下载".to_string();
+            }
+        }
+    }
+
+    fn cancel_token(&self) -> Arc<AtomicBool> {
+        self.cancel_requested.clone()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    fn snapshot(&self) -> RuntimeDownloadStatus {
+        self.status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default()
+    }
+}
+
+struct MediaOperationReservation;
+
+impl Drop for MediaOperationReservation {
+    fn drop(&mut self) {
+        crate::release_media_operation();
+    }
+}
+
+fn reserve_media_operation() -> Result<MediaOperationReservation, String> {
+    if crate::try_acquire_media_operation() {
+        Ok(MediaOperationReservation)
+    } else {
+        Err("已有视频合并或运行环境安装任务正在执行。".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,25 +235,43 @@ pub async fn install_runtime(
     state: State<'_, RuntimeManagerState>,
     proxy_url: Option<String>,
 ) -> Result<RuntimeStatus, String> {
-    if state
-        .installing
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let _operation = reserve_media_operation()?;
+    if !state.try_begin("runtime") {
         return Err("运行环境安装任务已经在执行。".to_string());
     }
-    state.cancel_requested.store(false, Ordering::SeqCst);
 
-    let result = install_runtime_impl(&app, &state, proxy_url.as_deref()).await;
-    state.installing.store(false, Ordering::SeqCst);
+    let install_result = install_runtime_impl(&app, &state, proxy_url.as_deref()).await;
+    let committed = matches!(install_result, Ok(true));
+    let result = install_result.map(|_| ());
+    let result = if result.is_ok() {
+        configure_environment(&app).map(|_| ())
+    } else {
+        result
+    };
+    let cancelled = !committed && result.is_err() && state.is_cancelled();
+    state.finish(
+        if cancelled {
+            "运行环境安装已取消"
+        } else if result.is_err() {
+            "运行环境安装失败"
+        } else {
+            "AI 运行环境已安装"
+        },
+        cancelled,
+    );
+    if cancelled {
+        cleanup_download_cache(&app, "runtime");
+    }
+    if result.is_ok() && committed {
+        emit_progress(&app, 0, 0, 100.0, "AI 运行环境已安装");
+    }
     result?;
-    configure_environment(&app)?;
     runtime_status(&app)
 }
 
 #[tauri::command]
 pub fn cancel_runtime_install(state: State<'_, RuntimeManagerState>) {
-    state.cancel_requested.store(true, Ordering::SeqCst);
+    state.cancel_runtime_family();
 }
 
 #[tauri::command]
@@ -138,25 +285,48 @@ pub async fn install_merge_runtime(
     state: State<'_, RuntimeManagerState>,
     proxy_url: Option<String>,
 ) -> Result<MergeRuntimeStatus, String> {
-    if state
-        .installing
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let _operation = reserve_media_operation()?;
+    if !state.try_begin("merge-runtime") {
         return Err("运行环境安装任务已经在执行。".to_string());
     }
-    state.cancel_requested.store(false, Ordering::SeqCst);
 
-    let result = install_merge_runtime_impl(&app, &state, proxy_url.as_deref()).await;
-    state.installing.store(false, Ordering::SeqCst);
+    let install_result = install_merge_runtime_impl(&app, &state, proxy_url.as_deref()).await;
+    let committed = matches!(install_result, Ok(true));
+    let result = install_result.map(|_| ());
+    let result = if result.is_ok() {
+        configure_environment(&app).map(|_| ())
+    } else {
+        result
+    };
+    let cancelled = !committed && result.is_err() && state.is_cancelled();
+    state.finish(
+        if cancelled {
+            "视频合并环境安装已取消"
+        } else if result.is_err() {
+            "视频合并环境安装失败"
+        } else {
+            "视频合并环境已安装"
+        },
+        cancelled,
+    );
+    if cancelled {
+        cleanup_download_cache(&app, "ffmpeg-runtime");
+    }
+    if result.is_ok() && committed {
+        emit_progress(&app, 0, 0, 100.0, "视频合并环境已安装");
+    }
     result?;
-    configure_environment(&app)?;
     merge_runtime_status(&app)
 }
 
 #[tauri::command]
 pub fn cancel_merge_runtime_install(state: State<'_, RuntimeManagerState>) {
-    state.cancel_requested.store(true, Ordering::SeqCst);
+    state.cancel("merge-runtime");
+}
+
+#[tauri::command]
+pub fn get_runtime_download_status(state: State<'_, RuntimeManagerState>) -> RuntimeDownloadStatus {
+    state.snapshot()
 }
 
 #[tauri::command]
@@ -164,24 +334,37 @@ pub async fn migrate_legacy_runtime(
     app: tauri::AppHandle,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<RuntimeStatus, String> {
-    if state
-        .installing
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let _operation = reserve_media_operation()?;
+    if !state.try_begin("runtime-migration") {
         return Err("运行环境安装或迁移任务已经在执行。".to_string());
     }
-    state.cancel_requested.store(false, Ordering::SeqCst);
     emit_progress(&app, 0, 0, 5.0, "正在准备迁移旧版运行环境");
 
     let app_for_migration = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        migrate_legacy_runtime_impl(&app_for_migration)
+    let cancel_token = state.cancel_token();
+    let task_result = tauri::async_runtime::spawn_blocking(move || {
+        migrate_legacy_runtime_impl(&app_for_migration, &cancel_token)
     })
     .await
     .map_err(|error| format!("运行环境迁移任务异常: {error}"));
-    state.installing.store(false, Ordering::SeqCst);
-    let legacy_removed = result??;
+    let result = task_result.and_then(|result| result);
+    let cancelled = state.is_cancelled() && result.is_err();
+    let result = if cancelled {
+        Err("运行环境迁移已取消".to_string())
+    } else {
+        result
+    };
+    state.finish(
+        if cancelled {
+            "运行环境迁移已取消"
+        } else if result.is_err() {
+            "运行环境迁移失败"
+        } else {
+            ""
+        },
+        cancelled,
+    );
+    let legacy_removed = result?;
 
     configure_environment(&app)?;
     emit_progress(&app, 0, 0, 100.0, "旧版运行环境迁移完成");
@@ -199,21 +382,36 @@ pub async fn remove_legacy_runtime(
     app: tauri::AppHandle,
     state: State<'_, RuntimeManagerState>,
 ) -> Result<RuntimeStatus, String> {
-    if state
-        .installing
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let _operation = reserve_media_operation()?;
+    if !state.try_begin("runtime-cleanup") {
         return Err("运行环境安装、迁移或清理任务已经在执行。".to_string());
     }
 
     let app_for_cleanup = app.clone();
-    let result =
-        tauri::async_runtime::spawn_blocking(move || remove_legacy_runtime_impl(&app_for_cleanup))
-            .await
-            .map_err(|error| format!("旧版运行环境清理任务异常: {error}"));
-    state.installing.store(false, Ordering::SeqCst);
-    result??;
+    let cancel_token = state.cancel_token();
+    let task_result = tauri::async_runtime::spawn_blocking(move || {
+        remove_legacy_runtime_impl(&app_for_cleanup, &cancel_token)
+    })
+    .await
+    .map_err(|error| format!("旧版运行环境清理任务异常: {error}"));
+    let result = task_result.and_then(|result| result);
+    let cancelled = state.is_cancelled() && result.is_err();
+    let result = if cancelled {
+        Err("旧版运行环境清理已取消".to_string())
+    } else {
+        result
+    };
+    state.finish(
+        if cancelled {
+            "旧版运行环境清理已取消"
+        } else if result.is_err() {
+            "旧版运行环境清理失败"
+        } else {
+            ""
+        },
+        cancelled,
+    );
+    result?;
 
     let mut status = runtime_status(&app)?;
     status.message = "旧版内置运行环境已清理，当前托管运行环境保持可用。".to_string();
@@ -400,7 +598,8 @@ fn merge_runtime_status(app: &tauri::AppHandle) -> Result<MergeRuntimeStatus, St
             } else if managed {
                 "检测到视频合并环境，但版本清单不匹配，请重装最新环境。".to_string()
             } else if bundled {
-                "已使用随应用提供的视频合并环境（FFmpeg / FFprobe）。可在此更新到最新 Release。".to_string()
+                "已使用随应用提供的视频合并环境（FFmpeg / FFprobe）。可在此更新到最新 Release。"
+                    .to_string()
             } else {
                 "检测到未登记的视频合并环境；建议安装最新 Release 环境以启用版本管理。".to_string()
             },
@@ -444,7 +643,11 @@ fn merge_runtime_status(app: &tauri::AppHandle) -> Result<MergeRuntimeStatus, St
     })
 }
 
-fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
+fn migrate_legacy_runtime_impl(
+    app: &tauri::AppHandle,
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
+    check_cancel(cancel)?;
     let source = safe_legacy_runtime_dir(app)
         .ok_or_else(|| "未找到可安全迁移的旧版内置运行环境。".to_string())?;
     let flavor = detect_build_flavor();
@@ -456,6 +659,7 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
     let target = runtime_root.join("env");
 
     if paths_equivalent(&source, &target) {
+        check_cancel(cancel)?;
         if first_existing_python(&runtime_root).is_none() {
             return Err("旧版运行环境校验失败：未找到 Python 可执行文件。".to_string());
         }
@@ -477,19 +681,21 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
         && read_manifest(&target.join(".runtime.json"))
             .is_some_and(|manifest| manifest.version == version && manifest.flavor == flavor)
     {
-        return remove_legacy_directory(&source, &target).map(|_| true);
+        return remove_legacy_directory_cancelable(&source, &target, cancel).map(|_| true);
     }
 
+    check_cancel(cancel)?;
     fs::create_dir_all(&runtime_root).map_err(|error| format!("创建安装目录失败: {error}"))?;
     let staging = runtime_root.join(format!(".runtime-migrate-{}", timestamp_millis()));
     let staging_env = staging.join("env");
     fs::create_dir_all(&staging)
         .map_err(|error| format!("创建运行环境迁移临时目录失败: {error}"))?;
 
+    check_cancel(cancel)?;
     let moved_source = match fs::rename(&source, &staging_env) {
         Ok(()) => true,
         Err(_) => {
-            if let Err(error) = copy_dir_recursive(&source, &staging_env) {
+            if let Err(error) = copy_dir_recursive_cancelable(&source, &staging_env, cancel) {
                 let _ = fs::remove_dir_all(&staging);
                 return Err(format!("复制旧版运行环境失败: {error}"));
             }
@@ -498,6 +704,7 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
     };
 
     let migration_result = (|| {
+        check_cancel(cancel)?;
         if first_existing_python(&staging).is_none() {
             return Err("旧版运行环境迁移校验失败：未找到 Python 可执行文件。".to_string());
         }
@@ -510,11 +717,16 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
         };
         write_runtime_manifest(&staging_env, manifest)?;
 
+        check_cancel(cancel)?;
         let backup = runtime_root.join(format!(".env-old-{}", timestamp_millis()));
         if target.exists() {
             fs::rename(&target, &backup)
                 .map_err(|error| format!("备份旧托管运行环境失败: {error}"))?;
         }
+        // The replacement itself is atomic and cannot be interrupted.  The
+        // final cancellation checkpoint is deliberately immediately before
+        // it, so a cancellation never leaves the target half-swapped.
+        check_cancel(cancel)?;
         if let Err(error) = fs::rename(&staging_env, &target) {
             if backup.exists() {
                 let _ = fs::rename(&backup, &target);
@@ -541,10 +753,16 @@ fn migrate_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<bool, String> {
     if moved_source {
         return Ok(true);
     }
-    Ok(remove_legacy_directory(&source, &target).is_ok())
+    check_cancel(cancel)?;
+    match remove_legacy_directory_cancelable(&source, &target, cancel) {
+        Ok(()) => Ok(true),
+        Err(error) if cancel.load(Ordering::SeqCst) => Err(error),
+        Err(_) => Ok(false),
+    }
 }
 
-fn remove_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<(), String> {
+fn remove_legacy_runtime_impl(app: &tauri::AppHandle, cancel: &AtomicBool) -> Result<(), String> {
+    check_cancel(cancel)?;
     let status = runtime_status(app)?;
     if !status.ready || !status.managed {
         return Err("仅在托管运行环境已就绪后才能清理旧版环境。".to_string());
@@ -552,10 +770,15 @@ fn remove_legacy_runtime_impl(app: &tauri::AppHandle) -> Result<(), String> {
     let source = safe_legacy_runtime_dir(app)
         .ok_or_else(|| "未找到可安全清理的旧版内置运行环境。".to_string())?;
     let managed_env = storage_root(app)?.join("env");
-    remove_legacy_directory(&source, &managed_env)
+    remove_legacy_directory_cancelable(&source, &managed_env, cancel)
 }
 
-fn remove_legacy_directory(source: &Path, managed_runtime_root: &Path) -> Result<(), String> {
+fn remove_legacy_directory_cancelable(
+    source: &Path,
+    managed_runtime_root: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    check_cancel(cancel)?;
     let source =
         fs::canonicalize(source).map_err(|error| format!("定位旧版运行环境失败: {error}"))?;
     let managed_runtime_root = fs::canonicalize(managed_runtime_root)
@@ -563,7 +786,7 @@ fn remove_legacy_directory(source: &Path, managed_runtime_root: &Path) -> Result
     if source.starts_with(&managed_runtime_root) || managed_runtime_root.starts_with(&source) {
         return Err("拒绝清理与托管运行环境重叠的目录。".to_string());
     }
-    fs::remove_dir_all(&source).map_err(|error| {
+    remove_dir_all_cancelable(&source, cancel).map_err(|error| {
         format!(
             "删除旧版运行环境失败（可能需要手动删除 {}）: {error}",
             display_path(&source)
@@ -571,7 +794,12 @@ fn remove_legacy_directory(source: &Path, managed_runtime_root: &Path) -> Result
     })
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
+fn copy_dir_recursive_cancelable(
+    source: &Path,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    check_cancel(cancel)?;
     let metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("读取 {} 失败: {error}", display_path(source)))?;
 
@@ -589,7 +817,7 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
         {
             let resolved = fs::canonicalize(source)
                 .map_err(|error| format!("解析符号链接 {} 失败: {error}", display_path(source)))?;
-            return copy_dir_recursive(&resolved, destination);
+            return copy_dir_recursive_cancelable(&resolved, destination, cancel);
         }
     }
 
@@ -600,7 +828,11 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
             .map_err(|error| format!("读取目录 {} 失败: {error}", display_path(source)))?
         {
             let entry = entry.map_err(|error| format!("读取迁移目录条目失败: {error}"))?;
-            copy_dir_recursive(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_dir_recursive_cancelable(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                cancel,
+            )?;
         }
         fs::set_permissions(destination, metadata.permissions())
             .map_err(|error| format!("保留目录权限 {} 失败: {error}", display_path(destination)))?;
@@ -611,6 +843,7 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|error| format!("创建目录 {} 失败: {error}", display_path(parent)))?;
     }
+    check_cancel(cancel)?;
     fs::copy(source, destination).map_err(|error| {
         format!(
             "复制 {} 到 {} 失败: {error}",
@@ -618,16 +851,33 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
             display_path(destination)
         )
     })?;
+    check_cancel(cancel)?;
     fs::set_permissions(destination, metadata.permissions())
         .map_err(|error| format!("保留文件权限 {} 失败: {error}", display_path(destination)))?;
     Ok(())
+}
+
+fn remove_dir_all_cancelable(path: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    check_cancel(cancel)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
+        check_cancel(cancel)?;
+        let entry = entry.map_err(|error| error.to_string())?;
+        remove_dir_all_cancelable(&entry.path(), cancel)?;
+    }
+    check_cancel(cancel)?;
+    fs::remove_dir(path).map_err(|error| error.to_string())
 }
 
 async fn install_merge_runtime_impl(
     app: &tauri::AppHandle,
     state: &RuntimeManagerState,
     proxy_url: Option<&str>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let version = merge_expected_version();
     let platform = runtime_platform().to_string();
     if platform == "unsupported" {
@@ -645,7 +895,12 @@ async fn install_merge_runtime_impl(
     let client = build_client(proxy_url)?;
     let asset_url = format!("{RELEASE_DOWNLOAD_ROOT}/{asset_name}");
     emit_progress(app, 0, 0, 1.0, "正在获取独立 FFmpeg 环境校验文件");
-    download_small_file(&client, &format!("{asset_url}.sha256"), &checksum_path)
+    download_small_file(
+        &client,
+        &format!("{asset_url}.sha256"),
+        &checksum_path,
+        &state.cancel_requested,
+    )
         .await
         .map_err(|error| {
             if error.contains("HTTP 404") {
@@ -671,14 +926,17 @@ async fn install_merge_runtime_impl(
     )
     .await?;
     if state.cancel_requested.load(Ordering::SeqCst) {
-        return Err("视频合并环境下载已取消，已保留断点文件。".to_string());
+        return Err("视频合并环境下载已取消。".to_string());
     }
 
     emit_progress(app, 0, 0, 78.0, "正在校验视频合并环境");
     let archive_for_hash = archive_path.clone();
-    let actual_hash = tauri::async_runtime::spawn_blocking(move || sha256_file(&archive_for_hash))
-        .await
-        .map_err(|error| format!("视频合并环境校验任务异常: {error}"))??;
+    let cancel_token = state.cancel_requested.clone();
+    let actual_hash = tauri::async_runtime::spawn_blocking(move || {
+        sha256_file_cancelable(&archive_for_hash, &cancel_token)
+    })
+    .await
+    .map_err(|error| format!("视频合并环境校验任务异常: {error}"))??;
     if actual_hash != expected_hash {
         let _ = fs::remove_file(&archive_path);
         return Err("视频合并环境 SHA-256 校验失败，已删除损坏文件。".to_string());
@@ -692,8 +950,9 @@ async fn install_merge_runtime_impl(
     let version_for_manifest = version.clone();
     let hash_for_manifest = expected_hash.clone();
     let platform_for_manifest = platform.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        install_merge_archive(
+    let cancel_token = state.cancel_requested.clone();
+    let committed = tauri::async_runtime::spawn_blocking(move || {
+        install_merge_archive_cancelable(
             &archive_for_install,
             &install_root,
             &target,
@@ -704,6 +963,7 @@ async fn install_merge_runtime_impl(
                 sha256: hash_for_manifest,
                 installed_at_ms: timestamp_millis(),
             },
+            &cancel_token,
         )
     })
     .await
@@ -711,15 +971,14 @@ async fn install_merge_runtime_impl(
 
     let _ = fs::remove_file(archive_path);
     let _ = fs::remove_file(checksum_path);
-    emit_progress(app, 0, 0, 100.0, "视频合并环境已安装");
-    Ok(())
+    Ok(committed)
 }
 
 async fn install_runtime_impl(
     app: &tauri::AppHandle,
     state: &RuntimeManagerState,
     proxy_url: Option<&str>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let flavor = detect_build_flavor();
     if flavor == "gpu" {
         ensure_cuda_13_compatible()?;
@@ -748,7 +1007,13 @@ async fn install_runtime_impl(
         let descriptor_path = download_root.join(&descriptor_name);
         let descriptor_url = format!("{RELEASE_DOWNLOAD_ROOT}/{descriptor_name}");
         emit_progress(app, 0, 0, 1.0, "正在获取 GPU 运行环境分卷清单");
-        download_small_file(&client, &descriptor_url, &descriptor_path).await?;
+        download_small_file(
+            &client,
+            &descriptor_url,
+            &descriptor_path,
+            &state.cancel_requested,
+        )
+        .await?;
         let parts_manifest = parse_parts_manifest(&descriptor_path, &asset_name)?;
         cleanup_paths.push(descriptor_path);
 
@@ -762,10 +1027,13 @@ async fn install_runtime_impl(
             let existing_part = part_path.clone();
             let expected_part_hash = part.sha256.clone();
             let expected_part_size = part.size_bytes;
+            let cancel_token = state.cancel_requested.clone();
             let existing_valid = tauri::async_runtime::spawn_blocking(move || {
-                fs::metadata(&existing_part)
-                    .is_ok_and(|metadata| metadata.len() == expected_part_size)
-                    && sha256_file(&existing_part).is_ok_and(|hash| hash == expected_part_hash)
+                !cancel_token.load(Ordering::SeqCst)
+                    && fs::metadata(&existing_part)
+                        .is_ok_and(|metadata| metadata.len() == expected_part_size)
+                    && sha256_file_cancelable(&existing_part, &cancel_token)
+                        .is_ok_and(|hash| hash == expected_part_hash)
             })
             .await
             .unwrap_or(false);
@@ -796,10 +1064,12 @@ async fn install_runtime_impl(
                     return Err(format!("GPU 运行环境分卷大小校验失败: {}", part.name));
                 }
                 let part_for_hash = part_path.clone();
-                let actual_hash =
-                    tauri::async_runtime::spawn_blocking(move || sha256_file(&part_for_hash))
-                        .await
-                        .map_err(|error| format!("GPU 运行环境分卷校验任务异常: {error}"))??;
+                let cancel_token = state.cancel_requested.clone();
+                let actual_hash = tauri::async_runtime::spawn_blocking(move || {
+                    sha256_file_cancelable(&part_for_hash, &cancel_token)
+                })
+                .await
+                .map_err(|error| format!("GPU 运行环境分卷校验任务异常: {error}"))??;
                 if actual_hash != part.sha256 {
                     let _ = fs::remove_file(&part_path);
                     return Err(format!("GPU 运行环境分卷 SHA-256 校验失败: {}", part.name));
@@ -819,8 +1089,9 @@ async fn install_runtime_impl(
 
         emit_progress(app, 0, 0, 76.0, "正在合并 GPU 运行环境分卷");
         let archive_for_merge = archive_path.clone();
+        let cancel_token = state.cancel_requested.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            concatenate_files(&part_paths, &archive_for_merge)
+            concatenate_files_cancelable(&part_paths, &archive_for_merge, &cancel_token)
         })
         .await
         .map_err(|error| format!("GPU 运行环境分卷合并任务异常: {error}"))??;
@@ -828,7 +1099,13 @@ async fn install_runtime_impl(
     } else {
         let checksum_url = format!("{asset_url}.sha256");
         emit_progress(app, 0, 0, 1.0, "正在获取运行环境校验文件");
-        download_small_file(&client, &checksum_url, &checksum_path).await?;
+        download_small_file(
+            &client,
+            &checksum_url,
+            &checksum_path,
+            &state.cancel_requested,
+        )
+        .await?;
         cleanup_paths.push(checksum_path.clone());
         let expected_hash = parse_checksum(&checksum_path)?;
         download_archive(
@@ -847,14 +1124,17 @@ async fn install_runtime_impl(
         expected_hash
     };
     if state.cancel_requested.load(Ordering::SeqCst) {
-        return Err("运行环境下载已取消，已保留断点文件。".to_string());
+        return Err("运行环境下载已取消。".to_string());
     }
 
     emit_progress(app, 0, 0, 78.0, "正在校验运行环境");
     let archive_for_hash = archive_path.clone();
-    let actual_hash = tauri::async_runtime::spawn_blocking(move || sha256_file(&archive_for_hash))
-        .await
-        .map_err(|error| format!("运行环境校验任务异常: {error}"))??;
+    let cancel_token = state.cancel_requested.clone();
+    let actual_hash = tauri::async_runtime::spawn_blocking(move || {
+        sha256_file_cancelable(&archive_for_hash, &cancel_token)
+    })
+    .await
+    .map_err(|error| format!("运行环境校验任务异常: {error}"))??;
     if actual_hash != expected_hash {
         let _ = fs::remove_file(&archive_path);
         return Err("运行环境 SHA-256 校验失败，已删除损坏文件。".to_string());
@@ -868,8 +1148,9 @@ async fn install_runtime_impl(
     let version_for_manifest = version.clone();
     let flavor_for_manifest = flavor.clone();
     let hash_for_manifest = expected_hash.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        install_archive(
+    let cancel_token = state.cancel_requested.clone();
+    let committed = tauri::async_runtime::spawn_blocking(move || {
+        install_archive_cancelable(
             &archive_for_install,
             &install_root,
             &target,
@@ -880,6 +1161,7 @@ async fn install_runtime_impl(
                 sha256: hash_for_manifest,
                 installed_at_ms: timestamp_millis(),
             },
+            &cancel_token,
         )
     })
     .await
@@ -888,33 +1170,91 @@ async fn install_runtime_impl(
     for path in cleanup_paths {
         let _ = fs::remove_file(path);
     }
-    emit_progress(app, 0, 0, 100.0, "AI 运行环境已安装");
-    Ok(())
+    Ok(committed)
 }
 
 async fn download_small_file(
     client: &reqwest::Client,
     url: &str,
     destination: &Path,
+    cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let response = client
-        .get(url)
-        .header(USER_AGENT, "video-similarity-desktop")
-        .header(ACCEPT, "application/json, text/plain")
-        .send()
-        .await
-        .map_err(|error| format!("连接运行环境元数据地址失败: {error}"))?;
+    check_cancel(cancel)?;
+    let response = tokio::select! {
+        result = client
+            .get(url)
+            .header(USER_AGENT, "video-similarity-desktop")
+            .header(ACCEPT, "application/json, text/plain")
+            .send() => result
+                .map_err(|error| format!("连接运行环境元数据地址失败: {error}"))?,
+        _ = wait_cancel_flag(cancel) => {
+            return Err("运行环境安装已取消。".to_string());
+        }
+    };
+    check_cancel(cancel)?;
     if !response.status().is_success() {
         return Err(format!(
             "获取运行环境元数据失败: HTTP {}",
             response.status()
         ));
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| format!("读取运行环境元数据失败: {error}"))?;
-    fs::write(destination, body).map_err(|error| format!("保存运行环境元数据失败: {error}"))
+    let partial = partial_download_path(destination);
+    let mut output = File::create(&partial)
+        .map_err(|error| format!("创建运行环境元数据临时文件失败: {error}"))?;
+    let mut response = response;
+    loop {
+        let chunk = tokio::select! {
+            result = response.chunk() => result
+                .map_err(|error| format!("读取运行环境元数据失败: {error}"))?,
+            _ = wait_cancel_flag(cancel) => {
+                drop(output);
+                let _ = fs::remove_file(&partial);
+                return Err("运行环境安装已取消。".to_string());
+            }
+        };
+        let Some(chunk) = chunk else { break };
+        if let Err(error) = check_cancel(cancel) {
+            drop(output);
+            let _ = fs::remove_file(&partial);
+            return Err(error);
+        }
+        output
+            .write_all(&chunk)
+            .map_err(|error| format!("保存运行环境元数据失败: {error}"))?;
+    }
+    output
+        .flush()
+        .map_err(|error| format!("保存运行环境元数据失败: {error}"))?;
+    if let Err(error) = check_cancel(cancel) {
+        drop(output);
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    drop(output);
+    if destination.exists() {
+        fs::remove_file(destination).map_err(|error| format!("替换运行环境元数据失败: {error}"))?;
+    }
+    if let Err(error) = check_cancel(cancel) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    fs::rename(&partial, destination).map_err(|error| format!("保存运行环境元数据失败: {error}"))
+}
+
+fn cleanup_download_cache(app: &tauri::AppHandle, category: &str) {
+    let Ok(root) = storage_root(app) else { return };
+    let directory = root.join("data").join(".downloads").join(category);
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if metadata.is_file() && !metadata.file_type().is_symlink() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 async fn download_archive(
@@ -934,10 +1274,14 @@ async fn download_archive(
     if existing_bytes > 0 {
         request = request.header(RANGE, format!("bytes={existing_bytes}-"));
     }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|error| format!("连接运行环境下载地址失败: {error}"))?;
+    let mut response = tokio::select! {
+        result = request.send() => result
+            .map_err(|error| format!("连接运行环境下载地址失败: {error}"))?,
+        _ = wait_runtime_cancel(state) => {
+            let _ = fs::remove_file(&part_path);
+            return Err("运行环境下载已取消。".to_string());
+        }
+    };
     if !response.status().is_success() {
         return Err(format!("运行环境下载失败: HTTP {}", response.status()));
     }
@@ -960,16 +1304,24 @@ async fn download_archive(
         .open(&part_path)
         .map_err(|error| format!("创建运行环境断点文件失败: {error}"))?;
 
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("读取运行环境下载数据失败: {error}"))?
-    {
+    loop {
+        let chunk = tokio::select! {
+            result = response.chunk() => result
+                .map_err(|error| format!("读取运行环境下载数据失败: {error}"))?,
+            _ = wait_runtime_cancel(state) => {
+                drop(output);
+                let _ = fs::remove_file(&part_path);
+                return Err("运行环境下载已取消。".to_string());
+            }
+        };
+        let Some(chunk) = chunk else { break };
         if state.cancel_requested.load(Ordering::SeqCst) {
             output
                 .flush()
                 .map_err(|error| format!("保存运行环境断点文件失败: {error}"))?;
-            return Err("运行环境下载已取消，已保留断点文件。".to_string());
+            drop(output);
+            let _ = fs::remove_file(&part_path);
+            return Err("运行环境下载已取消。".to_string());
         }
         output
             .write_all(&chunk)
@@ -995,16 +1347,37 @@ async fn download_archive(
     output
         .flush()
         .map_err(|error| format!("保存运行环境断点文件失败: {error}"))?;
+    check_cancel(&state.cancel_requested)?;
     if total_bytes > 0 && downloaded_bytes < total_bytes {
         return Err(format!(
             "运行环境下载不完整: {downloaded_bytes} / {total_bytes} 字节"
         ));
     }
+    check_cancel(&state.cancel_requested)?;
     if destination.exists() {
         fs::remove_file(destination)
             .map_err(|error| format!("替换旧运行环境压缩包失败: {error}"))?;
     }
-    fs::rename(part_path, destination).map_err(|error| format!("保存运行环境压缩包失败: {error}"))
+    check_cancel(&state.cancel_requested)?;
+    fs::rename(&part_path, destination)
+        .map_err(|error| format!("保存运行环境压缩包失败: {error}"))?;
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        let _ = fs::remove_file(destination);
+        return Err("运行环境下载已取消。".to_string());
+    }
+    Ok(())
+}
+
+async fn wait_runtime_cancel(state: &RuntimeManagerState) {
+    while !state.cancel_requested.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_cancel_flag(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 fn partial_download_path(destination: &Path) -> PathBuf {
@@ -1055,13 +1428,18 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
-fn concatenate_files(parts: &[PathBuf], destination: &Path) -> Result<(), String> {
+fn concatenate_files_cancelable(
+    parts: &[PathBuf],
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     let mut output = File::create(destination)
         .map_err(|error| format!("创建 GPU 运行环境合并文件失败: {error}"))?;
     for part in parts {
+        check_cancel(cancel)?;
         let mut input =
             File::open(part).map_err(|error| format!("打开 GPU 运行环境分卷失败: {error}"))?;
-        std::io::copy(&mut input, &mut output)
+        copy_with_cancel(&mut input, &mut output, cancel)
             .map_err(|error| format!("合并 GPU 运行环境分卷失败: {error}"))?;
     }
     output
@@ -1069,12 +1447,106 @@ fn concatenate_files(parts: &[PathBuf], destination: &Path) -> Result<(), String
         .map_err(|error| format!("保存 GPU 运行环境合并文件失败: {error}"))
 }
 
-fn install_archive(
+fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::SeqCst) {
+        Err("运行环境安装已取消。".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn copy_with_cancel<R: Read, W: Write>(
+    source: &mut R,
+    destination: &mut W,
+    cancel: &AtomicBool,
+) -> Result<u64, String> {
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut copied = 0u64;
+    loop {
+        check_cancel(cancel)?;
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|error| error.to_string())?;
+        copied = copied.saturating_add(read as u64);
+    }
+}
+
+/// Restore the previous managed environment while the replacement is still
+/// before its commit point.  A failed commit must never leave the application
+/// without the previously working environment.
+fn restore_runtime_backup(target: &Path, backup: &Path, context: &str) -> Result<(), String> {
+    if target.exists() {
+        fs::remove_dir_all(target)
+            .map_err(|error| format!("{context}时清理不完整的新环境失败: {error}"))?;
+    }
+    if backup.exists() {
+        fs::rename(backup, target).map_err(|error| format!("{context}失败: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Atomically switch a staged runtime into place.  The final rename is the
+/// commit point: cancellation is honored before it, but never interpreted as
+/// a rollback request after it.  The cleanup callback is deliberately
+/// best-effort because the new runtime is already live once the rename has
+/// succeeded.
+fn commit_runtime_directory<F, C>(
+    staging_env: &Path,
+    target: &Path,
+    backup: &Path,
+    cancel: &AtomicBool,
+    operation: &str,
+    after_commit: F,
+    cleanup_backup: C,
+) -> Result<bool, String>
+where
+    F: FnOnce(),
+    C: FnOnce(&Path) -> std::io::Result<()>,
+{
+    if target.exists() {
+        fs::rename(target, backup).map_err(|error| format!("备份{operation}失败: {error}"))?;
+    }
+    if let Err(error) = check_cancel(cancel) {
+        if backup.exists() {
+            restore_runtime_backup(target, backup, &format!("{error}；取消前恢复{operation}"))?;
+        }
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(staging_env, target) {
+        if backup.exists() {
+            if let Err(restore_error) =
+                restore_runtime_backup(target, backup, &format!("启用{operation}失败后恢复旧环境"))
+            {
+                return Err(format!("启用{operation}失败: {error}; {restore_error}"));
+            }
+        }
+        return Err(format!("启用{operation}失败: {error}"));
+    }
+
+    // Commit point.  A cancellation request can race with this rename, but
+    // must not make a successfully activated runtime look cancelled.
+    after_commit();
+    if backup.exists() {
+        if let Err(error) = cleanup_backup(backup) {
+            eprintln!("清理旧{operation}备份失败（新环境已生效，稍后可重试）: {error}");
+        }
+    }
+    Ok(true)
+}
+
+fn install_archive_cancelable(
     archive_path: &Path,
     runtime_root: &Path,
     target: &Path,
     manifest: RuntimeManifest,
-) -> Result<(), String> {
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
     fs::create_dir_all(runtime_root).map_err(|error| format!("创建安装目录失败: {error}"))?;
     let staging = runtime_root.join(format!(".runtime-install-{}", timestamp_millis()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建运行环境临时目录失败: {error}"))?;
@@ -1085,6 +1557,7 @@ fn install_archive(
         let mut archive = zip::ZipArchive::new(archive_file)
             .map_err(|error| format!("读取运行环境压缩包失败: {error}"))?;
         for index in 0..archive.len() {
+            check_cancel(cancel)?;
             let mut entry = archive
                 .by_index(index)
                 .map_err(|error| format!("读取运行环境条目失败: {error}"))?;
@@ -1104,7 +1577,7 @@ fn install_archive(
             }
             let mut output = File::create(&destination)
                 .map_err(|error| format!("创建运行环境文件失败: {error}"))?;
-            std::io::copy(&mut entry, &mut output)
+            copy_with_cancel(&mut entry, &mut output, cancel)
                 .map_err(|error| format!("解压运行环境文件失败: {error}"))?;
             drop(output);
             restore_zip_permissions(&destination, entry.unix_mode())?;
@@ -1114,26 +1587,24 @@ fn install_archive(
         if first_existing_python(&staging).is_none() || !staging_env.is_dir() {
             return Err("运行环境包校验失败：未找到 Python 可执行文件。".to_string());
         }
+        check_cancel(cancel)?;
         write_runtime_manifest(&staging_env, manifest)?;
 
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("创建运行环境目标目录失败: {error}"))?;
         }
+        check_cancel(cancel)?;
         let backup = runtime_root.join(format!(".env-old-{}", timestamp_millis()));
-        if target.exists() {
-            fs::rename(target, &backup).map_err(|error| format!("备份旧运行环境失败: {error}"))?;
-        }
-        if let Err(error) = fs::rename(&staging_env, target) {
-            if backup.exists() {
-                let _ = fs::rename(&backup, target);
-            }
-            return Err(format!("启用新运行环境失败: {error}"));
-        }
-        if backup.exists() {
-            fs::remove_dir_all(backup).map_err(|error| format!("清理旧运行环境失败: {error}"))?;
-        }
-        Ok(())
+        commit_runtime_directory(
+            &staging_env,
+            target,
+            &backup,
+            cancel,
+            "旧运行环境",
+            || {},
+            |path| fs::remove_dir_all(path),
+        )
     })();
 
     if staging.exists() {
@@ -1142,12 +1613,13 @@ fn install_archive(
     result
 }
 
-fn install_merge_archive(
+fn install_merge_archive_cancelable(
     archive_path: &Path,
     runtime_root: &Path,
     target: &Path,
     manifest: RuntimeManifest,
-) -> Result<(), String> {
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
     fs::create_dir_all(runtime_root).map_err(|error| format!("创建安装目录失败: {error}"))?;
     let staging = runtime_root.join(format!(".merge-runtime-install-{}", timestamp_millis()));
     let staging_env = staging.join("merge-env");
@@ -1155,11 +1627,12 @@ fn install_merge_archive(
         .map_err(|error| format!("创建视频合并环境临时目录失败: {error}"))?;
 
     let result = (|| {
-        let archive_file =
-            File::open(archive_path).map_err(|error| format!("打开视频合并环境压缩包失败: {error}"))?;
+        let archive_file = File::open(archive_path)
+            .map_err(|error| format!("打开视频合并环境压缩包失败: {error}"))?;
         let mut archive = zip::ZipArchive::new(archive_file)
             .map_err(|error| format!("读取视频合并环境压缩包失败: {error}"))?;
         for index in 0..archive.len() {
+            check_cancel(cancel)?;
             let mut entry = archive
                 .by_index(index)
                 .map_err(|error| format!("读取视频合并环境条目失败: {error}"))?;
@@ -1172,7 +1645,10 @@ fn install_merge_archive(
                 .or_else(|_| relative_path.strip_prefix("merge-env"))
                 .or_else(|_| relative_path.strip_prefix("env"))
                 .unwrap_or(relative_path);
-            let file_name = relative_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            let file_name = relative_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
             let is_tool = matches!(
                 file_name.to_ascii_lowercase().as_str(),
                 "ffmpeg" | "ffmpeg.exe" | "ffprobe" | "ffprobe.exe"
@@ -1189,7 +1665,7 @@ fn install_merge_archive(
             }
             let mut output = File::create(&destination)
                 .map_err(|error| format!("创建视频合并环境文件失败: {error}"))?;
-            std::io::copy(&mut entry, &mut output)
+            copy_with_cancel(&mut entry, &mut output, cancel)
                 .map_err(|error| format!("解压视频合并环境文件失败: {error}"))?;
             drop(output);
             restore_zip_permissions(&destination, entry.unix_mode())?;
@@ -1200,28 +1676,24 @@ fn install_merge_archive(
         {
             return Err("视频合并环境包校验失败：未找到 FFmpeg/FFprobe。".to_string());
         }
+        check_cancel(cancel)?;
         write_runtime_manifest(&staging_env, manifest)?;
 
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("创建视频合并环境目标目录失败: {error}"))?;
         }
+        check_cancel(cancel)?;
         let backup = runtime_root.join(format!(".merge-env-old-{}", timestamp_millis()));
-        if target.exists() {
-            fs::rename(target, &backup)
-                .map_err(|error| format!("备份旧视频合并环境失败: {error}"))?;
-        }
-        if let Err(error) = fs::rename(&staging_env, target) {
-            if backup.exists() {
-                let _ = fs::rename(&backup, target);
-            }
-            return Err(format!("启用新视频合并环境失败: {error}"));
-        }
-        if backup.exists() {
-            fs::remove_dir_all(backup)
-                .map_err(|error| format!("清理旧视频合并环境失败: {error}"))?;
-        }
-        Ok(())
+        commit_runtime_directory(
+            &staging_env,
+            target,
+            &backup,
+            cancel,
+            "旧视频合并环境",
+            || {},
+            |path| fs::remove_dir_all(path),
+        )
     })();
 
     if staging.exists() {
@@ -1550,11 +2022,14 @@ fn parse_checksum(path: &Path) -> Result<String, String> {
     Ok(hash.to_ascii_lowercase())
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+fn sha256_file_cancelable(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| format!("打开运行环境压缩包失败: {error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 1024 * 1024];
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("运行环境下载已取消。".to_string());
+        }
         let read = file
             .read(&mut buffer)
             .map_err(|error| format!("读取运行环境压缩包失败: {error}"))?;
@@ -1573,6 +2048,15 @@ fn emit_progress(
     progress: f64,
     stage: &str,
 ) {
+    if let Some(state) = app.try_state::<RuntimeManagerState>() {
+        if let Ok(mut status) = state.status.lock() {
+            status.downloaded_bytes = downloaded_bytes;
+            status.total_bytes = total_bytes;
+            status.progress = progress.clamp(0.0, 100.0);
+            status.stage = stage.to_string();
+            status.cancel_requested = state.is_cancelled();
+        }
+    }
     let _ = app.emit(
         "runtime-install-progress",
         RuntimeInstallProgress {
@@ -1621,20 +2105,34 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::windows_install_root_for_executable;
     use super::{
-        copy_dir_recursive, cuda_13_compatibility_issue_from_output, install_archive,
-        install_merge_archive,
+        copy_dir_recursive_cancelable, cuda_13_compatibility_issue_from_output,
+        ffmpeg_runtime_asset_name, install_archive_cancelable, install_merge_archive_cancelable,
         parse_checksum, parse_parts_manifest, partial_download_path, python_candidates_below,
-        ffmpeg_runtime_asset_name, runtime_asset_name, runtime_asset_name_for_platform,
-        RuntimeManifest,
+        runtime_asset_name, runtime_asset_name_for_platform, RuntimeManagerState, RuntimeManifest,
     };
     use std::fs;
     use std::io::Write as _;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn runtime_asset_name_includes_version_platform_and_flavor() {
         let name = runtime_asset_name("7", "gpu");
         assert!(name.starts_with("Video_Similarity-runtime-v7-"));
         assert!(name.ends_with("-gpu.zip"));
+    }
+
+    #[test]
+    fn runtime_download_state_is_queryable_and_cancel_is_scoped() {
+        let state = RuntimeManagerState::default();
+        assert!(state.try_begin("merge-runtime"));
+        state.cancel("runtime");
+        assert!(!state.snapshot().cancel_requested);
+        state.cancel("merge-runtime");
+        assert!(state.snapshot().cancel_requested);
+        assert!(state.snapshot().running);
+        state.finish("视频合并环境安装失败或已取消", true);
+        assert!(!state.snapshot().running);
+        assert!(!state.snapshot().cancel_requested);
     }
 
     #[test]
@@ -1742,7 +2240,7 @@ mod tests {
         fs::create_dir_all(source.join("python").join("bin")).unwrap();
         fs::write(source.join("python").join("bin").join("python"), b"runtime").unwrap();
 
-        copy_dir_recursive(&source, &destination).unwrap();
+        copy_dir_recursive_cancelable(&source, &destination, &AtomicBool::new(false)).unwrap();
         assert_eq!(
             fs::read(destination.join("python").join("bin").join("python")).unwrap(),
             b"runtime"
@@ -1773,7 +2271,7 @@ mod tests {
         archive.write_all(b"runtime").unwrap();
         archive.finish().unwrap();
 
-        install_archive(
+        install_archive_cancelable(
             &archive_path,
             &root,
             &target,
@@ -1784,6 +2282,7 @@ mod tests {
                 sha256: "test".to_string(),
                 installed_at_ms: 1,
             },
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1792,6 +2291,52 @@ mod tests {
         assert!(!target.join("old-runtime.txt").exists());
         assert!(root.join(python_path).is_file());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_runtime_install_keeps_previous_environment_and_removes_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-runtime-cancel-{}",
+            super::timestamp_millis()
+        ));
+        let archive_path = root.join("runtime.zip");
+        let target = root.join("env");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old-runtime.txt"), b"old").unwrap();
+
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        archive
+            .start_file(
+                "env/python/bin/python",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"new").unwrap();
+        archive.finish().unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        let result = install_archive_cancelable(
+            &archive_path,
+            &root,
+            &target,
+            RuntimeManifest {
+                version: "1".to_string(),
+                flavor: "cpu".to_string(),
+                asset_name: "runtime.zip".to_string(),
+                sha256: "test".to_string(),
+                installed_at_ms: 1,
+            },
+            &cancelled,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(target.join("old-runtime.txt")).unwrap(), b"old");
+        assert!(!fs::read_dir(&root).unwrap().flatten().any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".runtime-install-")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1818,14 +2363,8 @@ mod tests {
         let mut archive = zip::ZipWriter::new(archive_file);
         let options = zip::write::SimpleFileOptions::default();
         for (path, content) in [
-            (
-                format!("ffmpeg-env/{ffmpeg_name}"),
-                b"ffmpeg".as_slice(),
-            ),
-            (
-                format!("ffmpeg-env/{ffprobe_name}"),
-                b"ffprobe".as_slice(),
-            ),
+            (format!("ffmpeg-env/{ffmpeg_name}"), b"ffmpeg".as_slice()),
+            (format!("ffmpeg-env/{ffprobe_name}"), b"ffprobe".as_slice()),
             (
                 "ffmpeg-env/FFmpeg-GPL-3.0.txt".to_string(),
                 b"license".as_slice(),
@@ -1840,7 +2379,7 @@ mod tests {
         }
         archive.finish().unwrap();
 
-        install_merge_archive(
+        install_merge_archive_cancelable(
             &archive_path,
             &root,
             &target,
@@ -1851,6 +2390,7 @@ mod tests {
                 sha256: "test".to_string(),
                 installed_at_ms: 1,
             },
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1860,6 +2400,54 @@ mod tests {
         assert!(!target.join("python").exists());
         assert!(target.join(".runtime.json").is_file());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_merge_runtime_install_keeps_previous_environment_and_removes_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-ffmpeg-runtime-cancel-{}",
+            super::timestamp_millis()
+        ));
+        let archive_path = root.join("ffmpeg-runtime.zip");
+        let target = root.join("merge-env");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old-ffmpeg"), b"old").unwrap();
+
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        for (name, contents) in [
+            ("ffmpeg-env/ffmpeg", b"ffmpeg".as_slice()),
+            ("ffmpeg-env/ffprobe", b"ffprobe".as_slice()),
+        ] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(contents).unwrap();
+        }
+        archive.finish().unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        let result = install_merge_archive_cancelable(
+            &archive_path,
+            &root,
+            &target,
+            RuntimeManifest {
+                version: "1".to_string(),
+                flavor: "linux-x64".to_string(),
+                asset_name: "ffmpeg-runtime.zip".to_string(),
+                sha256: "test".to_string(),
+                installed_at_ms: 1,
+            },
+            &cancelled,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(target.join("old-ffmpeg")).unwrap(), b"old");
+        assert!(!fs::read_dir(&root).unwrap().flatten().any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".merge-runtime-install-")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "windows")]

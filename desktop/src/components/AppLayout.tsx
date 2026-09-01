@@ -23,7 +23,7 @@ import {
   type MergeProgressPayload,
 } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
-import { useMergeStore } from '@/stores/mergeStore'
+import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
 import type { AnalysisLog } from '@/stores/analysisStore'
 import { shouldAcceptMergeProgress } from '@/components/merge/mergeEventPolicy'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -41,6 +41,19 @@ export function AppLayout() {
   const resultSummary = useAnalysisStore((state) => state.resultSummary)
   const { t } = useI18n()
   const copy = getRouteCopy(location.pathname, resultSummary)
+
+  useEffect(() => {
+    // Tauri's WebView otherwise exposes the browser context menu (Back,
+    // Reload, Save, Print, ...).  Install this at the document boundary so
+    // custom timeline/text context-menu handlers still receive the event;
+    // preventing the default menu does not stop propagation.
+    const preventBrowserContextMenu = (event: MouseEvent) => {
+      event.preventDefault()
+    }
+    const capture = true
+    document.addEventListener('contextmenu', preventBrowserContextMenu, capture)
+    return () => document.removeEventListener('contextmenu', preventBrowserContextMenu, capture)
+  }, [])
 
   const performCloseAction = useCallback(async (action: Exclude<CloseBehavior, 'ask'>, remember = false) => {
     if (action === 'exit' && !(await confirmExitWhileMoving())) return
@@ -209,12 +222,12 @@ export function AppLayout() {
       const payload = pendingProgress
       pendingProgress = null
       lastProgressAt = performance.now()
-      const store = useMergeStore.getState()
+      const store = useMergeRuntimeStore.getState()
       if (payload.progress < 100 && !store.running) store.setRunning(true)
       store.setProgress(payload.progress, payload.stage)
     }
     const queueProgress = (payload: MergeProgressPayload) => {
-      const running = useMergeStore.getState().running
+      const running = useMergeRuntimeStore.getState().running
       if (!shouldAcceptMergeProgress(terminal, running)) return
       // `startMerge` sets running before invoking the backend. That transition
       // is the explicit boundary which permits a new task after a terminal
@@ -234,7 +247,7 @@ export function AppLayout() {
       if (disposed || pendingLogs.length === 0) return
       const logs = pendingLogs
       pendingLogs = []
-      useMergeStore.getState().appendLogs(logs)
+      useMergeRuntimeStore.getState().appendLogs(logs)
     }
     const queueLog = (payload: AnalysisLog) => {
       pendingLogs.push(payload)
@@ -247,32 +260,49 @@ export function AppLayout() {
         logTimer = window.setTimeout(flushLogs, 100)
       }
     }
+    const applyMergeError = (message: string) => {
+      markTerminal()
+      flushLogs()
+      const store = useMergeRuntimeStore.getState()
+      const safeProgress = Number.isFinite(store.progress)
+        ? Math.min(99, Math.max(0, store.progress))
+        : 0
+      store.setRunning(false)
+      // A failed finalization must never leave a stale successful output
+      // actionable in the floating capsule.
+      store.setOutputPaths([])
+      store.setProgress(safeProgress, '导出失败')
+      store.setError(normalizeBackendError(message))
+    }
 
     listenMergeEvents({
       onLog: queueLog,
       onProgress: queueProgress,
       onFinished: (payload) => {
+        const store = useMergeRuntimeStore.getState()
+        if (terminal && !store.running) return
+        if (!Array.isArray(payload.outputPaths) || payload.outputPaths.length === 0) {
+          applyMergeError('合并完成事件没有包含有效输出文件。')
+          return
+        }
         markTerminal()
         flushLogs()
-        const store = useMergeStore.getState()
         store.setRunning(false)
-        store.setProgress(100, payload.message)
         store.setOutputPaths(payload.outputPaths)
+        store.setProgress(100, payload.message)
         store.setError('')
       },
       onError: (payload) => {
-        markTerminal()
-        flushLogs()
-        const store = useMergeStore.getState()
-        store.setRunning(false)
-        store.setError(normalizeBackendError(payload.message))
+        const store = useMergeRuntimeStore.getState()
+        if (terminal && !store.running) return
+        applyMergeError(payload.message)
       },
     })
       .then((unlisten) => {
         if (disposed) unlisten()
         else dispose = unlisten
       })
-      .catch((error) => useMergeStore.getState().setError(normalizeBackendError(error)))
+      .catch((error) => applyMergeError(normalizeBackendError(error)))
 
     return () => {
       disposed = true

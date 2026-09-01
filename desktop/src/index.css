@@ -6954,6 +6954,9 @@ select {
   z-index: 1;
   background: transparent;
   pointer-events: none;
+}
+
+.editor-preview-item.preview-transforming > video {
   will-change: transform;
 }
 
@@ -7237,6 +7240,34 @@ select {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.merge-output-list .merge-output-folder-button {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 0 9px;
+  align-items: center;
+  gap: 5px;
+  color: rgba(224, 246, 255, 0.96);
+  border: 1px solid rgba(75, 202, 234, 0.44);
+  border-radius: 6px;
+  background: rgba(24, 112, 153, 0.25);
+  cursor: pointer;
+}
+
+.merge-output-list .merge-output-folder-button:hover,
+.merge-output-list .merge-output-folder-button:focus-visible {
+  border-color: rgba(103, 229, 255, 0.9);
+  background: rgba(24, 138, 181, 0.42);
+  outline: none;
+}
+
+.merge-output-list .merge-output-folder-button svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
 }
 
 .editor-volume-control {
@@ -7883,6 +7914,146 @@ select {
   place-items: center;
 }
 
+.merge-export-directory-backdrop {
+  display: grid;
+  position: fixed;
+  z-index: 10080;
+  inset: 0;
+  padding: 20px;
+  overflow: auto;
+  background: rgba(1, 7, 20, 0.74);
+  backdrop-filter: blur(7px);
+  place-items: center;
+}
+
+.merge-export-directory-dialog {
+  display: grid;
+  width: min(560px, 100%);
+  padding: 18px;
+  gap: 16px;
+  color: rgba(234, 243, 255, 0.94);
+  border: 1px solid rgba(84, 202, 255, 0.46);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(12, 38, 73, 0.99), rgba(4, 14, 37, 0.99));
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.62);
+  animation: merge-export-directory-pop-in 150ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.merge-export-directory-dialog > header,
+.merge-export-directory-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.merge-export-directory-dialog h2 {
+  margin: 3px 0 0;
+  font-size: 20px;
+}
+
+.merge-export-directory-dialog .eyebrow {
+  color: rgba(100, 219, 255, 0.82);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.merge-export-directory-dialog > p {
+  margin: 0;
+  color: rgba(205, 222, 246, 0.76);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.merge-export-directory-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.merge-export-directory-option {
+  display: flex;
+  min-width: 0;
+  min-height: 64px;
+  padding: 10px;
+  align-items: center;
+  gap: 9px;
+  color: rgba(229, 240, 255, 0.9);
+  text-align: left;
+  border: 1px solid rgba(112, 159, 211, 0.28);
+  border-radius: 8px;
+  background: rgba(3, 16, 40, 0.5);
+  cursor: pointer;
+}
+
+.merge-export-directory-option:hover:not(:disabled),
+.merge-export-directory-option:focus-visible {
+  border-color: rgba(65, 208, 238, 0.72);
+  background: rgba(24, 112, 153, 0.28);
+  outline: none;
+}
+
+.merge-export-directory-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.merge-export-directory-option > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: rgba(100, 219, 255, 0.88);
+}
+
+.merge-export-directory-option > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.merge-export-directory-option strong,
+.merge-export-directory-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-export-directory-option strong {
+  font-size: 12px;
+}
+
+.merge-export-directory-option small {
+  color: rgba(190, 211, 239, 0.62);
+  font-size: 10px;
+}
+
+.merge-export-directory-field {
+  display: grid;
+  gap: 7px;
+}
+
+.merge-export-directory-field > span {
+  color: rgba(205, 222, 246, 0.72);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.merge-export-directory-field .design-input {
+  min-width: 0;
+  height: 38px;
+}
+
+.merge-export-directory-dialog > footer {
+  justify-content: flex-end;
+}
+
+@keyframes merge-export-directory-pop-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .merge-resolution-simulation-dialog {
   display: grid;
   width: min(500px, 100%);
@@ -8414,11 +8585,11 @@ select {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 2px rgba(91, 220, 255, 0.24);
   pointer-events: none;
   transform: translate3d(0, 0, 0);
-  will-change: transform;
   transition: opacity 130ms ease, box-shadow 130ms ease, transform 150ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .timeline-drag-overlay.dragging {
+  will-change: transform;
   transition: opacity 130ms ease, box-shadow 130ms ease;
 }
 
@@ -11288,6 +11459,86 @@ select {
   font-size: 13px;
 }
 
+.about-project-links {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(116, 145, 255, 0.16);
+}
+
+.about-project-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.about-project-heading > svg {
+  flex: 0 0 auto;
+  color: rgba(150, 193, 255, 0.94);
+}
+
+.about-project-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.about-project-heading span,
+.about-project-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.about-project-heading span {
+  color: rgba(226, 232, 255, 0.58);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.about-project-heading strong {
+  color: rgba(240, 246, 255, 0.92);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.about-project-url {
+  margin: 0;
+  overflow: hidden;
+  color: rgba(163, 207, 255, 0.82);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.about-project-actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.about-project-actions .neon-button {
+  min-width: 0;
+  min-height: 34px;
+  padding-inline: 11px;
+  font-size: 12px;
+}
+
+.about-project-actions .neon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.about-project-error {
+  margin: 0;
+  padding: 7px 9px;
+}
+
 @media (max-width: 1320px), (max-height: 820px) {
   :root {
     --compact-font: 13px;
@@ -11793,7 +12044,6 @@ select {
 .progress-track span {
   min-width: 0;
   transition: width 220ms ease;
-  will-change: width;
 }
 
 .progress-heading-percent {
@@ -12436,13 +12686,19 @@ select {
   position: absolute;
   top: 9px;
   right: 9px;
+  display: inline-flex;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100% - 18px);
   padding: 2px 6px;
+  align-items: center;
   border: 1px solid transparent;
   border-radius: 999px;
   font-size: 10px;
   font-weight: 800;
   line-height: 1.35;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .settings-resource-status.installed {
@@ -12476,7 +12732,7 @@ select {
   color: rgba(116, 203, 255, 0.96);
 }
 
-.settings-resource-button > span {
+.settings-resource-button > span:not(.settings-resource-status) {
   display: grid;
   min-width: 0;
   gap: 3px;

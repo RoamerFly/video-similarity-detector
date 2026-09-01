@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { AnalysisLog } from '@/stores/analysisStore'
 
 export type MergeFitMode = 'contain' | 'cover' | 'stretch'
 export type MergeSplitMode = 'none' | 'duration' | 'count'
@@ -124,12 +123,6 @@ interface MergeState {
   audioTracks: MergeTrack[]
   textTracks: MergeTrack[]
   settings: MergeSettings
-  running: boolean
-  progress: number
-  stage: string
-  logs: AnalysisLog[]
-  error: string
-  outputPaths: string[]
   canUndo: boolean
   canRedo: boolean
   undoStack: MergeHistorySnapshot[]
@@ -176,13 +169,6 @@ interface MergeState {
   endHistoryTransaction: () => void
   undo: () => void
   redo: () => void
-  setRunning: (running: boolean) => void
-  setProgress: (progress: number, stage: string) => void
-  appendLog: (log: AnalysisLog) => void
-  appendLogs: (logs: AnalysisLog[]) => void
-  clearLogs: () => void
-  setError: (error: string) => void
-  setOutputPaths: (paths: string[]) => void
 }
 
 const defaultVideoTrack: MergeTrack = { id: 'video-track-1', name: '视频线 1' }
@@ -222,12 +208,6 @@ export const useMergeStore = create<MergeState>()(
       audioTracks: [{ ...defaultAudioTrack }],
       textTracks: [{ ...defaultTextTrack }],
       settings: defaultSettings,
-      running: false,
-      progress: 0,
-      stage: '等待开始',
-      logs: [],
-      error: '',
-      outputPaths: [],
       canUndo: false,
       canRedo: false,
       undoStack: [],
@@ -577,23 +557,6 @@ export const useMergeStore = create<MergeState>()(
           canRedo: redoStack.length > 0,
         }
       }),
-      setRunning: (running) => set({
-        running,
-        progress: running ? 0 : get().progress,
-        error: running ? '' : get().error,
-        outputPaths: running ? [] : get().outputPaths,
-      }),
-      setProgress: (progress, stage) => set({
-        progress: Math.max(0, Math.min(100, progress)),
-        stage,
-      }),
-      appendLog: (log) => set((state) => ({ logs: [...state.logs, log].slice(-1000) })),
-      appendLogs: (logs) => set((state) => logs.length === 0
-        ? state
-        : { logs: [...state.logs, ...logs].slice(-1000) }),
-      clearLogs: () => set({ logs: [] }),
-      setError: (error) => set({ error }),
-      setOutputPaths: (outputPaths) => set({ outputPaths }),
     }),
     {
       name: 'video-similarity-merge:v2',
@@ -621,12 +584,6 @@ export const useMergeStore = create<MergeState>()(
           audioItems: (saved?.audioItems ?? []).map((item) => normalizeAudioItem(item, audioTracks)),
           textItems: (saved?.textItems ?? []).map((item) => normalizeTextItem(item, textTracks)),
           settings: normalizeSettings(saved?.settings),
-          running: false,
-          progress: 0,
-          stage: '等待开始',
-          logs: [],
-          error: '',
-          outputPaths: [],
           canUndo: false,
           canRedo: false,
           undoStack: [],

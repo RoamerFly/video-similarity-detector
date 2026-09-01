@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { Film, RotateCcw } from 'lucide-react'
+import { Film, RotateCcw, X } from 'lucide-react'
 
 import { localFileSrc, type VideoMetadata } from '@/services/backend'
 import type {
@@ -88,6 +88,7 @@ interface MergePreviewCanvasProps {
     handle: CropHandle,
   ) => void
   onResetCropSelection: () => void
+  onCancelCropEditing: () => void
   onPreviewMetadataLoaded: () => void
   onPreviewVideoReady: (layout: ClipLayout, video: HTMLVideoElement) => void
   onSeek: (time: number) => void
@@ -135,6 +136,7 @@ export function MergePreviewCanvas({
   onGroupLayoutPointerDown,
   onCropPointerDown,
   onResetCropSelection,
+  onCancelCropEditing,
   onPreviewMetadataLoaded,
   onPreviewVideoReady,
   onSeek,
@@ -145,6 +147,7 @@ export function MergePreviewCanvas({
   const fullscreenRef = useRef<HTMLDivElement | null>(null)
   const previewStageRef = useRef<HTMLDivElement | null>(null)
   const computedPreviewRef = useRef<HTMLVideoElement | null>(null)
+  const computedPreviewTimeRef = useRef(0)
   const fallbackFullscreenRef = useRef(false)
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 })
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -241,18 +244,51 @@ export function MergePreviewCanvas({
     if (!computed) return
     if (resolutionPreviewMode === 'computed') {
       previewVideoRefs.current.forEach((video) => video.pause())
-      if (computed.readyState >= 1) {
-        computed.currentTime = Math.min(computed.currentTime, Math.max(0, (resolutionPreview?.duration ?? 0) - 0.01))
+      const restoreComputedTime = () => {
+        const duration = Math.max(
+          0,
+          resolutionPreview?.duration
+            ?? (Number.isFinite(computed.duration) ? computed.duration : 0),
+        )
+        const maxTime = Math.max(0, duration - (duration > 0 ? 0.01 : 0))
+        try {
+          computed.currentTime = Math.min(Math.max(0, computedPreviewTimeRef.current), maxTime)
+        } catch {
+          // The media element may be unloading between a mode switch and the
+          // metadata callback. The next mount will restore from the ref again.
+        }
+      }
+      if (computed.readyState >= 1) restoreComputedTime()
+      else {
+        computed.addEventListener('loadedmetadata', restoreComputedTime, { once: true })
+        return () => {
+          computed.removeEventListener('loadedmetadata', restoreComputedTime)
+          computed.pause()
+          computed.removeAttribute('src')
+          computed.load()
+        }
       }
     } else {
       computed.pause()
+      computed.removeAttribute('src')
+      computed.load()
+    }
+    return () => {
+      computed.pause()
+      computed.removeAttribute('src')
+      computed.load()
+      setComputedPreviewPlaying(false)
     }
   }, [previewVideoRefs, resolutionPreview?.duration, resolutionPreviewMode])
   const computedOnToggle = () => {
     const computed = computedPreviewRef.current
     if (!computed || !resolutionPreview) return
     if (computed.paused) {
-      if (computed.currentTime >= Math.max(0, resolutionPreview.duration - 0.02)) computed.currentTime = 0
+      if (computed.currentTime >= Math.max(0, resolutionPreview.duration - 0.02)) {
+        computed.currentTime = 0
+        computedPreviewTimeRef.current = 0
+        setComputedPreviewTime(0)
+      }
       void computed.play().then(() => setComputedPreviewPlaying(true)).catch(() => setComputedPreviewPlaying(false))
     } else {
       computed.pause()
@@ -265,6 +301,7 @@ export function MergePreviewCanvas({
     const next = clamp(time, 0, resolutionPreview.duration)
     if (computed.readyState < 1) return
     computed.currentTime = next
+    computedPreviewTimeRef.current = next
     setComputedPreviewTime(next)
   }
   const draftGroup = draft?.layout && outputCanvasGeometry
@@ -324,6 +361,7 @@ export function MergePreviewCanvas({
                   'editor-preview-item',
                   effectiveSelectedClipId === layout.item.id ? 'selected' : '',
                   activeLayoutCount > 1 && !cropEditing ? 'draggable' : '',
+                  layoutDraft ? 'preview-transforming' : '',
                 ].filter(Boolean).join(' ')}
                 key={layout.item.id}
                 title={activeLayoutCount > 1
@@ -484,26 +522,43 @@ export function MergePreviewCanvas({
               src={localFileSrc(resolutionPreview.path)}
               aria-label={`已计算真实分辨率预览，时长 ${resolutionPreview.duration.toFixed(1)} 秒`}
               style={{ left: 0, top: 0, width: outputCanvasGeometry.width, height: outputCanvasGeometry.height }}
-              preload="auto"
               playsInline
               onPlay={() => setComputedPreviewPlaying(true)}
               onPause={() => setComputedPreviewPlaying(false)}
-              onTimeUpdate={(event) => setComputedPreviewTime(event.currentTarget.currentTime)}
-              onEnded={() => { setComputedPreviewPlaying(false); setComputedPreviewTime(resolutionPreview.duration) }}
+              preload="metadata"
+              onTimeUpdate={(event) => {
+                computedPreviewTimeRef.current = event.currentTarget.currentTime
+                setComputedPreviewTime(event.currentTarget.currentTime)
+              }}
+              onEnded={() => {
+                computedPreviewTimeRef.current = resolutionPreview.duration
+                setComputedPreviewPlaying(false)
+                setComputedPreviewTime(resolutionPreview.duration)
+              }}
             />
             <span className="editor-preview-computed-label">已计算预览 · {settings.width} × {settings.height} · {resolutionPreview.duration.toFixed(1)} 秒</span>
           </>
         )}
 
         {previewClip && cropEditing && (
-          <button
-            type="button"
-            className="video-crop-reset-button"
-            title="将裁剪框恢复到完整视频画面"
-            onClick={onResetCropSelection}
-          >
-            <RotateCcw />重置裁剪框
-          </button>
+          <div className="video-crop-reset-button" role="group" aria-label="裁剪编辑操作" style={{ gap: 9 }}>
+            <button
+              type="button"
+              title="将裁剪框恢复到完整视频画面"
+              onClick={onResetCropSelection}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: 0, color: 'inherit', border: 0, background: 'transparent', font: 'inherit', whiteSpace: 'nowrap' }}
+            >
+              <RotateCcw />重置裁剪框
+            </button>
+            <button
+              type="button"
+              title="取消裁剪调整"
+              onClick={onCancelCropEditing}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: 0, color: 'inherit', border: 0, background: 'transparent', font: 'inherit', whiteSpace: 'nowrap' }}
+            >
+              <X />取消
+            </button>
+          </div>
         )}
         </div>
       </div>

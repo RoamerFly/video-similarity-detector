@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, CheckCircle2, ChevronDown, Gauge, Trash2 } from 'lucide-react'
+import { ArrowDown, CheckCircle2, ChevronDown, FolderOpen, Gauge, Trash2 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { GlassPanel } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
-import { revealInFolder } from '@/services/backend'
-import { useMergeStore } from '@/stores/mergeStore'
+import { normalizeBackendError, revealInFolder } from '@/services/backend'
+import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
 
 type ExportStatusTab = 'progress' | 'logs'
+
+// eslint-disable-next-line react-refresh/only-export-components -- exported pure formatter is covered by its focused unit test.
+export function mergeExportCompactText(progress: number, error: string) {
+  if (error.trim()) return '导出失败'
+  if (progress > 0 && progress < 100) return `${progress.toFixed(0)}%`
+  if (progress >= 100) return '已完成'
+  return '导出'
+}
 
 export function MergeExportStatus() {
   const [expanded, setExpanded] = useState(false)
@@ -20,14 +28,28 @@ export function MergeExportStatus() {
     outputPaths,
     logs,
     clearLogs,
-  } = useMergeStore(useShallow((state) => ({
+    running,
+    setError,
+  } = useMergeRuntimeStore(useShallow((state) => ({
     stage: state.stage,
     progress: state.progress,
     error: state.error,
     outputPaths: state.outputPaths,
     logs: state.logs,
     clearLogs: state.clearLogs,
+    running: state.running,
+    setError: state.setError,
   })))
+
+  const revealOutputFolder = async () => {
+    const outputPath = outputPaths[0]
+    if (!outputPath || running || error) return
+    try {
+      await revealInFolder(outputPath)
+    } catch (revealError) {
+      setError(normalizeBackendError(revealError))
+    }
+  }
 
   useEffect(() => {
     if (!expanded) return
@@ -55,11 +77,7 @@ export function MergeExportStatus() {
 
   const visibleLogs = logs.slice(-300)
   const hiddenLogCount = Math.max(0, logs.length - visibleLogs.length)
-  const compactText = progress > 0 && progress < 100
-    ? `${progress.toFixed(0)}%`
-    : progress >= 100
-      ? '已完成'
-      : '导出'
+  const compactText = mergeExportCompactText(progress, error)
 
   return (
     <Translated>
@@ -120,12 +138,18 @@ export function MergeExportStatus() {
               {outputPaths.length > 0 ? (
                 <div className="merge-output-list">
                   <p><CheckCircle2 />{`${outputPaths.length} 个输出文件已生成`}</p>
+                  {!running && !error && (
+                    <button type="button" className="merge-output-folder-button" onClick={() => void revealOutputFolder()}>
+                      <FolderOpen />前往输出文件夹
+                    </button>
+                  )}
                   {outputPaths.map((path) => (
                     <button
                       type="button"
                       key={path}
+                      disabled={running || Boolean(error)}
                       title={path}
-                      onClick={() => void revealInFolder(path)}
+                      onClick={() => void revealInFolder(path).catch((revealError) => setError(normalizeBackendError(revealError)))}
                     >
                       {path}
                     </button>
