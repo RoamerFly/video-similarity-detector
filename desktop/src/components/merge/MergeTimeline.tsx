@@ -188,17 +188,17 @@ export const MergeTimeline = memo(function MergeTimeline({
         <div className="timeline-track-label-list" style={{ gridTemplateRows: tracksTemplate }}>
           {videoTracks.map((track) => (
             <button type="button" key={track.id} title={t('右键新建视频线')} onContextMenu={(event) => onTrackContextMenu(event, 'video', track.id)}>
-              <Film />{track.name}
+              <Film />{t(track.name)}
             </button>
           ))}
           {audioTracks.map((track) => (
             <button type="button" key={track.id} title={t('右键新建音频线')} onContextMenu={(event) => onTrackContextMenu(event, 'audio', track.id)}>
-              <Music2 />{track.name}
+              <Music2 />{t(track.name)}
             </button>
           ))}
           {textTracks.map((track) => (
             <button type="button" key={track.id} title={t('右键新建或管理文本线')} onContextMenu={(event) => onTextTrackContextMenu(event, track.id)}>
-              <Type />{track.name}
+              <Type />{t(track.name)}
             </button>
           ))}
         </div>

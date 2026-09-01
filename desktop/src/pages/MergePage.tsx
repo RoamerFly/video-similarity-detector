@@ -97,6 +97,7 @@ import {
   type ClipLayout,
 } from '@/components/merge/timelineModel'
 import { Translated } from '@/i18n/Translated'
+import { useI18n } from '@/i18n/useI18n'
 import {
   cancelVideoMerge,
   fileName,
@@ -208,6 +209,7 @@ function releasePreviewMedia(media: HTMLMediaElement) {
 }
 
 export function MergePage() {
+  const { t, tm } = useI18n()
   const merge = useMergeStore(useShallow((state) => ({
     addAudio: state.addAudio,
     addAudioFiles: state.addAudioFiles,
@@ -489,6 +491,11 @@ export function MergePage() {
   )
   const exportValidationKey = `${resolvedExportDirectory}\u0000${outputNameStem(exportNameDraft)}\u0000${exportFormatDraft}`
   const currentExportValidation = validatedExportKey === exportValidationKey ? exportValidation : null
+  const exportValidationMessage = basicOutputNameError(exportNameDraft)
+    || (exportValidating ? '正在检查导出文件名与路径…' : '')
+    || (currentExportValidation?.nameConflict ? '导出文件夹有重名，继续导出会在末尾加上10位的秒级时间戳' : '')
+    || (currentExportValidation?.nameTooLong ? (currentExportValidation.message || '导出文件名称或完整路径超过系统可容纳的最长长度。') : '')
+    || (currentExportValidation && !currentExportValidation.valid ? (currentExportValidation.message || '导出文件名称或路径无效，请修改后重试。') : '')
   const validResolutionPreview = resolutionPreview?.signature === resolutionPreviewSignature ? resolutionPreview : null
   const effectiveResolutionPreviewMode = validResolutionPreview && resolutionPreviewMode === 'computed' ? 'computed' : 'live'
   const timelineContentWidth = timelineViewportWidth || 720
@@ -2489,13 +2496,13 @@ export function MergePage() {
           <section className="merge-export-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="merge-export-directory-title">
             <header>
               <div>
-                <span className="eyebrow">导出位置</span>
-                <h2 id="merge-export-directory-title">选择导出文件夹</h2>
+                <span className="eyebrow">{t('导出位置')}</span>
+                <h2 id="merge-export-directory-title">{t('选择导出文件夹')}</h2>
               </div>
-              <button type="button" className="icon-button" aria-label="关闭导出文件夹选择" onClick={() => setExportDirectoryDialogOpen(false)}>×</button>
+              <button type="button" className="icon-button" aria-label={t('关闭导出文件夹选择')} onClick={() => setExportDirectoryDialogOpen(false)}>×</button>
             </header>
-            <p>默认建议使用第一个源视频所在文件夹。确认后才会开始合并。</p>
-            <div className="merge-export-directory-options" role="radiogroup" aria-label="导出位置来源">
+            <p>{t('默认建议使用第一个源视频所在文件夹。确认后才会开始合并。')}</p>
+            <div className="merge-export-directory-options" role="radiogroup" aria-label={t('导出位置来源')}>
               <button
                 type="button"
                 className={`merge-export-directory-option ${exportDirectoryMode === 'source' && selectedSourceDirectory ? 'is-selected' : ''}`}
@@ -2505,7 +2512,7 @@ export function MergePage() {
                 onClick={() => selectSourceExportDirectory()}
               >
                 <FolderOpen />
-                <span><strong>使用源文件夹</strong><small>{selectedSourceDirectory || '当前源视频没有可识别的文件夹'}</small></span>
+                <span><strong>{t('使用源文件夹')}</strong><small>{selectedSourceDirectory || t('当前源视频没有可识别的文件夹')}</small></span>
               </button>
               <button
                 type="button"
@@ -2515,17 +2522,17 @@ export function MergePage() {
                 onClick={() => void browseExportDirectory()}
               >
                 <FolderOpen />
-                <span><strong>浏览选择文件夹</strong><small>打开系统目录选择器</small></span>
+                <span><strong>{t('浏览选择文件夹')}</strong><small>{t('打开系统目录选择器')}</small></span>
               </button>
             </div>
             <label className="merge-export-directory-field">
-              <span>导出文件夹路径</span>
+              <span>{t('导出文件夹路径')}</span>
               {exportDirectoryMode === 'source' && sourceDirectories.length > 0 ? (
                 <SelectInput
                   autoFocus
                   value={selectedSourceDirectory}
                   onChange={(event) => selectSourceExportDirectory(event.target.value)}
-                  aria-label="导出文件夹路径"
+                  aria-label={t('导出文件夹路径')}
                 >
                   {sourceDirectories.map((directory) => <option key={directory} value={directory}>{directory}</option>)}
                 </SelectInput>
@@ -2535,21 +2542,21 @@ export function MergePage() {
                     autoFocus
                     value={exportDirectoryDraft}
                     onChange={(event) => setExportDirectoryDraft(event.target.value)}
-                    placeholder="可直接输入完整路径"
-                    aria-label="导出文件夹路径"
+                    placeholder={t('可直接输入完整路径')}
+                    aria-label={t('导出文件夹路径')}
                   />
-                  <button type="button" title="选择导出文件夹" onClick={() => void browseExportDirectory()}><FolderOpen /></button>
+                  <button type="button" title={t('选择导出文件夹')} onClick={() => void browseExportDirectory()}><FolderOpen /></button>
                 </div>
               )}
             </label>
             <label className="merge-export-directory-field">
-              <span>视频导出名称</span>
+              <span>{t('视频导出名称')}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <TextInput
                   value={exportNameDraft}
                   onChange={(event) => setExportNameDraft(outputNameStem(event.target.value))}
-                  placeholder="例如 merged_video"
-                  aria-label="视频导出名称"
+                  placeholder={t('例如 merged_video')}
+                  aria-label={t('视频导出名称')}
                   aria-invalid={Boolean(basicOutputNameError(exportNameDraft))}
                   style={{ flex: 1, minWidth: 0 }}
                 />
@@ -2557,29 +2564,25 @@ export function MergePage() {
               </div>
             </label>
             <label className="merge-export-directory-field">
-              <span>导出格式</span>
+              <span>{t('导出格式')}</span>
               <SelectInput
                 value={exportFormatDraft}
                 onChange={(event) => setExportFormatDraft(event.target.value as MergeOutputFormat)}
-                aria-label="导出格式"
+                aria-label={t('导出格式')}
               >
                 {mergeOutputFormats.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}
               </SelectInput>
             </label>
             <p className="merge-message" role="status" aria-live="polite">
-              {basicOutputNameError(exportNameDraft)
-                || (exportValidating ? '正在检查导出文件名与路径…' : '')
-                || (currentExportValidation?.nameConflict ? '导出文件夹有重名，继续导出会在末尾加上10位的秒级时间戳' : '')
-                || (currentExportValidation?.nameTooLong ? (currentExportValidation.message || '导出文件名称或完整路径超过系统可容纳的最长长度。') : '')
-                || (currentExportValidation && !currentExportValidation.valid ? (currentExportValidation.message || '导出文件名称或路径无效，请修改后重试。') : '')}
+              {exportValidationMessage ? tm(exportValidationMessage) : null}
             </p>
             <footer>
-              <button type="button" className="icon-button" onClick={() => setExportDirectoryDialogOpen(false)}>取消</button>
+              <button type="button" className="icon-button" onClick={() => setExportDirectoryDialogOpen(false)}>{t('取消')}</button>
               <NeonButton
                 type="button"
                 disabled={!canConfirmExport(resolvedExportDirectory, exportNameDraft, exportValidating, currentExportValidation)}
                 onClick={confirmExportDirectory}
-              ><Download />开始导出</NeonButton>
+              ><Download />{t('开始导出')}</NeonButton>
             </footer>
           </section>
         </div>

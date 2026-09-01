@@ -8,9 +8,12 @@ import { Sidebar } from '@/components/Sidebar'
 import { WindowControls } from '@/components/WindowControls'
 import { useI18n } from '@/i18n/useI18n'
 import {
+  buildAnalysisTaskMatchKey,
+  cancelCurrentTask,
   closeWindow,
   checkForUpdates,
   checkPythonEnv,
+  getAnalysisTask,
   getAppInfo,
   hasTauriRuntime,
   getFileMoveStatus,
@@ -20,8 +23,13 @@ import {
   listenMergeEvents,
   maximizeWindow,
   normalizeBackendError,
+  pauseVideoMerge,
   revealInFolder,
+  resumeVideoMerge,
+  runBatchCompare,
+  runDuplicateFileCheck,
   setCloseBehavior,
+  updateAnalysisTask,
   type FileMoveStatus,
   type MergeProgressPayload,
   type AppInfo,
@@ -46,6 +54,8 @@ export function AppLayout() {
   const navigate = useNavigate()
   const appliedStartupWindowState = useRef(false)
   const startupChecksStarted = useRef(false)
+  const analysisActionInFlight = useRef(false)
+  const mergeActionInFlight = useRef(false)
   const [closeDialogOpen, setCloseDialogOpen] = useState(false)
   const [rememberCloseChoice, setRememberCloseChoice] = useState(false)
   const [startupAppInfo, setStartupAppInfo] = useState<AppInfo | null>(null)
@@ -55,6 +65,140 @@ export function AppLayout() {
   const closeBehavior = useSettingsStore((state) => state.closeBehavior)
   const { t, tm } = useI18n()
   const copy = getRouteCopy(location.pathname)
+
+  useEffect(() => {
+    const handleCapsuleAction = async (event: Event) => {
+      const action = (event as CustomEvent<{ action?: 'pause' | 'resume' }>).detail?.action
+      if (action !== 'pause' && action !== 'resume') return
+      if (analysisActionInFlight.current) return
+
+      const store = useAnalysisStore.getState()
+      const taskId = store.activeTaskId
+      const taskConfig = store.activeTaskConfig
+      if (!taskId || !taskConfig) return
+      if (action === 'pause' && store.runningStatus !== 'running') return
+      if (action === 'resume' && store.runningStatus !== 'paused') return
+
+      analysisActionInFlight.current = true
+      try {
+        if (action === 'pause') {
+          await cancelCurrentTask()
+          await updateAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot, {
+            status: 'paused',
+            stage: '任务已暂停，可从任务列表继续',
+            progress: store.progress,
+          })
+          const latest = useAnalysisStore.getState()
+          latest.appendLog({
+            stream: 'stderr',
+            line: '已请求暂停分析，正在等待当前步骤安全停止。',
+            timestamp: Date.now(),
+          })
+          latest.setRunningStatus('paused')
+          latest.setProgress(latest.progress, '任务已暂停')
+          latest.setErrorMessage('')
+          return
+        }
+
+        const task = await getAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot)
+        const resumedConfig = {
+          ...taskConfig,
+          ...(task.config ?? {}),
+          taskId,
+        }
+        const latest = useAnalysisStore.getState()
+        latest.setActiveTaskConfig(resumedConfig)
+        latest.setErrorMessage('')
+        latest.setRunningStatus('running')
+        latest.setProgress(task.progress, '正在检查任务断点和增量缓存', {
+          subProgress: null,
+          subStage: '正在读取阶段状态与比较断点',
+        })
+        latest.clearLogs()
+        latest.setReport(null)
+        latest.setResultSummary(null)
+        latest.setReportPaths(null)
+        await updateAnalysisTask(taskId, resumedConfig.cacheDir, resumedConfig.projectRoot, {
+          status: 'preparing',
+          stage: '正在检查任务断点和增量缓存',
+          progress: task.progress,
+        })
+
+        if (resumedConfig.analysisMode === 'duplicate_file') {
+          const paths = await runDuplicateFileCheck({
+            videoDir: resumedConfig.videoDir,
+            outputDir: resumedConfig.outputDir,
+            projectRoot: resumedConfig.projectRoot,
+            recursive: true,
+            videoPaths: resumedConfig.videoPaths,
+          })
+          latest.setReportPaths(paths)
+          latest.setRunningStatus('success')
+          latest.setProgress(100, '相同文件检查完成')
+          await updateAnalysisTask(taskId, resumedConfig.cacheDir, resumedConfig.projectRoot, {
+            status: 'completed',
+            stage: '相同文件检查完成',
+            progress: 100,
+            reportJson: paths.reportJson,
+            reportCsv: paths.reportCsv,
+            reportHtml: paths.reportHtml,
+          })
+          navigate('/results')
+          return
+        }
+
+        await runBatchCompare({
+          ...resumedConfig,
+          taskMatchKey: buildAnalysisTaskMatchKey(resumedConfig),
+        })
+      } catch (error) {
+        const latest = useAnalysisStore.getState()
+        if (latest.runningStatus !== 'paused') {
+          const message = normalizeBackendError(error)
+          latest.setRunningStatus('error')
+          latest.setErrorMessage(message)
+          await updateAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot, {
+            status: 'failed',
+            stage: `任务异常中断：${message}`,
+            progress: latest.progress,
+          }).catch(() => undefined)
+        }
+      } finally {
+        analysisActionInFlight.current = false
+      }
+    }
+
+    window.addEventListener('analysis-task-action', handleCapsuleAction)
+    return () => window.removeEventListener('analysis-task-action', handleCapsuleAction)
+  }, [navigate])
+
+  useEffect(() => {
+    const handleMergeCapsuleAction = async (event: Event) => {
+      const action = (event as CustomEvent<{ action?: 'pause' | 'resume' }>).detail?.action
+      if (action !== 'pause' && action !== 'resume') return
+      if (mergeActionInFlight.current) return
+
+      const store = useMergeRuntimeStore.getState()
+      if (!store.running || (action === 'pause' && store.paused) || (action === 'resume' && !store.paused)) return
+      mergeActionInFlight.current = true
+      try {
+        if (action === 'pause') {
+          await pauseVideoMerge()
+          useMergeRuntimeStore.getState().setPaused(true)
+        } else {
+          await resumeVideoMerge()
+          useMergeRuntimeStore.getState().setPaused(false)
+        }
+      } catch (error) {
+        useMergeRuntimeStore.getState().setError(normalizeBackendError(error))
+      } finally {
+        mergeActionInFlight.current = false
+      }
+    }
+
+    window.addEventListener('merge-task-action', handleMergeCapsuleAction)
+    return () => window.removeEventListener('merge-task-action', handleMergeCapsuleAction)
+  }, [])
 
   useEffect(() => {
     // Tauri's WebView otherwise exposes the browser context menu (Back,
@@ -313,6 +457,8 @@ export function AppLayout() {
       pendingProgress = null
       lastProgressAt = performance.now()
       const store = useMergeRuntimeStore.getState()
+      if (store.paused && payload.paused !== true) return
+      if (payload.paused !== undefined) store.setPaused(payload.paused)
       if (payload.progress < 100 && !store.running) store.setRunning(true)
       store.setProgress(payload.progress, payload.stage)
     }

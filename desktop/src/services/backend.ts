@@ -212,6 +212,7 @@ export interface VideoExportValidation {
 export interface MergeProgressPayload {
   progress: number
   stage: string
+  paused?: boolean
 }
 
 export interface MergeFinishedPayload {
@@ -983,6 +984,16 @@ export async function renderVideoMergePreview(config: VideoMergeConfig) {
 export async function cancelVideoMerge() {
   if (!hasTauriRuntime()) return
   return invoke<void>('cancel_video_merge')
+}
+
+export async function pauseVideoMerge() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('pause_video_merge')
+}
+
+export async function resumeVideoMerge() {
+  if (!hasTauriRuntime()) return
+  return invoke<void>('resume_video_merge')
 }
 
 export async function checkPythonEnv(config: PythonEnvConfig) {

@@ -227,6 +227,8 @@ struct DownloadTaskStatus {
 struct MergeTaskState {
     current_pid: Mutex<Option<u32>>,
     cancel_requested: Mutex<bool>,
+    paused: Mutex<bool>,
+    progress: Mutex<f64>,
     is_running: Mutex<bool>,
     task_id: Mutex<Option<String>>,
     config_path: Mutex<Option<PathBuf>>,
@@ -536,6 +538,8 @@ struct AnalysisVideoQuarantinedPayload {
 struct MergeProgressPayload {
     progress: f64,
     stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paused: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -3943,6 +3947,12 @@ fn reserve_merge_task(
     if let Ok(mut cancelled) = state.cancel_requested.lock() {
         *cancelled = false;
     }
+    if let Ok(mut paused) = state.paused.lock() {
+        *paused = false;
+    }
+    if let Ok(mut progress) = state.progress.lock() {
+        *progress = 0.0;
+    }
     if let Ok(mut id) = state.task_id.lock() {
         *id = Some(task_id.to_string());
     }
@@ -4385,6 +4395,68 @@ fn cancel_video_merge(
         return Ok(());
     }
     emit_merge_progress(&app, 1.0, "正在取消合并任务");
+    Ok(())
+}
+
+#[tauri::command]
+fn pause_video_merge(
+    app: tauri::AppHandle,
+    _merge_state: State<'_, MergeTaskState>,
+) -> Result<(), String> {
+    let state = app.state::<MergeTaskState>();
+    let running = state.is_running.lock().map(|guard| *guard).unwrap_or(false);
+    if !running {
+        return Ok(());
+    }
+    let already_paused = state.paused.lock().map(|guard| *guard).unwrap_or(false);
+    if already_paused {
+        return Ok(());
+    }
+
+    let pid = state
+        .current_pid
+        .lock()
+        .map_err(|_| "合并任务状态锁定失败".to_string())?
+        .to_owned();
+    if let Some(pid) = pid {
+        suspend_merge_process_tree(pid)?;
+    }
+    if let Ok(mut paused) = state.paused.lock() {
+        *paused = true;
+    }
+    let progress = state.progress.lock().map(|guard| *guard).unwrap_or(0.0);
+    emit_merge_progress_state(&app, progress, "导出已暂停", Some(true));
+    Ok(())
+}
+
+#[tauri::command]
+fn resume_video_merge(
+    app: tauri::AppHandle,
+    _merge_state: State<'_, MergeTaskState>,
+) -> Result<(), String> {
+    let state = app.state::<MergeTaskState>();
+    let running = state.is_running.lock().map(|guard| *guard).unwrap_or(false);
+    if !running {
+        return Ok(());
+    }
+    let is_paused = state.paused.lock().map(|guard| *guard).unwrap_or(false);
+    if !is_paused {
+        return Ok(());
+    }
+
+    let pid = state
+        .current_pid
+        .lock()
+        .map_err(|_| "合并任务状态锁定失败".to_string())?
+        .to_owned();
+    if let Some(pid) = pid {
+        resume_merge_process_tree(pid)?;
+    }
+    if let Ok(mut paused) = state.paused.lock() {
+        *paused = false;
+    }
+    let progress = state.progress.lock().map(|guard| *guard).unwrap_or(0.0);
+    emit_merge_progress_state(&app, progress, "导出已恢复", Some(false));
     Ok(())
 }
 
@@ -4889,6 +4961,24 @@ fn run_video_merge_process(
 
     if let Ok(mut pid) = app.state::<MergeTaskState>().current_pid.lock() {
         *pid = Some(child.id());
+    }
+    let paused_before_pid_ready = app
+        .state::<MergeTaskState>()
+        .paused
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or(false);
+    if paused_before_pid_ready {
+        if let Err(error) = suspend_merge_process_tree(child.id()) {
+            let _ = kill_merge_process_tree(child.id());
+            let _ = child.wait();
+            emit_merge_error(&app, &format!("暂停视频合并失败: {error}"));
+            let _ = fs::remove_file(&config_path);
+            let _ = fs::remove_file(&result_path);
+            let _ = fs::remove_dir_all(&temporary_output_dir);
+            reset_merge_task_state(&app);
+            return;
+        }
     }
     let cancelled_before_pid_ready = app
         .state::<MergeTaskState>()
@@ -5412,11 +5502,25 @@ impl MergeLogBatch {
 }
 
 fn emit_merge_progress<R: tauri::Runtime>(app: &tauri::AppHandle<R>, progress: f64, stage: &str) {
+    emit_merge_progress_state(app, progress, stage, None);
+}
+
+fn emit_merge_progress_state<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    progress: f64,
+    stage: &str,
+    paused: Option<bool>,
+) {
+    let progress = round_progress(progress);
+    if let Ok(mut current) = app.state::<MergeTaskState>().progress.lock() {
+        *current = progress;
+    }
     let _ = app.emit(
         "merge-progress",
         MergeProgressPayload {
-            progress: round_progress(progress),
+            progress,
             stage: stage.to_string(),
+            paused,
         },
     );
 }
@@ -5443,6 +5547,12 @@ fn reset_merge_task_state(app: &tauri::AppHandle) {
     }
     if let Ok(mut cancelled) = state.cancel_requested.lock() {
         *cancelled = false;
+    }
+    if let Ok(mut paused) = state.paused.lock() {
+        *paused = false;
+    }
+    if let Ok(mut progress) = state.progress.lock() {
+        *progress = 0.0;
     }
     if let Ok(mut path) = state.config_path.lock() {
         *path = None;
@@ -7212,6 +7322,8 @@ fn main() {
             run_video_merge,
             render_video_merge_preview,
             cancel_video_merge,
+            pause_video_merge,
+            resume_video_merge,
             run_duplicate_file_check,
             cancel_current_task,
             list_reports,
@@ -8569,6 +8681,206 @@ fn kill_merge_process_tree(pid: u32) -> Result<(), String> {
     }
 }
 
+/// Suspend the merge worker and every encoder it started.  The merge worker
+/// is deliberately launched in its own process group, so Unix can suspend
+/// the whole group atomically.  Windows has no process-group suspend API;
+/// enumerate the descendants and use the native process suspend primitive.
+fn suspend_merge_process_tree(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let group_pid = format!("-{pid}");
+        let status = Command::new("kill")
+            .args(["-STOP", "--", &group_pid])
+            .status()
+            .map_err(|error| format!("暂停视频合并失败: {error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err("暂停视频合并失败，进程组可能已经退出".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SUSPEND_RESUME};
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtSuspendProcess(process_handle: HANDLE) -> i32;
+            fn NtResumeProcess(process_handle: HANDLE) -> i32;
+        }
+
+        fn process_tree_ids(root: u32) -> Result<Vec<u32>, String> {
+            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+            if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+                return Err("读取视频合并进程树失败".to_string());
+            }
+            let mut entries = Vec::new();
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let first_ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+            if !first_ok {
+                unsafe { CloseHandle(snapshot) };
+                return Err("读取视频合并进程树失败".to_string());
+            }
+            loop {
+                entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                    break;
+                }
+            }
+            unsafe { CloseHandle(snapshot) };
+
+            let mut ids = vec![root];
+            let mut index = 0;
+            while index < ids.len() {
+                let parent = ids[index];
+                for (child, child_parent) in entries.iter().copied() {
+                    if child_parent == parent && child != root && !ids.contains(&child) {
+                        ids.push(child);
+                    }
+                }
+                index += 1;
+            }
+            Ok(ids)
+        }
+
+        let ids = process_tree_ids(pid)?;
+        let mut suspended = Vec::new();
+        for process_id in ids.iter().rev().copied() {
+            let handle = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, process_id) };
+            if handle.is_null() {
+                if process_id == pid {
+                    for resumed_id in suspended.iter().copied() {
+                        let resumed = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, resumed_id) };
+                        if !resumed.is_null() {
+                            unsafe {
+                                let _ = NtResumeProcess(resumed);
+                                CloseHandle(resumed);
+                            }
+                        }
+                    }
+                    return Err("暂停视频合并失败，无法打开合并进程".to_string());
+                }
+                continue;
+            }
+            let status = unsafe { NtSuspendProcess(handle) };
+            unsafe { CloseHandle(handle) };
+            if status != 0 {
+                for resumed_id in suspended.iter().copied() {
+                    let resumed = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, resumed_id) };
+                    if !resumed.is_null() {
+                        unsafe {
+                            let _ = NtResumeProcess(resumed);
+                            CloseHandle(resumed);
+                        }
+                    }
+                }
+                return Err(format!("暂停视频合并失败，系统错误码: {status}"));
+            }
+            suspended.push(process_id);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = pid;
+        Err("当前操作系统不支持暂停视频合并".to_string())
+    }
+}
+
+fn resume_merge_process_tree(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let group_pid = format!("-{pid}");
+        let status = Command::new("kill")
+            .args(["-CONT", "--", &group_pid])
+            .status()
+            .map_err(|error| format!("恢复视频合并失败: {error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err("恢复视频合并失败，进程组可能已经退出".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SUSPEND_RESUME};
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtResumeProcess(process_handle: HANDLE) -> i32;
+        }
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+            return Err("读取视频合并进程树失败".to_string());
+        }
+        let mut entries = Vec::new();
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if unsafe { Process32FirstW(snapshot, &mut entry) } == 0 {
+            unsafe { CloseHandle(snapshot) };
+            return Err("读取视频合并进程树失败".to_string());
+        }
+        loop {
+            entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                break;
+            }
+        }
+        unsafe { CloseHandle(snapshot) };
+        let mut ids = vec![pid];
+        let mut index = 0;
+        while index < ids.len() {
+            let parent = ids[index];
+            for (child, child_parent) in entries.iter().copied() {
+                if child_parent == parent && child != pid && !ids.contains(&child) {
+                    ids.push(child);
+                }
+            }
+            index += 1;
+        }
+        for process_id in ids.iter().rev().copied() {
+            let handle = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, process_id) };
+            if handle.is_null() {
+                if process_id == pid {
+                    return Err("恢复视频合并失败，无法打开合并进程".to_string());
+                }
+                continue;
+            }
+            let status = unsafe { NtResumeProcess(handle) };
+            unsafe { CloseHandle(handle) };
+            if status != 0 {
+                return Err(format!("恢复视频合并失败，系统错误码: {status}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = pid;
+        Err("当前操作系统不支持恢复视频合并".to_string())
+    }
+}
+
 #[cfg(unix)]
 fn wait_for_merge_process_group_exit(pid: u32, timeout: Duration) -> bool {
     let group_pid = format!("-{pid}");
@@ -9280,8 +9592,9 @@ mod tests {
         update_report_entries_for_resolved_path, validate_export_path_chain,
         write_clip_model_metadata, write_json_atomic, AnalysisVideoContext,
         AnalysisVideoQuarantinedPayload, ClipModelInstallMetadata, ClipModelManifest,
-        DecoderWarningAccumulator, MergeFinishedPayload, PythonLaunchDiagnostics,
-        ReportPairIdentity, UpdateCancelState, VideoMergeConfig, CLIP_MODEL_DIR_NAME,
+        DecoderWarningAccumulator, MergeFinishedPayload, MergeProgressPayload,
+        PythonLaunchDiagnostics, ReportPairIdentity, UpdateCancelState, VideoMergeConfig,
+        CLIP_MODEL_DIR_NAME,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -9373,6 +9686,25 @@ mod tests {
             normalize_merge_progress_event(f64::NAN, "未知"),
             (0.0, "未知".to_string())
         );
+    }
+
+    #[test]
+    fn merge_progress_pause_state_is_optional_and_explicit() {
+        let paused = serde_json::to_value(MergeProgressPayload {
+            progress: 42.0,
+            stage: "导出已暂停".to_string(),
+            paused: Some(true),
+        })
+        .expect("serialize paused merge progress");
+        assert_eq!(paused["paused"], true);
+
+        let running = serde_json::to_value(MergeProgressPayload {
+            progress: 42.0,
+            stage: "正在合并".to_string(),
+            paused: None,
+        })
+        .expect("serialize running merge progress");
+        assert!(running.get("paused").is_none());
     }
 
     #[test]

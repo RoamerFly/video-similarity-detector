@@ -844,7 +844,7 @@ function BaseSettings({
   onResourceCompleted: (message: string) => void
 }) {
   const settings = useSettingsStore()
-  const { tm } = useI18n()
+  const { t, tm } = useI18n()
   const [modelStatus, setModelStatus] = useState<ClipModelStatus | null>(null)
   const [modelLoading, setModelLoading] = useState(false)
   const [modelInstalling, setModelInstalling] = useState(() => getDownloadTaskSnapshot('clip-model').active)
@@ -1207,29 +1207,29 @@ function BaseSettings({
         </label>
       </div>
 
-      <div className="settings-resource-buttons" role="group" aria-label="运行环境与版本">
+      <div className="settings-resource-buttons" role="group" aria-label={t('运行环境与版本')}>
         <button className="settings-resource-button" type="button" onClick={() => setResourceDialog('about')}>
           <Info size={21} />
-          <span><strong>关于与版本</strong><small>应用、框架与引擎信息</small></span>
+          <span><strong>{t('关于与版本')}</strong><small>{t('应用、框架与引擎信息')}</small></span>
         </button>
         <button className="settings-resource-button" type="button" onClick={() => { setResourceDialog('runtime'); void refreshRuntimeStatuses() }}>
           <PackageCheck size={21} />
-          <span><strong>AI 运行环境</strong><small>Python / CUDA 环境</small></span>
+          <span><strong>{t('AI 运行环境')}</strong><small>{t('Python / CUDA 环境')}</small></span>
           <ResourceStatusBadge state={resourceStatus(runtimeStatus?.ready, runtimeLoading)} />
         </button>
         <button className="settings-resource-button" type="button" onClick={() => setResourceDialog('clip-model')}>
           {modelStatus?.installed ? <CheckCircle2 size={21} /> : <PackageCheck size={21} />}
-          <span><strong>离线 CLIP 模型</strong><small>{modelLoading ? '正在检测' : modelStatus?.installed ? '已安装，可离线运行' : '未安装'}</small></span>
+          <span><strong>{t('离线 CLIP 模型')}</strong><small>{modelLoading ? t('正在检测') : modelStatus?.installed ? t('已安装，可离线运行') : t('未安装')}</small></span>
           <ResourceStatusBadge state={resourceStatus(modelStatus?.installed, modelLoading || modelInstalling)} />
         </button>
         <button className="settings-resource-button" type="button" onClick={() => { setResourceDialog('merge'); void refreshRuntimeStatuses() }}>
           <Film size={21} />
-          <span><strong>视频合并环境</strong><small>独立 FFmpeg / FFprobe</small></span>
+          <span><strong>{t('视频合并环境')}</strong><small>{t('独立 FFmpeg / FFprobe')}</small></span>
           <ResourceStatusBadge state={resourceStatus(mergeRuntimeStatus?.ready, mergeRuntimeLoading)} />
         </button>
       </div>
 
-      <SettingsResourceDialog open={resourceDialog === 'about'} title="关于与版本" icon={<Info size={21} />} onClose={() => setResourceDialog(null)}>
+      <SettingsResourceDialog open={resourceDialog === 'about'} title={t('关于与版本')} icon={<Info size={21} />} onClose={() => setResourceDialog(null)}>
         <div className="settings-about-card">
           <div className="about-grid compact">
             <div><span>应用版本</span><strong title={`v${appInfo?.version ?? '0.1.0'}`}>v{appInfo?.version ?? '0.1.0'}</strong></div>
@@ -1263,10 +1263,10 @@ function BaseSettings({
           </div>
         </div>
       </SettingsResourceDialog>
-      <SettingsResourceDialog open={resourceDialog === 'runtime'} title="AI 运行环境" icon={<PackageCheck size={21} />} onClose={closeResourceDialog}>
+      <SettingsResourceDialog open={resourceDialog === 'runtime'} title={t('AI 运行环境')} icon={<PackageCheck size={21} />} onClose={closeResourceDialog}>
         <RuntimeSettingsCard onCompleted={runtimeCompleted} />
       </SettingsResourceDialog>
-      <SettingsResourceDialog open={resourceDialog === 'clip-model'} title="离线 CLIP 模型" icon={modelStatus?.installed ? <CheckCircle2 size={21} /> : <PackageCheck size={21} />} onClose={closeResourceDialog}>
+      <SettingsResourceDialog open={resourceDialog === 'clip-model'} title={t('离线 CLIP 模型')} icon={modelStatus?.installed ? <CheckCircle2 size={21} /> : <PackageCheck size={21} />} onClose={closeResourceDialog}>
         <ClipModelSettingsCard
           status={modelStatus}
           loading={modelLoading}
@@ -1289,7 +1289,7 @@ function BaseSettings({
           onChoose={(choice) => void handleInstallClipModelChoice(choice)}
         />
       </SettingsResourceDialog>
-      <SettingsResourceDialog open={resourceDialog === 'merge'} title="视频合并环境" icon={<Film size={21} />} onClose={closeResourceDialog}>
+      <SettingsResourceDialog open={resourceDialog === 'merge'} title={t('视频合并环境')} icon={<Film size={21} />} onClose={closeResourceDialog}>
         <MergeRuntimeSettingsCard onCompleted={mergeRuntimeCompleted} />
       </SettingsResourceDialog>
     </div>

@@ -11,12 +11,14 @@ import type { AnalysisLog } from '@/stores/analysisStore'
  */
 export interface MergeRuntimeState {
   running: boolean
+  paused: boolean
   progress: number
   stage: string
   logs: AnalysisLog[]
   error: string
   outputPaths: string[]
   setRunning: (running: boolean) => void
+  setPaused: (paused: boolean) => void
   setProgress: (progress: number, stage: string) => void
   appendLog: (log: AnalysisLog) => void
   appendLogs: (logs: AnalysisLog[]) => void
@@ -27,6 +29,7 @@ export interface MergeRuntimeState {
 
 export const useMergeRuntimeStore = create<MergeRuntimeState>((set, get) => ({
   running: false,
+  paused: false,
   progress: 0,
   stage: '等待开始',
   logs: [],
@@ -34,10 +37,12 @@ export const useMergeRuntimeStore = create<MergeRuntimeState>((set, get) => ({
   outputPaths: [],
   setRunning: (running) => set({
     running,
+    paused: false,
     progress: running ? 0 : get().progress,
     error: running ? '' : get().error,
     outputPaths: running ? [] : get().outputPaths,
   }),
+  setPaused: (paused) => set((state) => ({ paused: state.running ? paused : false })),
   setProgress: (progress, stage) => set({
     progress: Math.max(0, Math.min(100, progress)),
     stage,

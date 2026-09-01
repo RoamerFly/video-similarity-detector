@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { VideoFile } from '@/services/backend'
+import type { RunBatchCompareConfig } from '@/services/backend'
 import type { AnalysisConfig } from '@/types/config'
 import { defaultSettings } from '@/types/config'
 import type { BatchReport, ReportPair, ReportSummaryStats } from '@/utils/reportParser'
@@ -39,6 +40,7 @@ interface AnalysisState {
   report: BatchReport | null
   errorMessage: string
   activeTaskId: string
+  activeTaskConfig: RunBatchCompareConfig | null
   selectedVideoPaths: Set<string>
   videoMultiSelect: boolean
   isScanning: boolean
@@ -57,6 +59,7 @@ interface AnalysisState {
   setReport: (report: BatchReport | null) => void
   setErrorMessage: (message: string) => void
   setActiveTaskId: (taskId: string) => void
+  setActiveTaskConfig: (config: RunBatchCompareConfig | null) => void
   setSelectedVideoPaths: (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => void
   setVideoMultiSelect: (enabled: boolean) => void
   setIsScanning: (scanning: boolean) => void
@@ -153,6 +156,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   report: null,
   errorMessage: '',
   activeTaskId: '',
+  activeTaskConfig: null,
   selectedVideoPaths: new Set<string>(),
   videoMultiSelect: false,
   isScanning: false,
@@ -231,6 +235,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
   setReport: (report) => set({ report }),
   setErrorMessage: (errorMessage) => set({ errorMessage }),
   setActiveTaskId: (activeTaskId) => set({ activeTaskId }),
+  setActiveTaskConfig: (activeTaskConfig) => set({ activeTaskConfig }),
   setSelectedVideoPaths: (updater) =>
     set((state) => ({
       selectedVideoPaths:
@@ -284,6 +289,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       report: null,
       errorMessage: '',
       activeTaskId: '',
+      activeTaskConfig: null,
       selectedVideoPaths: new Set<string>(),
       videoMultiSelect: false,
       isScanning: false,

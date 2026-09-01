@@ -10,4 +10,9 @@ describe('merge export capsule state', () => {
     expect(mergeExportCompactText(100, '')).toBe('已完成')
     expect(mergeExportCompactText(99, '')).toBe('99%')
   })
+
+  it('shows a resumable paused state while the merge process remains active', () => {
+    expect(mergeExportCompactText(42, '', true)).toBe('已暂停')
+    expect(mergeExportCompactText(100, '', true)).toBe('已暂停')
+  })
 })

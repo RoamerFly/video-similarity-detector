@@ -8062,6 +8062,22 @@ select {
 
 .merge-export-directory-dialog > footer {
   justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.merge-export-directory-dialog > footer .icon-button {
+  width: auto;
+  min-width: 82px;
+  height: 42px;
+  padding: 0 14px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.merge-export-directory-dialog > footer .neon-button {
+  min-width: 132px;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 @keyframes merge-export-directory-pop-in {
@@ -13420,21 +13436,23 @@ select {
 
 .sidebar-version-row > .version-pill {
   display: flex;
-  width: auto;
-  min-width: 0;
-  height: 17px;
-  min-height: 17px;
+  width: 88px;
+  min-width: 88px;
+  height: 28px;
+  min-height: 28px;
   margin: 0;
-  padding: 0;
+  padding: 0 8px;
   align-items: center;
   justify-content: center;
-  flex: 0 0 17px;
+  flex: 0 0 28px;
+  color: rgba(244, 247, 255, 0.75);
   font-size: 11px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  overflow: visible;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .merge-export-status-anchor {
@@ -13485,7 +13503,7 @@ select {
   height: 32px;
   min-height: 32px;
   min-width: 0;
-  grid-template-columns: 15px minmax(0, 1fr) 14px;
+  grid-template-columns: 15px minmax(0, 1fr) 24px 14px;
   align-items: center;
   gap: 6px;
   padding: 0 8px;
@@ -13498,7 +13516,7 @@ select {
 }
 
 .editor-export-status.is-expanded .merge-export-pill-head {
-  grid-template-columns: 16px max-content minmax(0, 1fr) max-content 16px;
+  grid-template-columns: 16px max-content minmax(0, 1fr) max-content 24px 16px;
   padding: 0 10px;
   border-bottom: 1px solid rgba(116, 175, 255, 0.2);
 }

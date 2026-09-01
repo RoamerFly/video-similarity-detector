@@ -70,7 +70,6 @@ import {
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { useEventCallback } from '@/components/merge/useEventCallback'
 import {
   analysisConfigFromSettings,
   analysisPresetOptions,
@@ -195,6 +194,7 @@ export function AnalyzePage() {
     setReportPaths,
     setErrorMessage,
     setActiveTaskId,
+    setActiveTaskConfig,
     setReport,
     setResultSummary,
     selectedVideoPaths,
@@ -233,7 +233,6 @@ export function AnalyzePage() {
   const [taskCreateDialogOpen, setTaskCreateDialogOpen] = useState(false)
   const [loadedTaskId, setLoadedTaskId] = useState('')
   const [taskLoadDialogOpen, setTaskLoadDialogOpen] = useState(false)
-  const pauseRequestedTaskId = useRef('')
   const historyRefreshInFlight = useRef(false)
   const isRunning = runningStatus === 'running'
   const isBusy = isRunning || isPreparing
@@ -653,6 +652,7 @@ export function AnalyzePage() {
       : task.videos.map((video) => video.path)
     setLoadedTaskId(task.id)
     setActiveTaskId('')
+    setActiveTaskConfig(null)
     setPendingTaskDraft(null)
     setTaskCreateDialogOpen(false)
     setTaskLoadDialogOpen(false)
@@ -748,6 +748,7 @@ export function AnalyzePage() {
       } else {
         setLoadedTaskId(seededTask.id)
         setActiveTaskId('')
+        setActiveTaskConfig(null)
         setRunningStatus('idle')
         setProgress(0, '任务已新建，等待启动', { subProgress: null, subStage: '' })
         setScanMessage(`已新建任务 ${displayTaskName(seededTask)}。`)
@@ -764,7 +765,6 @@ export function AnalyzePage() {
     const activeTask = historyTasks.find((task) => task.id === activeTaskId)
     const cacheDir = activeTask?.config?.cacheDir || settings.cacheDir
     const projectRoot = activeTask?.config?.projectRoot || settings.projectRoot
-    pauseRequestedTaskId.current = activeTaskId
     try {
       await cancelCurrentTask()
       await updateAnalysisTask(activeTaskId, cacheDir, projectRoot, {
@@ -801,8 +801,8 @@ export function AnalyzePage() {
       return
     }
 
-    pauseRequestedTaskId.current = ''
     setActiveTaskId(task.id)
+    setActiveTaskConfig(taskConfig)
     setIsPreparing(true)
     setErrorMessage('')
     setRunningStatus('running')
@@ -912,8 +912,8 @@ export function AnalyzePage() {
         // the live run state as part of the delete transaction so the
         // sidebar capsule cannot keep displaying the deleted task's pause
         // state (or accept a late cancellation event for it).
-        pauseRequestedTaskId.current = ''
         setActiveTaskId('')
+        setActiveTaskConfig(null)
         setRunningStatus('idle')
         setProgress(0, '尚未运行分析', { subProgress: null, subStage: '' })
         setErrorMessage('')
@@ -932,24 +932,6 @@ export function AnalyzePage() {
       setTaskCacheBusy(false)
     }
   }
-
-  const handleCapsuleAction = useEventCallback((event: Event) => {
-    const action = (event as CustomEvent<{ action?: 'pause' | 'resume' }>).detail?.action
-    if (action === 'pause') {
-      void handlePause()
-      return
-    }
-    if (action === 'resume') {
-      const taskId = useAnalysisStore.getState().activeTaskId
-      const task = historyTasks.find((item) => item.id === taskId)
-      if (task) void handleRunTask(task)
-    }
-  })
-
-  useEffect(() => {
-    window.addEventListener('analysis-task-action', handleCapsuleAction)
-    return () => window.removeEventListener('analysis-task-action', handleCapsuleAction)
-  }, [handleCapsuleAction])
 
   async function handleOpenTaskCache(task: AnalysisTaskRecord) {
     setTaskCacheBusy(true)

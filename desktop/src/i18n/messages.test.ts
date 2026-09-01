@@ -22,6 +22,38 @@ describe('English translations for shared and merge UI', () => {
     expect(node.props['aria-label']).toBe('Align timeline')
   })
 
+  it('localizes resource cards, merge export controls, and dynamic track status', () => {
+    const labels = [
+      '应用、框架与引擎信息',
+      'Python / CUDA 环境',
+      '离线 CLIP 模型',
+      '已安装，可离线运行',
+      '独立 FFmpeg / FFprobe',
+      '导出状态与日志',
+      '暂无输出文件',
+      '等待导出日志',
+      '前往输出文件夹',
+      '导出位置',
+      '选择导出文件夹',
+      '使用源文件夹',
+      '浏览选择文件夹',
+      '导出文件夹路径',
+      '视频导出名称',
+      '导出格式',
+      'MP4（兼容性最佳）',
+    ]
+
+    for (const label of labels) {
+      expect(translateText(label, 'en-US'), label).not.toMatch(/[\u3400-\u9fff]/)
+    }
+
+    expect(translateText('视频线 1', 'en-US')).toBe('Video Track 1')
+    expect(translateText('音频线 12', 'en-US')).toBe('Audio Track 12')
+    expect(translateText('文本线 3', 'en-US')).toBe('Text Track 3')
+    expect(translateText('正在合并：4.2s / 76.5s', 'en-US')).toBe('Merging: 4.2s / 76.5s')
+    expect(translateText('已折叠较早的 2 条日志', 'en-US')).toBe('Earlier 2 logs collapsed')
+  })
+
   it('translates dynamic list suffixes and multiline confirmation text', () => {
     expect(translateText('- 以及另外 3 个文件', 'en-US')).toBe('- and 3 more files')
 

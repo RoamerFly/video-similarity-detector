@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, CheckCircle2, ChevronDown, FolderOpen, Gauge, Trash2 } from 'lucide-react'
+import { ArrowDown, CheckCircle2, ChevronDown, FolderOpen, Gauge, Pause, Play, Trash2 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { GlassPanel } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
@@ -19,8 +19,9 @@ interface MergeExportStatusProps {
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- exported pure formatter is covered by its focused unit test.
-export function mergeExportCompactText(progress: number, error: string) {
+export function mergeExportCompactText(progress: number, error: string, paused = false) {
   if (error.trim()) return '导出失败'
+  if (paused) return '已暂停'
   if (progress > 0 && progress < 100) return `${progress.toFixed(0)}%`
   if (progress >= 100) return '已完成'
   return '导出'
@@ -45,6 +46,7 @@ export function MergeExportStatus({
     logs,
     clearLogs,
     running,
+    paused,
     setError,
   } = useMergeRuntimeStore(useShallow((state) => ({
     stage: state.stage,
@@ -54,6 +56,7 @@ export function MergeExportStatus({
     logs: state.logs,
     clearLogs: state.clearLogs,
     running: state.running,
+    paused: state.paused,
     setError: state.setError,
   })))
 
@@ -93,7 +96,7 @@ export function MergeExportStatus({
 
   const visibleLogs = logs.slice(-300)
   const hiddenLogCount = Math.max(0, logs.length - visibleLogs.length)
-  const compactText = mergeExportCompactText(progress, error)
+  const compactText = mergeExportCompactText(progress, error, paused)
   const compactLabel = /^\d+(?:\.\d+)?%$/.test(compactText)
     ? `${t('导出')} ${compactText}`
     : t(compactText)
@@ -101,20 +104,43 @@ export function MergeExportStatus({
   return (
     <Translated>
     <GlassPanel ref={panelRef} className={`editor-export-status ${expanded ? 'is-expanded' : 'is-collapsed'}`}>
-      <button
-        type="button"
+      <div
         className="merge-export-pill-head"
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            setExpanded(!expanded)
+          }
+        }}
         aria-expanded={expanded}
         aria-controls="merge-export-status-body"
-        title={expanded ? '收起导出状态和日志' : '展开导出状态和日志'}
+        title={t(expanded ? '收起导出状态和日志' : '展开导出状态和日志')}
       >
         <Gauge />
-        <span>{expanded ? '导出状态与日志' : compactLabel}</span>
-        {expanded && <strong title={stage}>{stage}</strong>}
+        <span>{expanded ? t('导出状态与日志') : compactLabel}</span>
+        {expanded && <strong title={t(stage)}>{t(stage)}</strong>}
         {expanded && <b>{progress.toFixed(2)}%</b>}
+        {running && (
+          <button
+            type="button"
+            className="analysis-capsule-action"
+            title={t(paused ? '继续' : '暂停')}
+            aria-label={t(paused ? '继续' : '暂停')}
+            onClick={(event) => {
+              event.stopPropagation()
+              window.dispatchEvent(new CustomEvent('merge-task-action', {
+                detail: { action: paused ? 'resume' : 'pause' },
+              }))
+            }}
+          >
+            {paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
+          </button>
+        )}
         <ChevronDown className="merge-export-pill-chevron" aria-hidden="true" />
-      </button>
+      </div>
 
       <div className="merge-export-pill-progress" aria-hidden="true">
         <span style={{ width: `${progress}%` }} />
@@ -122,7 +148,7 @@ export function MergeExportStatus({
 
       {expanded && (
         <div id="merge-export-status-body" className="merge-export-pill-body">
-          <div className="merge-export-pill-tabs" role="tablist" aria-label="导出信息">
+          <div className="merge-export-pill-tabs" role="tablist" aria-label={t('导出信息')}>
             <button
               type="button"
               role="tab"
@@ -130,7 +156,7 @@ export function MergeExportStatus({
               className={activeTab === 'progress' ? 'active' : ''}
               onClick={() => setActiveTab('progress')}
             >
-              进度
+              {t('进度')}
             </button>
             <button
               type="button"
@@ -139,7 +165,7 @@ export function MergeExportStatus({
               className={activeTab === 'logs' ? 'active' : ''}
               onClick={() => setActiveTab('logs')}
             >
-              日志 <span>{logs.length}</span>
+              {t('日志')} <span>{logs.length}</span>
             </button>
           </div>
 
@@ -147,19 +173,19 @@ export function MergeExportStatus({
             <div className="merge-export-progress-tab" role="tabpanel">
               <div className="merge-export-progress-summary">
                 <div>
-                  <span>当前阶段</span>
-                  <strong title={stage}>{stage}</strong>
+                  <span>{t('当前阶段')}</span>
+                  <strong title={t(stage)}>{t(stage)}</strong>
                 </div>
                 <b>{progress.toFixed(2)}%</b>
               </div>
               <div className="merge-progress-track"><span style={{ width: `${progress}%` }} /></div>
-              {error && <p className="merge-message error">{error}</p>}
+              {error && <p className="merge-message error">{t(error)}</p>}
               {outputPaths.length > 0 ? (
                 <div className="merge-output-list">
-                  <p><CheckCircle2 />{`${outputPaths.length} 个输出文件已生成`}</p>
+                  <p><CheckCircle2 />{t(`${outputPaths.length} 个输出文件已生成`)}</p>
                   {!running && !error && (
                     <button type="button" className="merge-output-folder-button" onClick={() => void revealOutputFolder()}>
-                      <FolderOpen />前往输出文件夹
+                      <FolderOpen />{t('前往输出文件夹')}
                     </button>
                   )}
                   {outputPaths.map((path) => (
@@ -175,13 +201,13 @@ export function MergeExportStatus({
                   ))}
                 </div>
               ) : (
-                <div className="merge-export-pill-empty">暂无输出文件</div>
+                <div className="merge-export-pill-empty">{t('暂无输出文件')}</div>
               )}
             </div>
           ) : (
             <div className="merge-export-logs-tab" role="tabpanel">
               <div className="merge-export-log-tools">
-                <button type="button" onClick={clearLogs} title="清空日志" aria-label="清空日志">
+                <button type="button" onClick={clearLogs} title={t('清空日志')} aria-label={t('清空日志')}>
                   <Trash2 />
                 </button>
                 <button
@@ -190,14 +216,14 @@ export function MergeExportStatus({
                     const viewport = logsViewportRef.current
                     if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
                   }}
-                  title="滚动到底部"
-                  aria-label="滚动到底部"
+                  title={t('滚动到底部')}
+                  aria-label={t('滚动到底部')}
                 >
                   <ArrowDown />
                 </button>
               </div>
               <div ref={logsViewportRef} className="merge-log-view">
-                {hiddenLogCount > 0 && <div className="merge-export-log-more">已折叠较早的 {hiddenLogCount} 条日志</div>}
+                {hiddenLogCount > 0 && <div className="merge-export-log-more">{t(`已折叠较早的 ${hiddenLogCount} 条日志`)}</div>}
                 {visibleLogs.length > 0
                   ? visibleLogs.map((log, index) => (
                       <div className={log.stream} key={`${log.timestamp}-${index}`}>
@@ -205,7 +231,7 @@ export function MergeExportStatus({
                         [{log.stream}] {log.line}
                       </div>
                     ))
-                  : <div className="merge-export-pill-empty">等待导出日志</div>}
+                  : <div className="merge-export-pill-empty">{t('等待导出日志')}</div>}
               </div>
             </div>
           )}
