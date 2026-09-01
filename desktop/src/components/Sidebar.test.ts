@@ -1,15 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { statusCapsuleRoute } from './Sidebar'
+import { sidebarStatusCapsuleOrder } from './Sidebar'
 
-describe('sidebar status capsule route contract', () => {
-  it('mounts analysis status only on the analysis route', () => {
-    expect(statusCapsuleRoute('/')).toBe('analysis')
-    expect(statusCapsuleRoute('/results')).toBeNull()
-    expect(statusCapsuleRoute('/compare')).toBeNull()
-    expect(statusCapsuleRoute('/settings')).toBeNull()
-  })
-
-  it('keeps the merge status capsule on the merge route', () => {
-    expect(statusCapsuleRoute('/merge')).toBe('merge')
+describe('sidebar status capsule layout contract', () => {
+  it('keeps both task capsules mounted before the centered version footer', () => {
+    expect(sidebarStatusCapsuleOrder).toEqual(['analysis', 'merge', 'version'])
   })
 })

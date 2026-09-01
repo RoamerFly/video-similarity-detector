@@ -13347,9 +13347,11 @@ select {
   position: relative;
   z-index: 510;
   display: flex;
-  margin: auto 0 0 8px;
+  width: 100%;
+  margin: auto 0 0;
   align-items: center;
-  gap: 5px;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .sidebar-version-row > .version-pill {
@@ -13691,5 +13693,29 @@ select {
   .merge-export-status-anchor > .editor-export-status.is-expanded {
     width: min(310px, calc(100vw - 96px));
     height: min(270px, calc(100vh - 24px));
+  }
+}
+
+/* Analysis logs contain separate stdout/stderr views and report links, so
+   their expanded capsule needs more room than the compact merge status tray.
+   Keep the viewport cap at every breakpoint because the capsules are anchored
+   to the bottom of the navigation rail and must remain fully usable in a
+   narrow window. */
+.analysis-export-status-anchor > .editor-export-status.is-expanded {
+  width: min(520px, calc(100vw - 118px));
+  height: min(430px, calc(100vh - 32px));
+}
+
+@media (max-width: 900px) {
+  .analysis-export-status-anchor > .editor-export-status.is-expanded {
+    width: min(480px, calc(100vw - 106px));
+    height: min(400px, calc(100vh - 32px));
+  }
+}
+
+@media (max-width: 560px) {
+  .analysis-export-status-anchor > .editor-export-status.is-expanded {
+    width: min(420px, calc(100vw - 96px));
+    height: min(360px, calc(100vh - 24px));
   }
 }

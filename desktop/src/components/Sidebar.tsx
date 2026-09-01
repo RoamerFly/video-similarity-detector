@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
 import { BarChart3, Clapperboard, Grid2X2, Images, Settings } from 'lucide-react'
 import { AnalysisExportStatus } from '@/components/analysis/AnalysisExportStatus'
 import { MergeExportStatus } from '@/components/merge/MergeExportStatus'
@@ -15,16 +15,14 @@ const navItems = [
   { path: '/settings', label: '设置', icon: Settings },
 ]
 
-// eslint-disable-next-line react-refresh/only-export-components -- route contract is covered by Sidebar.test.ts.
-export function statusCapsuleRoute(pathname: string): 'analysis' | 'merge' | null {
-  if (pathname === '/') return 'analysis'
-  if (pathname === '/merge') return 'merge'
-  return null
-}
+// Keep this order in one place so the footer remains predictable on every route.
+// Both task status components are mounted by Sidebar and continue to reflect
+// their stores while the user visits results, comparison, or settings pages.
+// eslint-disable-next-line react-refresh/only-export-components -- layout contract is covered by Sidebar.test.ts.
+export const sidebarStatusCapsuleOrder = ['analysis', 'merge', 'version'] as const
 
 export function Sidebar() {
   const { t } = useI18n()
-  const location = useLocation()
   const [version, setVersion] = useState('')
 
   useEffect(() => {
@@ -64,17 +62,27 @@ export function Sidebar() {
       </nav>
 
       <div className="sidebar-version-row">
-        <div className="version-pill">{version ? `v${version}` : 'v...'}</div>
-        {statusCapsuleRoute(location.pathname) === 'analysis' && (
-          <div className="merge-export-status-anchor analysis-export-status-anchor">
-            <AnalysisExportStatus />
-          </div>
-        )}
-        {statusCapsuleRoute(location.pathname) === 'merge' && (
-          <div className="merge-export-status-anchor">
-            <MergeExportStatus />
-          </div>
-        )}
+        {sidebarStatusCapsuleOrder.map((capsule) => {
+          if (capsule === 'analysis') {
+            return (
+              <div className="merge-export-status-anchor analysis-export-status-anchor" key={capsule}>
+                <AnalysisExportStatus />
+              </div>
+            )
+          }
+
+          if (capsule === 'merge') {
+            return (
+              <div className="merge-export-status-anchor merge-export-status-anchor-video" key={capsule}>
+                <MergeExportStatus />
+              </div>
+            )
+          }
+
+          return (
+            <div className="version-pill" key={capsule}>{version ? `v${version}` : 'v...'}</div>
+          )
+        })}
       </div>
     </aside>
   )
