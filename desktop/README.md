@@ -34,6 +34,10 @@ cargo check
 .\build-windows.bat
 ```
 
+常规 CPU/GPU 打包入口默认会先清理并重建对应的 `env\python` 或 `env_gpu\python`，
+这样切换 Python 3.10/3.11/3.12/3.13 时不会混用旧版 PyTorch 原生扩展。若确认当前运行环境与本次构建使用的 Python 版本完全一致，
+可显式添加 `-SkipPythonEnv` 复用现有环境。
+
 输出目录：
 
 ```text

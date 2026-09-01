@@ -322,12 +322,21 @@ function Copy-DirectoryContents([string]$Source, [string]$Destination, [string[]
 }
 
 function Copy-PythonExecutableFiles([string]$BasePrefix, [string]$Destination) {
-    foreach ($name in @("python.exe", "pythonw.exe", "python3.dll", "python310.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+    foreach ($name in @("python.exe", "pythonw.exe", "python3.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
         $source = Join-Path $BasePrefix $name
         if (Test-Path $source) {
             Copy-FileIfDifferent $source (Join-Path $Destination $name)
         }
     }
+
+    # Python's versioned runtime DLL changes with every minor release
+    # (python310.dll, python311.dll, python312.dll, ...). Copy whichever
+    # version belongs to the selected interpreter instead of assuming 3.10.
+    Get-ChildItem -LiteralPath $BasePrefix -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^python\d+\.dll$' } |
+        ForEach-Object {
+            Copy-FileIfDifferent $_.FullName (Join-Path $Destination $_.Name)
+        }
 
     $parent = Split-Path $BasePrefix -Parent
     Get-ChildItem -LiteralPath $parent -File -ErrorAction SilentlyContinue | Where-Object {

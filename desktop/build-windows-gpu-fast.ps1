@@ -6,7 +6,8 @@ param(
     [switch]$SkipRuntimeCheck,
     [switch]$NoStopRunningApp,
     [string]$OutputDir = "",
-    [string]$GpuEnvDir = ""
+    [string]$GpuEnvDir = "",
+    [string]$MergeEnvDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -161,7 +162,12 @@ function Ensure-Junction([string]$Path, [string]$Target) {
             }
             throw "Existing junction points elsewhere: $Path -> $currentTarget"
         } else {
-            throw "Refusing to replace a real directory in the quick output: $Path"
+            # A previous full build may have materialized these reusable assets as
+            # real directories in the requested output. Keep them in place rather
+            # than deleting a potentially multi-gigabyte environment; the fast
+            # build can still refresh the EXE and create missing junctions.
+            Write-Host "  - Reusing existing real directory in the output: $Path" -ForegroundColor DarkYellow
+            return
         }
     }
 
@@ -201,6 +207,7 @@ $desktopDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $desktopDir ".."))
 $outputDir = Resolve-AbsolutePath $desktopDir $OutputDir "dist_windows_gpu_quick"
 $gpuEnvDir = Resolve-AbsolutePath $desktopDir $GpuEnvDir "env_gpu"
+$mergeEnvDir = Resolve-AbsolutePath $desktopDir $MergeEnvDir "merge-env"
 $gpuPython = Join-Path $gpuEnvDir "python\python.exe"
 $releaseExe = Join-Path $desktopDir "src-tauri\target\release\video-similarity-desktop.exe"
 $outputExe = Join-Path $outputDir "video-similarity-desktop.exe"
@@ -212,6 +219,7 @@ Write-Host "  Video Similarity - GPU Fast Test Build" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Project root : $repoRoot"
 Write-Host "GPU env      : $gpuEnvDir"
+Write-Host "Merge env    : $mergeEnvDir"
 Write-Host "Test output  : $outputDir"
 
 Write-Step "[1/5] Checking reusable local environment"
@@ -229,14 +237,22 @@ if (-not $SkipRuntimeCheck) {
     } "GPU Python environment check failed."
 }
 
-$ffmpeg = Join-Path $gpuEnvDir "ffmpeg.exe"
-$ffprobe = Join-Path $gpuEnvDir "ffprobe.exe"
+$ffmpeg = Join-Path $mergeEnvDir "ffmpeg.exe"
+$ffprobe = Join-Path $mergeEnvDir "ffprobe.exe"
 if (-not (Test-Path -LiteralPath $ffmpeg) -or -not (Test-Path -LiteralPath $ffprobe)) {
-    Write-Host "  - FFmpeg is missing. It will be downloaded once and reused later." -ForegroundColor Yellow
+    Write-Host "  - Standalone FFmpeg is missing. It will be downloaded once and reused later." -ForegroundColor Yellow
     $prepareFfmpeg = Join-Path $repoRoot "scripts\prepare-ffmpeg-runtime.ps1"
-    & $prepareFfmpeg -DestinationDir $gpuEnvDir
+    if (-not (Test-Path -LiteralPath $prepareFfmpeg)) {
+        throw "FFmpeg preparation script was not found: $prepareFfmpeg"
+    }
+    & $prepareFfmpeg -DestinationDir $mergeEnvDir
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to prepare FFmpeg runtime."
+        throw "Failed to prepare the standalone FFmpeg runtime."
+    }
+}
+foreach ($tool in @($ffmpeg, $ffprobe)) {
+    if (-not (Test-Path -LiteralPath $tool)) {
+        throw "Standalone FFmpeg runtime is incomplete. Missing: $tool"
     }
 }
 
@@ -257,14 +273,6 @@ Stop-TestApp $outputExe
 $overridePath = Join-Path $env:TEMP ("video-similarity-gpu-fast-tauri-{0}-{1}.json" -f $PID, [Guid]::NewGuid().ToString("N"))
 $override = @{
     build = @{ beforeBuildCommand = "" }
-    bundle = @{
-        resources = @(
-            "../../scripts",
-            "../../video_sim",
-            "../../requirements.txt",
-            "../env_gpu"
-        )
-    }
 } | ConvertTo-Json -Depth 5
 Set-Content -LiteralPath $overridePath -Value $override -Encoding ASCII
 try {
@@ -280,7 +288,7 @@ Write-Step "[4/5] Assembling lightweight test directory"
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination $outputExe -Force
 Ensure-Junction (Join-Path $outputDir "env") $gpuEnvDir
-Ensure-Junction (Join-Path $outputDir "merge-env") $gpuEnvDir
+Ensure-Junction (Join-Path $outputDir "merge-env") $mergeEnvDir
 Ensure-Junction (Join-Path $outputDir "scripts") (Join-Path $repoRoot "scripts")
 Ensure-Junction (Join-Path $outputDir "video_sim") (Join-Path $repoRoot "video_sim")
 New-Item -ItemType Directory -Path (Join-Path $outputDir "data\reports") -Force | Out-Null
