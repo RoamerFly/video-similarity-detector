@@ -5062,7 +5062,7 @@ impl MergeLogBatch {
         if self.lines.is_empty() {
             return;
         }
-        let line = self.lines.drain(..).collect::<Vec<_>>().join("\n");
+        let line = std::mem::take(&mut self.lines).join("\n");
         let _ = self.app.emit(
             "merge-log",
             AnalysisLogPayload {
