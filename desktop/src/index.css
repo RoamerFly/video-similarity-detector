@@ -10227,17 +10227,19 @@ select {
 }
 
 .environment-status-inline {
-  display: grid;
+  display: flex;
   min-width: 0;
   align-items: center;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
-  grid-template-areas:
-    "heading python scripts report action"
-    "gpu message message message action";
-  gap: 6px 10px;
-  justify-items: center;
-  overflow: visible;
-  white-space: normal;
+  justify-content: safe center;
+  gap: 7px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.environment-status-inline::-webkit-scrollbar {
+  display: none;
 }
 
 .environment-status-inline > strong,
@@ -10245,28 +10247,19 @@ select {
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 5px;
+  flex: 0 0 auto;
+  gap: 3px;
   color: rgba(222, 235, 255, 0.78);
-  font-size: 11px;
-}
-
-.environment-status-inline > strong {
-  grid-area: heading;
+  font-size: 10px;
+  line-height: 1.2;
 }
 
 .environment-status-inline .environment-status-item {
-  justify-self: stretch;
+  flex: 0 0 auto;
   overflow: visible;
-  overflow-wrap: anywhere;
-  text-align: center;
   text-overflow: clip;
-  white-space: normal;
+  white-space: nowrap;
 }
-
-.environment-status-inline .environment-status-item-1 { grid-area: python; }
-.environment-status-inline .environment-status-item-2 { grid-area: scripts; }
-.environment-status-inline .environment-status-item-3 { grid-area: report; }
-.environment-status-inline .environment-status-item-4 { grid-area: gpu; }
 
 .environment-status-inline > span.is-failed {
   color: rgba(255, 178, 196, 0.94);
@@ -10281,18 +10274,14 @@ select {
 }
 
 .environment-inline-message {
-  grid-area: message;
-  justify-self: stretch;
+  flex: 0 0 auto;
   overflow: visible;
-  overflow-wrap: anywhere;
-  text-align: center;
   text-overflow: clip;
-  white-space: normal;
+  white-space: nowrap;
 }
 
 .environment-status-inline .neon-button {
-  grid-area: action;
-  grid-row: 1 / span 2;
+  flex: 0 0 auto;
   min-height: 28px;
   padding-inline: 9px;
   font-size: 11px;
@@ -11050,10 +11039,14 @@ select {
 }
 
 @media (max-width: 980px) {
-  .settings-tab-toolbar,
-  .environment-status-inline {
+  .settings-tab-toolbar {
     align-items: stretch;
     flex-wrap: wrap;
+  }
+
+  .environment-status-inline {
+    align-items: center;
+    flex-wrap: nowrap;
   }
 
   .settings-fixed-actions {
@@ -13409,6 +13402,7 @@ select {
 
 .app-frame .app-sidebar {
   z-index: 500;
+  padding-bottom: 0;
   overflow: visible;
 }
 
@@ -13446,8 +13440,8 @@ select {
 .merge-export-status-anchor {
   position: relative;
   z-index: 520;
-  width: 190px;
-  min-width: 190px;
+  width: 143px;
+  min-width: 143px;
   height: 32px;
   flex: 0 0 32px;
   overflow: visible;
@@ -13459,7 +13453,7 @@ select {
   bottom: 0;
   left: 0;
   display: flex;
-  width: 190px;
+  width: 143px;
   height: 32px;
   min-width: 0;
   max-height: calc(100vh - 24px);
@@ -13511,6 +13505,10 @@ select {
 
 .editor-export-status.analysis-export-status.is-collapsed .merge-export-pill-head {
   grid-template-columns: 15px minmax(0, 1fr) max-content 14px;
+}
+
+.editor-export-status.analysis-export-status .merge-export-pill-chevron {
+  grid-column: -2 / -1;
 }
 
 .editor-export-status.analysis-export-status.is-expanded .merge-export-pill-head {
