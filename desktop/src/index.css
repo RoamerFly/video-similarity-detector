@@ -13279,6 +13279,22 @@ select {
   flex-shrink: 0;
 }
 
+/* Keep the page-size select legible when the browser opens its native menu.
+   The compact control intentionally sits on a dark translucent panel, but the
+   shared select rule's transparent background lets some native themes fall
+   back to white while retaining the light text color. Scope both the control
+   and its options to Results pagination so other selects keep their themes. */
+.results-page.route-fill .pagination-row .page-size-control .design-select {
+  color: var(--text);
+  background-color: rgba(6, 17, 43, 0.92);
+  color-scheme: dark;
+}
+
+.results-page.route-fill .pagination-row .page-size-control .design-select option {
+  color: var(--text);
+  background-color: #071534;
+}
+
 /* 窄窗口（≤980px）下不再把分页压成整块纵向堆叠（那会把「每页」挤到单独
    一行、看起来是竖排），改为横向换行：各控件保持一行内的横排，放不下时
    整组换到下一行。 */
