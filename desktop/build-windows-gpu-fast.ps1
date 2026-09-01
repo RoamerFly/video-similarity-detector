@@ -205,7 +205,7 @@ function Install-FrontendDependencies([string]$DesktopDir) {
 
 $desktopDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $desktopDir ".."))
-$outputDir = Resolve-AbsolutePath $desktopDir $OutputDir "dist_windows_gpu_quick"
+$outputDir = Resolve-AbsolutePath $desktopDir $OutputDir "dist_windows_gpu"
 $gpuEnvDir = Resolve-AbsolutePath $desktopDir $GpuEnvDir "env_gpu"
 $mergeEnvDir = Resolve-AbsolutePath $desktopDir $MergeEnvDir "merge-env"
 $gpuPython = Join-Path $gpuEnvDir "python\python.exe"

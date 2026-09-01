@@ -78,4 +78,4 @@ dist_windows/
 .\build-windows-gpu-fast.ps1 -SkipFrontendBuild
 ```
 
-也可以双击 `build-windows-gpu-fast.bat`。默认输出到 `dist_windows_gpu_quick/`，其中 `env`、`scripts` 和 `video_sim` 使用目录链接复用本地现有内容，不会再次复制完整 CUDA/Python 环境。构建后运行 `run-gpu-test.bat` 即可。该目录仅用于本机快速测试，不适合发送给其他电脑。
+也可以双击 `build-windows-gpu-fast.bat`。默认输出到 `dist_windows_gpu/`，其中 `env`、`merge-env`、`scripts` 和 `video_sim` 使用目录链接或已有目录复用本地环境，不会再次复制完整 CUDA/Python 环境。构建后运行 `run-gpu-test.bat` 即可。该目录仅用于本机快速测试，不适合发送给其他电脑。
