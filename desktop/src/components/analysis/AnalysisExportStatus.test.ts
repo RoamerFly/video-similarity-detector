@@ -13,4 +13,8 @@ describe('analysis export capsule state', () => {
     expect(analysisExportCompactText(99, 'running', '')).toBe('99%')
     expect(analysisExportCompactText(0, 'running', '')).toBe('分析中')
   })
+
+  it('shows a pausing state before the backend process has stopped', () => {
+    expect(analysisExportCompactText(47, 'running', '', true)).toBe('正在暂停')
+  })
 })

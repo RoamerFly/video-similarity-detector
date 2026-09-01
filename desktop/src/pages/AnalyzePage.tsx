@@ -91,6 +91,7 @@ import {
   analysisTaskStatusLabel,
   canStartAnalysisStage,
   formatStageElapsed,
+  selectAnalysisTask,
   shouldWaitForAnalysisTaskShutdown,
 } from '@/utils/analysisTask'
 
@@ -176,6 +177,7 @@ export function AnalyzePage() {
   const { t, tm } = useI18n()
   const {
     runningStatus,
+    pausePending,
     progress,
     stage,
     subProgress,
@@ -189,6 +191,7 @@ export function AnalyzePage() {
     activeTaskId,
     setAnalysisConfig,
     setRunningStatus,
+    setPausePending,
     setProgress,
     setScannedVideos,
     setScanMessage,
@@ -239,7 +242,7 @@ export function AnalyzePage() {
   const [taskLoadDialogOpen, setTaskLoadDialogOpen] = useState(false)
   const historyRefreshInFlight = useRef(false)
   const isRunning = runningStatus === 'running'
-  const isBusy = isRunning || isPreparing
+  const isBusy = isRunning || pausePending || isPreparing
   const isDuplicateFileMode = settings.analysisMode === 'duplicate_file'
   const pairCount = !isDuplicateFileMode && videos.length > 1 ? (videos.length * (videos.length - 1)) / 2 : 0
   const activeHistoryTask = historyTasks.find((task) => task.id === activeTaskId) ?? null
@@ -249,7 +252,9 @@ export function AnalyzePage() {
     () => displayedTask ? analysisTaskStages(displayedTask) : [],
     [displayedTask],
   )
-  const progressValue = displayedTask ? clampPercent(displayedTask.progress) : (isRunning ? clampPercent(progress) : 0)
+  const progressValue = pausePending || (runningStatus === 'paused' && Boolean(activeTaskId))
+    ? clampPercent(progress)
+    : displayedTask ? clampPercent(displayedTask.progress) : (isRunning ? clampPercent(progress) : 0)
   const progressLabel = formatPercent(progressValue)
   const elapsedLabel = displayedTask
     ? formatTaskStagesElapsed(displayedStages, clockNow)
@@ -258,7 +263,7 @@ export function AnalyzePage() {
     () => isRunning ? buildSubTaskDetail(subStage, subProgress) ?? parseStageDetail(stage) : null,
     [isRunning, stage, subProgress, subStage],
   )
-  const statusTitle = displayedTask?.stage || (isRunning ? stage : '')
+  const statusTitle = pausePending ? '正在暂停分析任务' : displayedTask?.stage || (isRunning ? stage : '')
   const currentTaskName = displayedTask
     ? displayTaskName(displayedTask)
     : pendingTaskDraft
@@ -634,18 +639,33 @@ export function AnalyzePage() {
       return
     }
     setErrorMessage('')
+    if (!settings.cacheDir.trim()) {
+      const message = '请先到设置页配置缓存目录。'
+      setErrorMessage(message)
+      setScanMessage(message)
+      return
+    }
     await refreshHistoryTasks(true)
     setTaskLoadDialogOpen(true)
   }
 
   async function handleLoadExistingTask(summaryTask: AnalysisTaskRecord) {
+    setIsPreparing(true)
+    setErrorMessage('')
+    setProgress(summaryTask.progress, '正在读取任务配置', { subProgress: null, subStage: '' })
+    setScanMessage(`正在读取任务：${displayTaskName(summaryTask)}...`)
     let task = summaryTask
     try {
       task = await getAnalysisTask(summaryTask.id, useSettingsStore.getState().cacheDir, useSettingsStore.getState().projectRoot)
-    } catch (e) {
-      console.error('Failed to load full task', e)
+    } catch (error) {
+      const message = normalizeBackendError(error)
+      setErrorMessage(`读取任务失败：${message}`)
+      setScanMessage(`读取任务失败：${message}`)
+      setIsPreparing(false)
+      return
     }
-    
+    setIsPreparing(false)
+    setHistoryTasks((current) => [task, ...current.filter((item) => item.id !== task.id)])
     const defaults = buildRunBatchCompareConfig(
       useSettingsStore.getState(),
       analysisConfigFromSettings(useSettingsStore.getState()),
@@ -657,11 +677,17 @@ export function AnalyzePage() {
     setLoadedTaskId(task.id)
     setActiveTaskId('')
     setActiveRunId(null)
+    setPausePending(false)
     setActiveTaskConfig(null)
     setPendingTaskDraft(null)
     setTaskCreateDialogOpen(false)
     setTaskLoadDialogOpen(false)
     setRunningStatus('idle')
+    clearLogs()
+    setReportPaths(null)
+    setReport(null)
+    setResultSummary(null)
+    setProgress(task.progress, task.stage || '任务已读取', { subProgress: null, subStage: '' })
     setAnalysisConfig({
       videoDir: taskConfig.videoDir,
       outputDir: taskConfig.outputDir,
@@ -767,24 +793,50 @@ export function AnalyzePage() {
   }
 
   async function handlePause() {
-    if (!activeTaskId) return
+    if (!activeTaskId || pausePending || runningStatus !== 'running') return
     const activeTask = historyTasks.find((task) => task.id === activeTaskId)
     const cacheDir = activeTask?.config?.cacheDir || settings.cacheDir
     const projectRoot = activeTask?.config?.projectRoot || settings.projectRoot
+    const pauseProgress = progress
+    const pauseStage = stage
+    let cancellationRequested = false
+    setPausePending(true, pauseProgress, '正在暂停分析任务')
     try {
       await cancelCurrentTask()
+      cancellationRequested = true
+      useAnalysisStore.getState().setPausePending(true, pauseProgress, '正在等待分析任务安全停止')
+      await waitForAnalysisTaskShutdown()
+      const stoppedProgress = useAnalysisStore.getState().progress
       await updateAnalysisTask(activeTaskId, cacheDir, projectRoot, {
         status: 'paused',
         stage: '任务已暂停，可从任务列表继续',
-        progress,
+        progress: stoppedProgress,
       })
       appendLog({ stream: 'stderr', line: '已请求暂停分析，正在等待当前步骤安全停止。', timestamp: Date.now() })
+      setPausePending(false)
       setRunningStatus('paused')
-      setProgress(progress, '任务已暂停')
+      setProgress(stoppedProgress, '任务已暂停')
       setErrorMessage('')
       await refreshHistoryTasks()
     } catch (error) {
-      setErrorMessage(normalizeBackendError(error))
+      const message = normalizeBackendError(error)
+      const latest = useAnalysisStore.getState()
+      setPausePending(false)
+      if (cancellationRequested) {
+        setRunningStatus('paused')
+        setProgress(latest.progress, '任务仍处于暂停状态，可稍后继续')
+        setErrorMessage('')
+        appendLog({ stream: 'stderr', line: message, timestamp: Date.now() })
+        await updateAnalysisTask(activeTaskId, cacheDir, projectRoot, {
+          status: 'paused',
+          stage: '任务已暂停，可从任务列表继续',
+          progress: latest.progress,
+        }).catch(() => undefined)
+      } else {
+        setRunningStatus('running')
+        setProgress(pauseProgress, pauseStage)
+        setErrorMessage(message)
+      }
     }
   }
 
@@ -797,7 +849,7 @@ export function AnalyzePage() {
       useSettingsStore.getState(),
       analysisConfigFromSettings(useSettingsStore.getState()),
     )
-    const taskConfig: RunBatchCompareConfig = {
+    let taskConfig: RunBatchCompareConfig = {
       ...defaults,
       ...task.config,
       taskId: task.id,
@@ -819,6 +871,39 @@ export function AnalyzePage() {
     // running/preparing or clearing logs.  Otherwise an immediate continue
     // races with the previous process and is rejected as "already running".
     if (shouldWaitForAnalysisTaskShutdown(task.status, useAnalysisStore.getState().runningStatus)) {
+      try {
+        task = await getAnalysisTask(task.id, taskConfig.cacheDir, taskConfig.projectRoot)
+        setHistoryTasks((current) => [task, ...current.filter((item) => item.id !== task.id)])
+        taskConfig = {
+          ...defaults,
+          ...(task.config ?? {}),
+          taskId: task.id,
+          runId: taskConfig.runId,
+        }
+      } catch (error) {
+        const message = normalizeBackendError(error)
+        setErrorMessage('')
+        setProgress(task.progress, '任务仍处于暂停状态，可稍后继续')
+        appendLog({ stream: 'stderr', line: `读取暂停任务失败：${message}`, timestamp: Date.now() })
+        await updateAnalysisTask(task.id, taskConfig.cacheDir, taskConfig.projectRoot, {
+          status: 'paused',
+          stage: '任务已暂停，可从任务列表继续',
+          progress: task.progress,
+        }).catch(() => undefined)
+        return
+      }
+      if (!taskConfig.videoDir || !taskConfig.cacheDir) {
+        const message = '该任务缺少运行配置，无法继续。'
+        setErrorMessage('')
+        setProgress(task.progress, '任务仍处于暂停状态，可稍后继续')
+        appendLog({ stream: 'stderr', line: message, timestamp: Date.now() })
+        await updateAnalysisTask(task.id, taskConfig.cacheDir, taskConfig.projectRoot, {
+          status: 'paused',
+          stage: '任务已暂停，可从任务列表继续',
+          progress: task.progress,
+        }).catch(() => undefined)
+        return
+      }
       const pausedProgress = task.progress
       setProgress(pausedProgress, '正在等待上一次分析任务安全停止', {
         subProgress: null,
@@ -1268,10 +1353,21 @@ export function AnalyzePage() {
               <RefreshCw size={20} className={isScanning ? 'spin-slow' : undefined} />
               {isScanning ? '扫描中' : '扫描视频'}
             </NeonButton>
-            {isRunning && activeTaskId ? (
-              <NeonButton className="start-analysis-button compact" tone="red" onClick={() => void handlePause()}>
-                <Square size={21} fill="currentColor" />
-                暂停任务
+            {activeTaskId && (isRunning || runningStatus === 'paused') ? (
+              <NeonButton
+                className="start-analysis-button compact"
+                tone={runningStatus === 'running' ? 'red' : undefined}
+                disabled={pausePending || (runningStatus === 'paused' && !activeHistoryTask)}
+                onClick={() => {
+                  if (runningStatus === 'paused') {
+                    if (activeHistoryTask) void handleRunTask(activeHistoryTask)
+                  } else {
+                    void handlePause()
+                  }
+                }}
+              >
+                {pausePending ? <RefreshCw size={21} className="spin-slow" /> : runningStatus === 'paused' ? <Play size={22} fill="currentColor" /> : <Square size={21} fill="currentColor" />}
+                {pausePending ? '正在暂停' : runningStatus === 'paused' ? '继续任务' : '暂停任务'}
               </NeonButton>
             ) : (
               <NeonButton className="start-analysis-button compact" onClick={() => void handleCreateTask()} disabled={isPreparing || isScanning}>
@@ -1369,7 +1465,7 @@ export function AnalyzePage() {
           {historyTasks.length ? (
             <div className="analysis-history-list">
               {historyTasks.map((task) => {
-                const isActive = task.id === activeTaskId && isRunning
+                const isActive = task.id === activeTaskId && (isRunning || pausePending)
                 const isLiveTask = task.status === 'running' || task.status === 'preparing'
                 const canRun = !isActive && task.status !== 'completed'
                 return (
@@ -1402,9 +1498,9 @@ export function AnalyzePage() {
                         详情
                       </NeonButton>
                       {isActive ? (
-                        <NeonButton variant="outline" tone="red" type="button" onClick={() => void handlePause()}>
-                          <Pause size={16} />
-                          暂停
+                        <NeonButton variant="outline" tone="red" type="button" disabled={pausePending} onClick={() => void handlePause()}>
+                          {pausePending ? <RefreshCw size={16} className="spin-slow" /> : <Pause size={16} />}
+                          {pausePending ? '正在暂停' : '暂停'}
                         </NeonButton>
                       ) : canRun ? (
                         <NeonButton variant="outline" type="button" disabled={isBusy} onClick={() => void handleRunTask(task)}>
@@ -1676,13 +1772,13 @@ function TaskLoadDialog({
   useEffect(() => {
     if (!open) return undefined
     const timer = window.setTimeout(() => {
-      setDraftTaskId(selectedTaskId || tasks[0]?.id || '')
+      setDraftTaskId(selectAnalysisTask(tasks, selectedTaskId)?.id || '')
     }, 0)
     return () => window.clearTimeout(timer)
   }, [open, selectedTaskId, tasks])
 
   if (!open) return null
-  const selectedTask = tasks.find((task) => task.id === draftTaskId) ?? null
+  const selectedTask = selectAnalysisTask(tasks, draftTaskId)
 
   return createPortal(
     <Translated>

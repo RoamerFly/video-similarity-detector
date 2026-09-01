@@ -79,17 +79,22 @@ export function AppLayout() {
       const taskId = store.activeTaskId
       const taskConfig = store.activeTaskConfig
       if (!taskId || !taskConfig) return
-      if (action === 'pause' && store.runningStatus !== 'running') return
+      if (action === 'pause' && (store.runningStatus !== 'running' || store.pausePending)) return
       if (action === 'resume' && store.runningStatus !== 'paused') return
 
       let cancellationRequested = false
+      let pauseProgress = store.progress
+      let pauseStage = store.stage
       analysisActionInFlight.current = true
       try {
         if (action === 'pause') {
+          const pendingPause = useAnalysisStore.getState()
+          pauseProgress = pendingPause.progress
+          pauseStage = pendingPause.stage
+          pendingPause.setPausePending(true, pauseProgress, '正在暂停分析任务')
           await cancelCurrentTask()
           cancellationRequested = true
-          const pendingPause = useAnalysisStore.getState()
-          pendingPause.setProgress(pendingPause.progress, '正在等待分析任务安全停止')
+          useAnalysisStore.getState().setPausePending(true, pauseProgress, '正在等待分析任务安全停止')
           await waitForAnalysisTaskShutdown()
           const stoppedProgress = useAnalysisStore.getState().progress
           await updateAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot, {
@@ -103,6 +108,7 @@ export function AppLayout() {
             line: '已请求暂停分析，正在等待当前步骤安全停止。',
             timestamp: Date.now(),
           })
+          latest.setPausePending(false)
           latest.setRunningStatus('paused')
           latest.setProgress(latest.progress, '任务已暂停')
           latest.setErrorMessage('')
@@ -167,8 +173,13 @@ export function AppLayout() {
         })
       } catch (error) {
         const latest = useAnalysisStore.getState()
-        if (action === 'resume' || cancellationRequested) {
-          const message = normalizeBackendError(error)
+        const message = normalizeBackendError(error)
+        if (action === 'pause' && !cancellationRequested) {
+          latest.setPausePending(false)
+          latest.setRunningStatus('running')
+          latest.setProgress(pauseProgress, pauseStage)
+          latest.setErrorMessage(message)
+        } else if (action === 'resume' || cancellationRequested) {
           latest.setRunningStatus('paused')
           latest.setErrorMessage('')
           latest.setProgress(latest.progress, '任务仍处于暂停状态，可稍后继续')
@@ -181,7 +192,6 @@ export function AppLayout() {
             }).catch(() => undefined)
           }
         } else {
-          const message = normalizeBackendError(error)
           latest.setRunningStatus('error')
           latest.setErrorMessage(message)
           await updateAnalysisTask(taskId, taskConfig.cacheDir, taskConfig.projectRoot, {
@@ -405,11 +415,12 @@ export function AppLayout() {
         store.appendLog(payload)
       },
       onProgress: (payload) => {
-        if (!useAnalysisStore.getState().activeTaskId) return
+        const store = useAnalysisStore.getState()
+        if (!store.activeTaskId || store.pausePending) return
         const subTask = payload.subProgress != null || payload.subStage
           ? { subProgress: payload.subProgress ?? null, subStage: payload.subStage ?? '' }
           : undefined
-        useAnalysisStore.getState().setProgress(payload.progress, payload.stage, subTask)
+        store.setProgress(payload.progress, payload.stage, subTask)
       },
       onVideoQuarantined: (payload) => {
         const store = useAnalysisStore.getState()
@@ -418,7 +429,7 @@ export function AppLayout() {
       },
       onFinished: (payload) => {
         const store = useAnalysisStore.getState()
-        if (!store.activeTaskId) return
+        if (!store.activeTaskId || store.pausePending) return
         store.setReportPaths(payload)
         store.setRunningStatus('success')
         store.setProgress(100, '分析完成', { subProgress: 100, subStage: '当前子任务完成' })
@@ -427,7 +438,7 @@ export function AppLayout() {
       },
       onStageFinished: () => {
         const store = useAnalysisStore.getState()
-        if (!store.activeTaskId) return
+        if (!store.activeTaskId || store.pausePending) return
         store.setRunningStatus('paused')
         store.setProgress(store.progress, '当前阶段已完成，可继续下一阶段', {
           subProgress: 100,
@@ -441,6 +452,7 @@ export function AppLayout() {
         const store = useAnalysisStore.getState()
         if (!store.activeTaskId) return
         if (!shouldAcceptAnalysisEvent(store.activeRunId, payload.runId)) return
+        if (store.pausePending) return
         store.setRunningStatus(cancelled ? 'paused' : 'error')
         store.setErrorMessage(cancelled ? '' : friendlyMessage)
         store.setProgress(cancelled ? store.progress : 100, cancelled ? '任务已暂停' : '分析失败')

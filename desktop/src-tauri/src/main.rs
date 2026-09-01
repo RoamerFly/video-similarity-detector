@@ -4821,7 +4821,6 @@ fn cancel_current_task(
                 timestamp: timestamp_millis(),
             },
         );
-        emit_progress(&app, "正在取消分析任务", 1.0);
         return Ok(());
     };
 
@@ -4834,7 +4833,6 @@ fn cancel_current_task(
             timestamp: timestamp_millis(),
         },
     );
-    emit_progress(&app, "正在取消分析任务", 1.0);
     spawn_cancel_watchdog(app, pid);
     Ok(())
 }

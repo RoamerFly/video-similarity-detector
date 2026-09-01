@@ -22,6 +22,7 @@ export interface ReportPaths {
 interface AnalysisState {
   analysisConfig: AnalysisConfig
   runningStatus: RunningStatus
+  pausePending: boolean
   progress: number
   stage: string
   subProgress: number | null
@@ -48,6 +49,7 @@ interface AnalysisState {
   activeSubpage: 'analysis' | 'history'
   setAnalysisConfig: (config: Partial<AnalysisConfig>) => void
   setRunningStatus: (status: RunningStatus) => void
+  setPausePending: (pending: boolean, progress?: number, stage?: string) => void
   setProgress: (progress: number, stage?: string, subTask?: { subProgress?: number | null; subStage?: string | null }) => void
   setScannedVideos: (videos: VideoFile[], scannedDir: string) => void
   quarantineScannedVideo: (originalPath: string, destinationPath: string, moved: boolean) => void
@@ -140,6 +142,7 @@ const initialAnalysisConfig: AnalysisConfig = {
 export const useAnalysisStore = create<AnalysisState>((set) => ({
   analysisConfig: initialAnalysisConfig,
   runningStatus: 'idle',
+  pausePending: false,
   progress: 0,
   stage: '尚未运行分析',
   subProgress: null,
@@ -182,14 +185,29 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       if (['paused', 'success', 'error', 'cancelled'].includes(runningStatus)) {
         return {
           runningStatus,
+          pausePending: false,
           runFinishedAt: state.runStartedAt ? Date.now() : state.runFinishedAt,
         }
       }
 
       return { runningStatus }
     }),
+  setPausePending: (pausePending, progress, stage = '正在暂停分析任务') =>
+    set((state) => pausePending
+      ? {
+          pausePending: true,
+          progress: progress === undefined ? state.progress : normalizeProgress(progress),
+          stage,
+          subProgress: null,
+          subStage: '',
+        }
+      : { pausePending: false }),
   setProgress: (progress, stage, subTask) =>
     set((state) => {
+      // cancel_current_task and the old Python worker can still emit progress
+      // while the process tree is unwinding. Keep the value captured when the
+      // user clicked pause until the shutdown boundary is confirmed.
+      if (state.pausePending) return state
       const hasSubProgress = subTask ? Object.prototype.hasOwnProperty.call(subTask, 'subProgress') : false
       const hasSubStage = subTask ? Object.prototype.hasOwnProperty.call(subTask, 'subStage') : false
       return {
@@ -275,6 +293,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     pendingLogsTotal = 0
     set({
       runningStatus: 'idle',
+      pausePending: false,
       progress: 0,
       stage: '尚未运行分析',
       subProgress: null,

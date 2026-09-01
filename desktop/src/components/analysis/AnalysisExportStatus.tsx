@@ -19,7 +19,9 @@ export function analysisExportCompactText(
   progress: number,
   runningStatus: RunningStatus,
   errorMessage: string,
+  pausePending = false,
 ) {
+  if (pausePending) return '正在暂停'
   if (errorMessage.trim() || runningStatus === 'error') return '分析失败'
   if (runningStatus === 'cancelled') return '已取消'
   if (runningStatus === 'success') return '已完成'
@@ -75,6 +77,7 @@ export function AnalysisExportStatus({
   const logsViewportRef = useRef<HTMLDivElement>(null)
   const {
     runningStatus,
+    pausePending,
     progress,
     stage,
     subProgress,
@@ -88,6 +91,7 @@ export function AnalysisExportStatus({
     setErrorMessage,
   } = useAnalysisStore(useShallow((state) => ({
     runningStatus: state.runningStatus,
+    pausePending: state.pausePending,
     progress: state.progress,
     stage: state.stage,
     subProgress: state.subProgress,
@@ -113,11 +117,13 @@ export function AnalysisExportStatus({
   const visibleLogs = logSummary[logView]
   const renderedLogs = visibleLogs.slice(-500)
   const reportEntries = analysisReportEntries(reportPaths)
-  const compactText = analysisExportCompactText(progress, runningStatus, errorMessage)
+  const compactText = analysisExportCompactText(progress, runningStatus, errorMessage, pausePending)
   const compactLabel = isPercentageStatus(compactText)
     ? `${t('分析')} ${compactText}`
     : t(compactText)
-  const statusLabel = errorMessage.trim()
+  const statusLabel = pausePending
+    ? t('正在暂停分析任务')
+    : errorMessage.trim()
     ? errorMessage
     : runningStatus === 'success'
       ? t('分析完成')
@@ -199,8 +205,9 @@ export function AnalysisExportStatus({
             <button
               type="button"
               className="analysis-capsule-action"
-              title={runningStatus === 'running' ? '暂停' : '继续'}
-              aria-label={runningStatus === 'running' ? '暂停' : '继续'}
+              disabled={pausePending}
+              title={pausePending ? '正在暂停' : runningStatus === 'running' ? '暂停' : '继续'}
+              aria-label={pausePending ? '正在暂停' : runningStatus === 'running' ? '暂停' : '继续'}
               onClick={(event) => {
                 event.stopPropagation()
                 window.dispatchEvent(new CustomEvent('analysis-task-action', {

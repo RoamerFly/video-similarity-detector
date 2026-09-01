@@ -39,6 +39,10 @@ export function shouldWaitForAnalysisTaskShutdown(taskStatus: string, runningSta
   return taskStatus === 'paused' || runningStatus === 'paused'
 }
 
+export function selectAnalysisTask(tasks: AnalysisTaskRecord[], selectedTaskId: string) {
+  return tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null
+}
+
 export function analysisTaskStages(task: AnalysisTaskRecord): AnalysisTaskStage[] {
   const current = new Map((task.stages ?? []).map((stage) => [stage.id, stage]))
   return analysisTaskStageDefinitions.map((definition) => ({
