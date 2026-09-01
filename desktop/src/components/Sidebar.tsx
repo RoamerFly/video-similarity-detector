@@ -21,9 +21,22 @@ const navItems = [
 // eslint-disable-next-line react-refresh/only-export-components -- layout contract is covered by Sidebar.test.ts.
 export const sidebarStatusCapsuleOrder = ['analysis', 'merge', 'version'] as const
 
+type ExpandedSidebarCapsule = Exclude<(typeof sidebarStatusCapsuleOrder)[number], 'version'>
+
+// Keep the transition in one place so changing capsules always closes the
+// previously expanded one, including when both controls are mounted together.
+// eslint-disable-next-line react-refresh/only-export-components -- pure state transition is covered by Sidebar.test.ts.
+export function toggleSidebarStatusCapsule(
+  current: ExpandedSidebarCapsule | null,
+  target: ExpandedSidebarCapsule,
+): ExpandedSidebarCapsule | null {
+  return current === target ? null : target
+}
+
 export function Sidebar() {
   const { t } = useI18n()
   const [version, setVersion] = useState('')
+  const [expandedCapsule, setExpandedCapsule] = useState<ExpandedSidebarCapsule | null>(null)
 
   useEffect(() => {
     let active = true
@@ -66,7 +79,14 @@ export function Sidebar() {
           if (capsule === 'analysis') {
             return (
               <div className="merge-export-status-anchor analysis-export-status-anchor" key={capsule}>
-                <AnalysisExportStatus />
+                <AnalysisExportStatus
+                  expanded={expandedCapsule === capsule}
+                  onExpandedChange={(nextExpanded) => {
+                    setExpandedCapsule((current) => nextExpanded
+                      ? toggleSidebarStatusCapsule(current, capsule)
+                      : current === capsule ? null : current)
+                  }}
+                />
               </div>
             )
           }
@@ -74,7 +94,14 @@ export function Sidebar() {
           if (capsule === 'merge') {
             return (
               <div className="merge-export-status-anchor merge-export-status-anchor-video" key={capsule}>
-                <MergeExportStatus />
+                <MergeExportStatus
+                  expanded={expandedCapsule === capsule}
+                  onExpandedChange={(nextExpanded) => {
+                    setExpandedCapsule((current) => nextExpanded
+                      ? toggleSidebarStatusCapsule(current, capsule)
+                      : current === capsule ? null : current)
+                  }}
+                />
               </div>
             )
           }

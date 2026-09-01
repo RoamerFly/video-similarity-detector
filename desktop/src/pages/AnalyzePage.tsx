@@ -1159,7 +1159,7 @@ export function AnalyzePage() {
   return (
     <Translated>
     <div className="route-fill analyze-workspace">
-      <div className="analysis-page-content">
+      <div className={`analysis-page-content ${activeSubpage === 'analysis' ? 'is-analysis-page' : 'is-history-page'}`}>
         <div className="analysis-subpage-tabs" role="tablist" aria-label={t('分析任务页面')}>
           <button type="button" className={activeSubpage === 'analysis' ? 'active' : ''} onClick={() => setActiveSubpage('analysis')}>
             <Film size={17} />

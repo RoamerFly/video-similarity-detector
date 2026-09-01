@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { FolderOpen, GitBranch } from 'lucide-react'
@@ -9,6 +9,10 @@ import { WindowControls } from '@/components/WindowControls'
 import { useI18n } from '@/i18n/useI18n'
 import {
   closeWindow,
+  checkForUpdates,
+  checkPythonEnv,
+  getAppInfo,
+  hasTauriRuntime,
   getFileMoveStatus,
   listenAnalysisEvents,
   listenAppCloseRequested,
@@ -20,21 +24,33 @@ import {
   setCloseBehavior,
   type FileMoveStatus,
   type MergeProgressPayload,
+  type AppInfo,
+  type UpdateInfo,
 } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
 import type { AnalysisLog } from '@/stores/analysisStore'
 import { shouldAcceptMergeProgress } from '@/components/merge/mergeEventPolicy'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useEnvironmentStore } from '@/stores/environmentStore'
 import type { CloseBehavior } from '@/types/config'
 import appIcon from '../../icon.png'
+
+// Keep the update UI out of the initial route bundle.  The dialog is shared
+// with SettingsPage, but startup checks must be able to surface it from any
+// route (including the analysis page).
+const StartupUpdateDialog = lazy(() => import('@/pages/SettingsPage').then((module) => ({ default: module.UpdateDialog })))
 
 export function AppLayout() {
   const location = useLocation()
   const navigate = useNavigate()
   const appliedStartupWindowState = useRef(false)
+  const startupChecksStarted = useRef(false)
   const [closeDialogOpen, setCloseDialogOpen] = useState(false)
   const [rememberCloseChoice, setRememberCloseChoice] = useState(false)
+  const [startupAppInfo, setStartupAppInfo] = useState<AppInfo | null>(null)
+  const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null)
+  const [startupUpdateDialogOpen, setStartupUpdateDialogOpen] = useState(false)
   const reportDir = useSettingsStore((state) => state.reportDir)
   const closeBehavior = useSettingsStore((state) => state.closeBehavior)
   const { t, tm } = useI18n()
@@ -95,6 +111,74 @@ export function AppLayout() {
     if (!useSettingsStore.getState().openMaximized) return
 
     void maximizeWindow().catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    if (startupChecksStarted.current) return
+    startupChecksStarted.current = true
+    if (!hasTauriRuntime()) return
+
+    // Application updates are checked in the background and remain silent
+    // when the installed version is current or the release metadata is
+    // unavailable.  Only a positive result opens the existing dialog.
+    void checkForUpdates(useSettingsStore.getState().networkProxy)
+      .then((update) => {
+        if (!update.updateAvailable) return
+        setStartupUpdate(update)
+        setStartupUpdateDialogOpen(true)
+      })
+      .catch(() => undefined)
+
+    void (async () => {
+      // Resolve and hydrate the app defaults before probing.  Empty/default
+      // paths are valid backend inputs, but using the resolved paths here
+      // keeps the stored result aligned with what SettingsPage displays.
+      try {
+        const info = await getAppInfo()
+        setStartupAppInfo(info)
+        useSettingsStore.getState().hydrateAppDefaults({
+          projectRoot: info.projectRoot,
+          videoDir: info.defaultVideoDir,
+          cacheDir: info.defaultCacheDir,
+          reportDir: info.defaultOutputDir,
+        })
+      } catch {
+        // The environment command can resolve its own project root when
+        // app metadata is unavailable, so continue with persisted settings.
+      }
+
+      const settings = useSettingsStore.getState()
+      const environmentConfigKey = buildEnvironmentConfigKey(settings.pythonPath, settings.projectRoot, settings.reportDir)
+      const environmentStore = useEnvironmentStore.getState()
+      environmentStore.setChecking(true)
+      environmentStore.setError('')
+
+      // Run the full probe once per application process.  In particular,
+      // quickCheck must stay false here so the GPU/CUDA probe is not deferred
+      // until the user happens to open Settings and press refresh.
+      try {
+        const status = await checkPythonEnv({
+          pythonPath: settings.pythonPath,
+          projectRoot: settings.projectRoot,
+          reportDir: settings.reportDir,
+          quickCheck: false,
+        })
+        useEnvironmentStore.getState().setStatus(status, environmentConfigKey)
+      } catch (error) {
+        const message = normalizeBackendError(error)
+        useEnvironmentStore.getState().setStatus({
+          ok: false,
+          message,
+          scriptsOk: false,
+          reportDirOk: false,
+          gpuAvailable: false,
+          gpuMessage: '检测失败',
+        }, environmentConfigKey)
+        useEnvironmentStore.getState().setError(message)
+      } finally {
+        useEnvironmentStore.getState().setChecking(false)
+      }
+    })()
   }, [])
 
   useEffect(() => {
@@ -347,6 +431,18 @@ export function AppLayout() {
 
       <RuntimeSetupDialog />
 
+      {startupUpdateDialogOpen && (
+        <Suspense fallback={null}>
+          <StartupUpdateDialog
+            open
+            appInfo={startupAppInfo}
+            proxyUrl={useSettingsStore.getState().networkProxy}
+            initialUpdate={startupUpdate}
+            onClose={() => setStartupUpdateDialogOpen(false)}
+          />
+        </Suspense>
+      )}
+
       {closeDialogOpen && createPortal(
         <CloseChoiceDialog
           remember={rememberCloseChoice}
@@ -461,4 +557,8 @@ function getRouteCopy(pathname: string) {
   }
 
   return { title: '视频相似度分析', subtitle: '' }
+}
+
+function buildEnvironmentConfigKey(pythonPath: string, projectRoot: string, reportDir: string) {
+  return [pythonPath, projectRoot, reportDir].join('|')
 }

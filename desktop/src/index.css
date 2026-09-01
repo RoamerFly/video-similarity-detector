@@ -7994,6 +7994,13 @@ select {
   outline: none;
 }
 
+.merge-export-directory-option.is-selected,
+.merge-export-directory-option[aria-checked="true"] {
+  border-color: rgba(100, 219, 255, 0.92);
+  background: rgba(24, 112, 153, 0.38);
+  box-shadow: inset 3px 0 0 rgba(100, 219, 255, 0.92), 0 0 0 1px rgba(65, 208, 238, 0.16);
+}
+
 .merge-export-directory-option:disabled {
   cursor: not-allowed;
   opacity: 0.52;
@@ -8043,6 +8050,14 @@ select {
 .merge-export-directory-field .design-input {
   min-width: 0;
   height: 38px;
+}
+
+.merge-export-directory-path-input {
+  min-width: 0;
+}
+
+.merge-export-directory-path-input .design-input {
+  width: 100%;
 }
 
 .merge-export-directory-dialog > footer {
@@ -8290,15 +8305,22 @@ select {
 }
 
 .timeline-label-heading {
+  display: flex;
+  position: relative;
+  z-index: 1;
   min-width: 0;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .timeline-label-heading > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: block;
+  flex: 0 0 auto;
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .timeline-align-button {
@@ -9464,7 +9486,8 @@ select {
 }
 
 .merge-editor-page .timeline-workspace {
-  grid-template-columns: 72px minmax(0, 1fr);
+  /* Keep the title and alignment control visible as a single label. */
+  grid-template-columns: 96px minmax(0, 1fr);
   gap: 6px;
   overflow: visible;
 }
@@ -10224,6 +10247,14 @@ select {
 
 .environment-status-inline > span.is-failed {
   color: rgba(255, 178, 196, 0.94);
+}
+
+.environment-status-inline > span.is-ok {
+  color: rgba(125, 255, 198, 0.96);
+}
+
+.environment-status-inline > span.is-pending {
+  color: rgba(222, 235, 255, 0.66);
 }
 
 .environment-inline-message {
@@ -13113,6 +13144,16 @@ select {
 .analyze-simple-page.show-analysis {
   min-height: 520px;
   grid-template-rows: auto minmax(360px, 1fr);
+  row-gap: 1px;
+}
+
+.analysis-page-content.is-analysis-page {
+  row-gap: 1px;
+}
+
+.analysis-subpage-tabs button {
+  font-size: 17px;
+  line-height: 1.2;
 }
 
 .analyze-simple-page.show-analysis .analyze-status-panel {

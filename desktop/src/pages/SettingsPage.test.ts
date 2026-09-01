@@ -7,7 +7,16 @@ import {
   downloadProgressIsTerminal,
   downloadStatusHasSettled,
   downloadStatusIsActive,
+  environmentStatusClass,
 } from './SettingsPage'
+
+describe('environment status presentation', () => {
+  it('maps healthy, failed, and pending checks to their semantic colors', () => {
+    expect(environmentStatusClass(true)).toBe('is-ok')
+    expect(environmentStatusClass(false)).toBe('is-failed')
+    expect(environmentStatusClass(undefined)).toBe('is-pending')
+  })
+})
 
 describe('settings download task state', () => {
   it('keeps an update active at 100% while verification or installation is running', () => {

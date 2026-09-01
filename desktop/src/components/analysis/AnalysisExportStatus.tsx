@@ -38,6 +38,15 @@ interface AnalysisReportEntry {
   path: string
 }
 
+interface AnalysisExportStatusProps {
+  /**
+   * Sidebar owns this state so the analysis and merge capsules cannot both
+   * occupy the expanded overlay at the same time.
+   */
+  expanded?: boolean
+  onExpandedChange?: (expanded: boolean) => void
+}
+
 function analysisReportEntries(reportPaths: ReportPaths | null): AnalysisReportEntry[] {
   if (!reportPaths) return []
   return [
@@ -47,9 +56,14 @@ function analysisReportEntries(reportPaths: ReportPaths | null): AnalysisReportE
   ].filter((entry): entry is AnalysisReportEntry => Boolean(entry.path.trim()))
 }
 
-export function AnalysisExportStatus() {
+export function AnalysisExportStatus({
+  expanded: controlledExpanded,
+  onExpandedChange,
+}: AnalysisExportStatusProps = {}) {
   const { t, tm } = useI18n()
-  const [expanded, setExpanded] = useState(false)
+  const [internalExpanded, setInternalExpanded] = useState(false)
+  const expanded = controlledExpanded ?? internalExpanded
+  const setExpanded = onExpandedChange ?? setInternalExpanded
   const [activeTab, setActiveTab] = useState<AnalysisStatusTab>('progress')
   const [logView, setLogView] = useState<'stdout' | 'stderr'>('stdout')
   const [copyMessage, setCopyMessage] = useState('')
@@ -128,7 +142,7 @@ export function AnalysisExportStatus() {
       document.removeEventListener('pointerdown', collapseOutside)
       window.removeEventListener('blur', collapseOnBlur)
     }
-  }, [expanded])
+  }, [expanded, setExpanded])
 
   useEffect(() => {
     if (!expanded || activeTab !== 'logs') return
@@ -158,7 +172,7 @@ export function AnalysisExportStatus() {
         <button
           type="button"
           className="merge-export-pill-head"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => setExpanded(!expanded)}
           aria-expanded={expanded}
           aria-controls="analysis-export-status-body"
           title={expanded ? '收起导出状态和日志' : '展开导出状态和日志'}

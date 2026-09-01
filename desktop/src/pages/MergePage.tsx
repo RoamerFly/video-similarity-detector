@@ -137,6 +137,7 @@ const commonResolutionOptions = [
 
 const mediaAttributeEpsilon = 0.001
 type MergeOutputFormat = 'mp4' | 'mkv' | 'mov'
+export type ExportDirectoryMode = 'source' | 'browse'
 
 const mergeOutputFormats: Array<{ value: MergeOutputFormat; label: string }> = [
   { value: 'mp4', label: 'MP4（兼容性最佳）' },
@@ -342,6 +343,8 @@ export function MergePage() {
   const [resolutionPreviewClipIds, setResolutionPreviewClipIds] = useState<string[]>([])
   const [resolutionPreview, setResolutionPreview] = useState<{ path: string; start: number; duration: number; signature: string } | null>(null)
   const [exportDirectoryDialogOpen, setExportDirectoryDialogOpen] = useState(false)
+  const [exportDirectoryMode, setExportDirectoryMode] = useState<ExportDirectoryMode>('browse')
+  const [exportSourceDirectory, setExportSourceDirectory] = useState('')
   const [exportDirectoryDraft, setExportDirectoryDraft] = useState('')
   const [exportNameDraft, setExportNameDraft] = useState('merged_video')
   const [exportFormatDraft, setExportFormatDraft] = useState<MergeOutputFormat>('mp4')
@@ -392,6 +395,15 @@ export function MergePage() {
     }
   }, [audioContextMenu, clipContextMenu, textContextMenu, trackContextMenu])
 
+  const sourceDirectories = useMemo(
+    () => sourceDirectoriesFromPaths(merge.items.map((item) => item.path)),
+    [merge.items],
+  )
+  const selectedSourceDirectory = sourceDirectories.includes(exportSourceDirectory)
+    ? exportSourceDirectory
+    : sourceDirectories[0] ?? ''
+  const resolvedExportDirectory = resolveExportDirectory(exportDirectoryMode, selectedSourceDirectory, exportDirectoryDraft)
+
   useEffect(() => {
     if (!exportDirectoryDialogOpen) return undefined
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -407,7 +419,7 @@ export function MergePage() {
     if (!exportDirectoryDialogOpen) {
       return undefined
     }
-    const directory = exportDirectoryDraft.trim()
+    const directory = resolvedExportDirectory
     const name = outputNameStem(exportNameDraft)
     if (!directory || !name) {
       return undefined
@@ -441,7 +453,7 @@ export function MergePage() {
         })
     }, 180)
     return () => window.clearTimeout(timer)
-  }, [exportDirectoryDialogOpen, exportDirectoryDraft, exportFormatDraft, exportNameDraft])
+  }, [exportDirectoryDialogOpen, exportFormatDraft, exportNameDraft, resolvedExportDirectory])
 
   const videoTrackIds = useMemo(() => merge.videoTracks.map((track) => track.id), [merge.videoTracks])
   const clipLayouts = useMemo(() => {
@@ -475,8 +487,7 @@ export function MergePage() {
     () => JSON.stringify({ settings: merge.settings, videos: merge.items, audios: merge.audioItems, texts: merge.textItems }),
     [merge.audioItems, merge.items, merge.settings, merge.textItems],
   )
-  const sourceDirectory = useMemo(() => directoryFromPath(merge.items[0]?.path ?? ''), [merge.items])
-  const exportValidationKey = `${exportDirectoryDraft.trim()}\u0000${outputNameStem(exportNameDraft)}\u0000${exportFormatDraft}`
+  const exportValidationKey = `${resolvedExportDirectory}\u0000${outputNameStem(exportNameDraft)}\u0000${exportFormatDraft}`
   const currentExportValidation = validatedExportKey === exportValidationKey ? exportValidation : null
   const validResolutionPreview = resolutionPreview?.signature === resolutionPreviewSignature ? resolutionPreview : null
   const effectiveResolutionPreviewMode = validResolutionPreview && resolutionPreviewMode === 'computed' ? 'computed' : 'live'
@@ -1947,8 +1958,10 @@ export function MergePage() {
       mergeRuntime.setError('请先向视频线加入至少一个视频。')
       return
     }
-    const suggestedDirectory = sourceDirectory || merge.settings.outputDir
-    setExportDirectoryDraft(suggestedDirectory)
+    const suggestedSourceDirectory = sourceDirectories[0] ?? ''
+    setExportDirectoryMode(suggestedSourceDirectory ? 'source' : 'browse')
+    setExportSourceDirectory(suggestedSourceDirectory)
+    setExportDirectoryDraft(suggestedSourceDirectory || merge.settings.outputDir)
     setExportNameDraft(outputNameStem(merge.settings.outputName) || 'merged_video')
     setExportFormatDraft('mp4')
     setExportValidation(null)
@@ -1957,12 +1970,25 @@ export function MergePage() {
   }
 
   async function browseExportDirectory() {
+    // Selecting the browse source is independent from whether the native
+    // picker returns a path (the user may cancel it and continue editing the
+    // path field manually).
+    setExportDirectoryMode('browse')
     try {
       const path = await selectOutputDirectory()
-      if (path) setExportDirectoryDraft(path)
+      if (path) {
+        setExportDirectoryDraft(path)
+      }
     } catch (error) {
       mergeRuntime.setError(normalizeBackendError(error))
     }
+  }
+
+  function selectSourceExportDirectory(directory = selectedSourceDirectory) {
+    if (!directory) return
+    setExportDirectoryMode('source')
+    setExportSourceDirectory(directory)
+    setExportDirectoryDraft(directory)
   }
 
   async function startMerge(
@@ -1998,7 +2024,9 @@ export function MergePage() {
   }
 
   function confirmExportDirectory() {
-    const outputDirectory = exportDirectoryDraft.trim()
+    // Resolve the mode at confirmation time so a select/button change cannot
+    // leave the backend with the previous draft path.
+    const outputDirectory = resolveExportDirectory(exportDirectoryMode, selectedSourceDirectory, exportDirectoryDraft)
     const outputName = outputNameStem(exportNameDraft)
     const localError = basicOutputNameError(outputName)
     if (!outputDirectory) {
@@ -2467,30 +2495,52 @@ export function MergePage() {
               <button type="button" className="icon-button" aria-label="关闭导出文件夹选择" onClick={() => setExportDirectoryDialogOpen(false)}>×</button>
             </header>
             <p>默认建议使用第一个源视频所在文件夹。确认后才会开始合并。</p>
-            <div className="merge-export-directory-options">
+            <div className="merge-export-directory-options" role="radiogroup" aria-label="导出位置来源">
               <button
                 type="button"
-                className="merge-export-directory-option"
-                disabled={!sourceDirectory}
-                onClick={() => setExportDirectoryDraft(sourceDirectory)}
+                className={`merge-export-directory-option ${exportDirectoryMode === 'source' && selectedSourceDirectory ? 'is-selected' : ''}`}
+                disabled={sourceDirectories.length === 0}
+                role="radio"
+                aria-checked={exportDirectoryMode === 'source' && Boolean(selectedSourceDirectory)}
+                onClick={() => selectSourceExportDirectory()}
               >
                 <FolderOpen />
-                <span><strong>使用源文件夹</strong><small>{sourceDirectory || '当前源视频没有可识别的文件夹'}</small></span>
+                <span><strong>使用源文件夹</strong><small>{selectedSourceDirectory || '当前源视频没有可识别的文件夹'}</small></span>
               </button>
-              <button type="button" className="merge-export-directory-option" onClick={() => void browseExportDirectory()}>
+              <button
+                type="button"
+                className={`merge-export-directory-option ${exportDirectoryMode === 'browse' ? 'is-selected' : ''}`}
+                role="radio"
+                aria-checked={exportDirectoryMode === 'browse'}
+                onClick={() => void browseExportDirectory()}
+              >
                 <FolderOpen />
                 <span><strong>浏览选择文件夹</strong><small>打开系统目录选择器</small></span>
               </button>
             </div>
             <label className="merge-export-directory-field">
               <span>导出文件夹路径</span>
-              <TextInput
-                autoFocus
-                value={exportDirectoryDraft}
-                onChange={(event) => setExportDirectoryDraft(event.target.value)}
-                placeholder="可直接输入完整路径"
-                aria-label="导出文件夹路径"
-              />
+              {exportDirectoryMode === 'source' && sourceDirectories.length > 0 ? (
+                <SelectInput
+                  autoFocus
+                  value={selectedSourceDirectory}
+                  onChange={(event) => selectSourceExportDirectory(event.target.value)}
+                  aria-label="导出文件夹路径"
+                >
+                  {sourceDirectories.map((directory) => <option key={directory} value={directory}>{directory}</option>)}
+                </SelectInput>
+              ) : (
+                <div className="merge-path-input merge-export-directory-path-input">
+                  <TextInput
+                    autoFocus
+                    value={exportDirectoryDraft}
+                    onChange={(event) => setExportDirectoryDraft(event.target.value)}
+                    placeholder="可直接输入完整路径"
+                    aria-label="导出文件夹路径"
+                  />
+                  <button type="button" title="选择导出文件夹" onClick={() => void browseExportDirectory()}><FolderOpen /></button>
+                </div>
+              )}
             </label>
             <label className="merge-export-directory-field">
               <span>视频导出名称</span>
@@ -2527,7 +2577,7 @@ export function MergePage() {
               <button type="button" className="icon-button" onClick={() => setExportDirectoryDialogOpen(false)}>取消</button>
               <NeonButton
                 type="button"
-                disabled={!canConfirmExport(exportDirectoryDraft, exportNameDraft, exportValidating, currentExportValidation)}
+                disabled={!canConfirmExport(resolvedExportDirectory, exportNameDraft, exportValidating, currentExportValidation)}
                 onClick={confirmExportDirectory}
               ><Download />开始导出</NeonButton>
             </footer>
@@ -2582,9 +2632,18 @@ function trackKindLabel(kind: 'video' | 'audio' | 'text') {
 	  return '文本线'
 }
 
-function directoryFromPath(path: string) {
+// eslint-disable-next-line react-refresh/only-export-components -- pure export-form helper is covered by MergePage tests.
+export function resolveExportDirectory(mode: ExportDirectoryMode, sourceDirectory: string, browseDirectory: string) {
+  return (mode === 'source' ? sourceDirectory : browseDirectory).trim()
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure path helpers are covered by MergePage tests.
+export function directoryFromPath(path: string) {
   const trimmed = path.trim().replace(/[\\/]+$/, '')
   if (!trimmed) return ''
+  const separator = trimmed.includes('\\') ? '\\' : '/'
+  const uncRoot = trimmed.match(/^[/\\]{2}([^/\\]+)[/\\]+([^/\\]+)/)
+  if (uncRoot) return `${separator}${separator}${uncRoot[1]}${separator}${uncRoot[2]}`
   const separatorIndex = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
   if (separatorIndex < 0) return ''
   // Keep the root separator for paths such as `C:\\video.mp4`, `/video.mp4`,
@@ -2592,4 +2651,20 @@ function directoryFromPath(path: string) {
   if (separatorIndex === 2 && /^[A-Za-z]:/.test(trimmed)) return trimmed.slice(0, 3)
   if (separatorIndex === 0) return trimmed.slice(0, 1)
   return trimmed.slice(0, separatorIndex)
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure path helpers are covered by MergePage tests.
+export function sourceDirectoriesFromPaths(paths: string[]) {
+  const directories: string[] = []
+  const seen = new Set<string>()
+  for (const path of paths) {
+    const directory = directoryFromPath(path)
+    if (!directory) continue
+    const normalized = normalizePath(directory)
+    const key = normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized
+    if (seen.has(key)) continue
+    seen.add(key)
+    directories.push(directory)
+  }
+  return directories
 }

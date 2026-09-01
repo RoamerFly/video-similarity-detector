@@ -397,7 +397,6 @@ export function SettingsPage() {
   const environment = useEnvironmentStore((state) => state.status)
   const checking = useEnvironmentStore((state) => state.checking)
   const environmentError = useEnvironmentStore((state) => state.error)
-  const checkedEnvironmentKey = useEnvironmentStore((state) => state.configKey)
   const [clearingCache, setClearingCache] = useState(false)
   const [cacheDialogOpen, setCacheDialogOpen] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
@@ -456,21 +455,6 @@ export function SettingsPage() {
     }
   }, [])
 
-  useEffect(() => {
-    if (!settings.checkEnvOnStartup) return undefined
-    if (environment && checkedEnvironmentKey === environmentConfigKey) return undefined
-
-    let alive = true
-    const timer = window.setTimeout(() => {
-      if (alive) void executeEnvironmentCheck(true)
-    }, 450)
-
-    return () => {
-      alive = false
-      window.clearTimeout(timer)
-    }
-  }, [checkedEnvironmentKey, environment, environmentConfigKey, executeEnvironmentCheck, settings.checkEnvOnStartup])
-
   useEffect(() => () => {
     if (saveMessageTimer.current) window.clearTimeout(saveMessageTimer.current)
     if (saveFeedbackTimer.current) window.clearTimeout(saveFeedbackTimer.current)
@@ -503,7 +487,10 @@ export function SettingsPage() {
     },
     {
       label: 'GPU 加速(CUDA)',
-      ok: environment?.gpuAvailable,
+      // A GPU probe is unavailable when Python itself cannot start. Treat
+      // that as a failed status so the footer does not present an error as a
+      // neutral "not checked" value.
+      ok: environment ? environment.gpuAvailable ?? (environment.ok ? undefined : false) : undefined,
       value: environment ? environment.gpuMessage || (environment.gpuAvailable ? '可用' : '不可用') : checking ? '检测中' : '未检测',
     },
   ], [checking, environment])
@@ -787,12 +774,15 @@ export function SettingsPage() {
             环境状态
           </strong>
           {environmentRows.map((row) => (
-            <span className={row.ok === false ? 'is-failed' : ''} title={`${row.label}：${row.value}`} key={row.label}>
-              {row.ok === false || row.ok == null ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
+            <span className={environmentStatusClass(row.ok)} title={`${row.label}：${row.value}`} key={row.label}>
+              {row.ok === false ? <AlertCircle size={14} /> : row.ok === true ? <CheckCircle2 size={14} /> : <Info size={14} />}
               {row.label}：{row.value}
             </span>
           ))}
-          <span className="environment-inline-message" title={error || environmentError || environment?.message || environment?.resolvedPythonPath || ''}>
+          <span
+            className={`environment-inline-message ${environmentStatusClass(error || environmentError ? false : environment ? environment.ok : undefined)}`}
+            title={error || environmentError || environment?.message || environment?.resolvedPythonPath || ''}
+          >
             {error || environmentError || environment?.message || environment?.resolvedPythonPath || '等待检测'}
           </span>
           <NeonButton variant="ghost" type="button" onClick={() => void handleCheckEnvironment()} disabled={checking}>
@@ -1411,19 +1401,21 @@ function SettingsResourceDialog({
   )
 }
 
-function UpdateDialog({
+export function UpdateDialog({
   open,
   appInfo,
   proxyUrl,
+  initialUpdate = null,
   onClose,
 }: {
   open: boolean
   appInfo: AppInfo | null
   proxyUrl: string
+  initialUpdate?: UpdateInfo | null
   onClose: () => void
 }) {
   const { tm } = useI18n()
-  const [update, setUpdate] = useState<UpdateInfo | null>(null)
+  const [update, setUpdate] = useState<UpdateInfo | null>(initialUpdate)
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(() => getDownloadTaskSnapshot('update').active)
   const [progress, setProgress] = useState<UpdateDownloadProgress | null>(() => getDownloadTaskSnapshot('update').progress)
@@ -1518,16 +1510,19 @@ function UpdateDialog({
 
   useEffect(() => {
     if (!open) return undefined
+    // AppLayout may already have completed the one per-launch update check.
+    // Reusing that result avoids a second request and prevents a startup
+    // update notification from causing a check/open loop.
     const checkTimer = window.setTimeout(() => {
       void syncUpdateDownloadStatus()
-      if (!getDownloadTaskSnapshot('update').active) void handleCheckUpdate()
+      if (!initialUpdate && !getDownloadTaskSnapshot('update').active) void handleCheckUpdate()
     }, 0)
     const statusTimer = window.setInterval(() => void syncUpdateDownloadStatus(), 1000)
     return () => {
       window.clearTimeout(checkTimer)
       window.clearInterval(statusTimer)
     }
-  }, [handleCheckUpdate, open, syncUpdateDownloadStatus])
+  }, [handleCheckUpdate, initialUpdate, open, syncUpdateDownloadStatus])
 
   async function handleInstallUpdate() {
     if (!update?.canAutoInstall || installing) return
@@ -2680,6 +2675,13 @@ function clampNumber(value: string, min: number | undefined, max: number | undef
   const numeric = Math.round(Number(value))
   if (!Number.isFinite(numeric)) return fallback
   return Math.max(min ?? Number.NEGATIVE_INFINITY, Math.min(max ?? Number.POSITIVE_INFINITY, numeric))
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function environmentStatusClass(ok: boolean | undefined) {
+  if (ok === true) return 'is-ok'
+  if (ok === false) return 'is-failed'
+  return 'is-pending'
 }
 
 function buildEnvironmentConfigKey(pythonPath: string, projectRoot: string, reportDir: string) {

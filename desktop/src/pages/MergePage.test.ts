@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { basicOutputNameError, canConfirmExport, outputNameStem } from './MergePage'
+import {
+  basicOutputNameError,
+  canConfirmExport,
+  directoryFromPath,
+  outputNameStem,
+  resolveExportDirectory,
+  sourceDirectoriesFromPaths,
+} from './MergePage'
 
 const valid = {
   valid: true,
@@ -10,6 +17,21 @@ const valid = {
 }
 
 describe('merge export form validation', () => {
+  it('derives a de-duplicated source folder list in clip order', () => {
+    expect(sourceDirectoriesFromPaths([
+      'D:/footage/first.mp4',
+      'd:\\FOOTAGE\\second.mov',
+      'D:/other/third.mp4',
+      'single-file.mp4',
+    ])).toEqual(['D:/footage', 'D:/other'])
+    expect(directoryFromPath('\\\\server\\share\\video.mp4')).toBe('\\\\server\\share')
+  })
+
+  it('resolves the path from the active source or browse choice', () => {
+    expect(resolveExportDirectory('source', 'D:/source', 'D:/stale-browse')).toBe('D:/source')
+    expect(resolveExportDirectory('browse', 'D:/stale-source', 'D:/picked')).toBe('D:/picked')
+  })
+
   it('keeps the configured container extension outside the editable stem', () => {
     expect(outputNameStem('clip.mkv')).toBe('clip')
     expect(outputNameStem('clip')).toBe('clip')

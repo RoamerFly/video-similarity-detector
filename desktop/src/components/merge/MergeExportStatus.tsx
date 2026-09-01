@@ -8,6 +8,15 @@ import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
 
 type ExportStatusTab = 'progress' | 'logs'
 
+interface MergeExportStatusProps {
+  /**
+   * Sidebar owns this state so the merge and analysis capsules cannot both
+   * occupy the expanded overlay at the same time.
+   */
+  expanded?: boolean
+  onExpandedChange?: (expanded: boolean) => void
+}
+
 // eslint-disable-next-line react-refresh/only-export-components -- exported pure formatter is covered by its focused unit test.
 export function mergeExportCompactText(progress: number, error: string) {
   if (error.trim()) return '导出失败'
@@ -16,8 +25,13 @@ export function mergeExportCompactText(progress: number, error: string) {
   return '导出'
 }
 
-export function MergeExportStatus() {
-  const [expanded, setExpanded] = useState(false)
+export function MergeExportStatus({
+  expanded: controlledExpanded,
+  onExpandedChange,
+}: MergeExportStatusProps = {}) {
+  const [internalExpanded, setInternalExpanded] = useState(false)
+  const expanded = controlledExpanded ?? internalExpanded
+  const setExpanded = onExpandedChange ?? setInternalExpanded
   const [activeTab, setActiveTab] = useState<ExportStatusTab>('progress')
   const panelRef = useRef<HTMLElement>(null)
   const logsViewportRef = useRef<HTMLDivElement>(null)
@@ -67,7 +81,7 @@ export function MergeExportStatus() {
       document.removeEventListener('pointerdown', collapseOutside)
       window.removeEventListener('blur', collapseOnBlur)
     }
-  }, [expanded])
+  }, [expanded, setExpanded])
 
   useEffect(() => {
     if (!expanded || activeTab !== 'logs') return
@@ -85,7 +99,7 @@ export function MergeExportStatus() {
       <button
         type="button"
         className="merge-export-pill-head"
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls="merge-export-status-body"
         title={expanded ? '收起导出状态和日志' : '展开导出状态和日志'}
