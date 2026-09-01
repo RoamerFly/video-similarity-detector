@@ -7,8 +7,6 @@ import {
   BarChart3,
   CalendarClock,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Clock3,
   Clipboard,
   Database,
@@ -27,13 +25,13 @@ import {
   RefreshCw,
   RotateCcw,
   Square,
-  Terminal,
   Trash2,
   X,
 } from 'lucide-react'
 import { GlassPanel, NeonButton, SelectInput, StatCard, TextInput } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
 import { Translated } from '@/i18n/Translated'
+import { useI18n } from '@/i18n/useI18n'
 import {
   buildRunBatchCompareConfig,
   buildAnalysisTaskMatchKey,
@@ -172,6 +170,7 @@ const ScannedVideoList = memo(function ScannedVideoList({
 export function AnalyzePage() {
   const navigate = useNavigate()
   const settings = useSettingsStore()
+  const { t, tm } = useI18n()
   const {
     runningStatus,
     progress,
@@ -181,9 +180,7 @@ export function AnalyzePage() {
     scannedVideos: videos,
     scannedDir,
     scanMessage,
-    logs,
     totalLogCount,
-    logsDropped,
     runStartedAt,
     errorMessage,
     activeTaskId,
@@ -210,9 +207,6 @@ export function AnalyzePage() {
     renameScannedVideo,
   } = useAnalysisStore()
   const [isPreparing, setIsPreparing] = useState(false)
-  const [isLogDrawerOpen, setIsLogDrawerOpen] = useState(false)
-  const [logView, setLogView] = useState<'stdout' | 'stderr'>('stdout')
-  const [copyMessage, setCopyMessage] = useState('')
   const [clockNow, setClockNow] = useState(() => Date.now())
   const [historyTasks, setHistoryTasks] = useState<AnalysisTaskRecord[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -242,20 +236,6 @@ export function AnalyzePage() {
   const historyRefreshInFlight = useRef(false)
   const isRunning = runningStatus === 'running'
   const isBusy = isRunning || isPreparing
-  const latestLog = logs[logs.length - 1]
-  const logSummary = useMemo(() => {
-    const stdout = []
-    const stderr = []
-    for (const log of logs) {
-      if (log.stream === 'stderr') stderr.push(log)
-      else stdout.push(log)
-    }
-    return { stdout, stderr }
-  }, [logs])
-  const visibleLogs = logSummary[logView]
-  const renderedLogs = visibleLogs.slice(-500)
-  const stdoutCount = logSummary.stdout.length
-  const stderrCount = logSummary.stderr.length
   const isDuplicateFileMode = settings.analysisMode === 'duplicate_file'
   const pairCount = !isDuplicateFileMode && videos.length > 1 ? (videos.length * (videos.length - 1)) / 2 : 0
   const activeHistoryTask = historyTasks.find((task) => task.id === activeTaskId) ?? null
@@ -292,15 +272,6 @@ export function AnalyzePage() {
     const lowerTerm = videoSearchTerm.trim().toLowerCase()
     return videos.filter((video) => fileName(video.path).toLowerCase().includes(lowerTerm))
   }, [videos, videoSearchTerm])
-
-  useEffect(() => {
-    if (!errorMessage) return undefined
-    const timer = window.setTimeout(() => {
-      setIsLogDrawerOpen(true)
-      setLogView('stderr')
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [errorMessage])
 
   useEffect(() => {
     let unlisten: (() => void) | undefined
@@ -968,7 +939,7 @@ export function AnalyzePage() {
   async function handleClearTaskCache(paths: string[]) {
     const task = historyTasks.find((item) => item.id === cacheTaskId)
     if (!task || paths.length === 0) return
-    if (!window.confirm(`确认清理选中的 ${paths.length} 个任务缓存项目吗？原始视频不会被删除。`)) return
+    if (!window.confirm(tm(`确认清理选中的 ${paths.length} 个任务缓存项目吗？原始视频不会被删除。`))) return
     setTaskCacheBusy(true)
     try {
       await clearCacheItems(
@@ -999,17 +970,6 @@ export function AnalyzePage() {
       console.error('Failed to load full task', e)
     }
     setDetailTask(task)
-  }
-
-  async function handleCopyLogs() {
-    try {
-      const retainedNote = logsDropped > 0 ? [`已省略较早的 ${logsDropped} 行日志，仅复制最近 ${logs.length} 行。`] : []
-      await navigator.clipboard.writeText([...retainedNote, ...visibleLogs.map((log) => `[${log.stream}] ${log.line}`)].join('\n'))
-      setCopyMessage(`${logView === 'stderr' ? '错误' : '正常'}输出已复制`)
-      window.setTimeout(() => setCopyMessage(''), 1500)
-    } catch (error) {
-      setErrorMessage(`复制日志失败：${normalizeBackendError(error)}`)
-    }
   }
 
   const toggleVideoSelection = useCallback(
@@ -1066,7 +1026,7 @@ export function AnalyzePage() {
 
   async function deleteVideoFiles(targets: VideoFile[]) {
     if (targets.length === 0 || videoFileBusy) return
-    if (!window.confirm(`确认删除选中的 ${targets.length} 个视频文件吗？此操作不可撤销。`)) return
+    if (!window.confirm(tm(`确认删除选中的 ${targets.length} 个视频文件吗？此操作不可撤销。`))) return
     setVideoContextMenu(null)
     setVideoFileBusy(true)
     setVideoFileAction(`正在删除 ${targets.length} 个视频...`)
@@ -1141,7 +1101,7 @@ export function AnalyzePage() {
       const prompt = targets.length > 1
         ? `重命名视频文件（${i + 1}/${targets.length}）：`
         : '重命名视频文件：'
-      const newName = window.prompt(prompt, currentName)
+      const newName = window.prompt(tm(prompt), currentName)
       if (newName === null) continue
       const trimmed = newName.trim()
       if (!trimmed || trimmed === currentName) continue
@@ -1178,14 +1138,14 @@ export function AnalyzePage() {
       .map((video) => `- ${video.name}`)
       .join('\n')
     const more = movingVideoTargets.length > 8 ? `\n- 以及另外 ${movingVideoTargets.length - 8} 个文件` : ''
-    const confirmed = window.confirm(
+    const confirmed = window.confirm(tm(
       [
         '确认中断本次移动吗？',
         '此次中断可能影响以下视频文件：',
         affected ? `${affected}${more}` : '- 当前移动队列',
         '',
         '已完成移动的文件不会自动移回；正在复制的文件会尽量清理未完成的目标文件。',
-      ].join('\n'),
+      ].join('\n')),
     )
     if (!confirmed) return
     try {
@@ -1200,7 +1160,7 @@ export function AnalyzePage() {
     <Translated>
     <div className="route-fill analyze-workspace">
       <div className="analysis-page-content">
-        <div className="analysis-subpage-tabs" role="tablist" aria-label="分析任务页面">
+        <div className="analysis-subpage-tabs" role="tablist" aria-label={t('分析任务页面')}>
           <button type="button" className={activeSubpage === 'analysis' ? 'active' : ''} onClick={() => setActiveSubpage('analysis')}>
             <Film size={17} />
             分析任务
@@ -1530,82 +1490,6 @@ export function AnalyzePage() {
       </div>
       </div>
 
-      <section className={`analysis-log-drawer ${isLogDrawerOpen ? 'open' : 'collapsed'}`}>
-        <button
-          type="button"
-          className="log-drawer-handle"
-          onClick={() => setIsLogDrawerOpen((open) => !open)}
-          aria-expanded={isLogDrawerOpen}
-        >
-          <span>
-            <Terminal size={17} />
-            实时日志
-            <strong>{totalLogCount}</strong>
-          </span>
-          <small title={latestLog?.line}>{latestLog?.line ?? '点击展开日志栏'}</small>
-          {isLogDrawerOpen ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
-        </button>
-
-        {isLogDrawerOpen && (
-          <div className="log-drawer-body">
-            <div className="log-toolbar">
-              <div className="log-toolbar-copy">
-                <span>
-                  Python 标准输出(stdout) / 错误输出(stderr)
-                  {logsDropped > 0 ? ` · 已保留最近 ${logs.length} 行，省略 ${logsDropped} 行` : ''}
-                </span>
-                <div className="log-view-tabs" role="tablist" aria-label="日志输出类型">
-                  <button
-                    className={logView === 'stdout' ? 'active' : ''}
-                    type="button"
-                    role="tab"
-                    aria-selected={logView === 'stdout'}
-                    onClick={() => setLogView('stdout')}
-                  >
-                    正常输出 <b>{stdoutCount}</b>
-                  </button>
-                  <button
-                    className={logView === 'stderr' ? 'active error' : 'error'}
-                    type="button"
-                    role="tab"
-                    aria-selected={logView === 'stderr'}
-                    onClick={() => setLogView('stderr')}
-                  >
-                    错误输出 <b>{stderrCount}</b>
-                  </button>
-                </div>
-              </div>
-              <div>
-                <button type="button" onClick={() => void handleCopyLogs()} disabled={visibleLogs.length === 0}>
-                  <Clipboard size={16} />
-                  复制
-                </button>
-                <button type="button" onClick={clearLogs} disabled={logs.length === 0}>
-                  <Trash2 size={16} />
-                  清空
-                </button>
-              </div>
-            </div>
-            {copyMessage && <span className="copy-message">{copyMessage}</span>}
-
-            <div className="analysis-log-panel">
-              {visibleLogs.length > renderedLogs.length && (
-                <p className="empty-log-line">为保持界面流畅，仅渲染当前窗口最近 {renderedLogs.length} 行；复制仍包含全部保留日志。</p>
-              )}
-              {renderedLogs.length > 0 ? renderedLogs.map((log) => (
-                <p className={log.stream === 'stderr' ? 'stderr' : ''} key={`${log.timestamp}-${log.stream}-${log.line}`}>
-                  <span>[{formatLogStream(log.stream)}]</span>
-                  {log.line}
-                </p>
-              )) : (
-                <p className="empty-log-line">
-                  {logView === 'stderr' ? '当前没有错误输出。' : '当前没有正常输出。'}
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-      </section>
       <TaskDetailDialog task={detailTask} onClose={() => setDetailTask(null)} />
       <TaskStagesDialog
         task={stageTask}
@@ -2254,6 +2138,7 @@ function TaskStagesDialog({
   onRun: (task: AnalysisTaskRecord, stageId: AnalysisTaskStageId, redoStage: boolean) => void
   onPause: () => void
 }) {
+  const { tm } = useI18n()
   if (!task) return null
   const stages = analysisTaskStages(task)
 
@@ -2329,7 +2214,7 @@ function TaskStagesDialog({
                     type="button"
                     disabled={stageBusy || active || !prerequisiteReady}
                     onClick={() => {
-                      if (window.confirm(`重做“${taskStage.label}”会重置该阶段及其后续阶段进度，是否继续？`)) {
+                      if (window.confirm(tm(`重做“${taskStage.label}”会重置该阶段及其后续阶段进度，是否继续？`))) {
                         onRun(task, taskStage.id, true)
                       }
                     }}
@@ -3120,8 +3005,4 @@ function formatVideoMtime(value?: number | null) {
     hour: '2-digit',
     minute: '2-digit',
   })
-}
-
-function formatLogStream(stream: 'stdout' | 'stderr') {
-  return stream === 'stderr' ? '错误(stderr)' : '输出(stdout)'
 }

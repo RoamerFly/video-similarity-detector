@@ -16,6 +16,7 @@ import {
   type UpdateDownloadProgress,
   type ResourceUpdateCheck,
 } from '@/services/backend'
+import { useI18n } from '@/i18n/useI18n'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 interface MergeRuntimeDownloadSnapshot {
@@ -83,25 +84,33 @@ function beginMergeRuntimeTask(notifyCompletion = false) {
   return generation
 }
 
-function formatResourceCheckDetails(check: ResourceUpdateCheck) {
+function formatResourceCheckDetails(check: ResourceUpdateCheck, translate: (value: string) => string = (value) => value) {
+  const isEnglish = translate('本地') !== '本地'
+  const open = isEnglish ? ' (' : '（'
+  const close = isEnglish ? ')' : '）'
+  const comma = isEnglish ? ', ' : '，'
   const versions = check.installedVersion && check.remoteVersion
-    ? `（本地 v${check.installedVersion}，GitHub v${check.remoteVersion}）`
+    ? `${open}${translate('本地')} v${check.installedVersion}${comma}GitHub v${check.remoteVersion}${close}`
     : check.remoteVersion
-      ? `（GitHub v${check.remoteVersion}）`
+      ? `${open}GitHub v${check.remoteVersion}${close}`
       : ''
   const hashes = check.localSha256 && check.remoteSha256
-    ? `（本地 SHA-256 ${check.localSha256.slice(0, 12)}…，远端 ${check.remoteSha256.slice(0, 12)}…）`
+    ? `${open}${translate('本地')} SHA-256 ${check.localSha256.slice(0, 12)}…${comma}${translate('远端')} ${check.remoteSha256.slice(0, 12)}…${close}`
     : ''
   return `${versions}${hashes}`
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
-export function mergeRuntimeUpdatePrompt(check: ResourceUpdateCheck) {
-  const details = formatResourceCheckDetails(check)
-  if (!check.installed) return `已找到 GitHub 最新版视频合并环境${details}，是否安装？`
-  if (check.comparisonAvailable && check.updateAvailable) return `检测到视频合并环境有可用更新${details}，是否更新？`
-  if (check.comparisonAvailable) return `当前视频合并环境已是最新版${details}。是否仍要强制重装？`
-  return '无法可靠比较视频合并环境的本地版本与 GitHub 最新版。是否强制重装？'
+export function mergeRuntimeUpdatePrompt(check: ResourceUpdateCheck, translate?: (value: string) => string) {
+  const t = translate ?? ((value: string) => value)
+  const isEnglish = t('本地') !== '本地'
+  const separator = isEnglish ? '. ' : '，'
+  const end = isEnglish ? '.' : '。'
+  const details = formatResourceCheckDetails(check, t)
+  if (!check.installed) return `${t('已找到 GitHub 最新版视频合并环境')}${details}${separator}${t('是否安装？')}`
+  if (check.comparisonAvailable && check.updateAvailable) return `${t('检测到视频合并环境有可用更新')}${details}${separator}${t('是否更新？')}`
+  if (check.comparisonAvailable) return `${t('当前视频合并环境已是最新版')}${details}${end} ${t('是否仍要强制重装？')}`
+  return t('无法可靠比较视频合并环境的本地版本与 GitHub 最新版。是否强制重装？')
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -111,6 +120,7 @@ export function mergeRuntimeProgressCanCancel(stage: string) {
 
 export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void }) {
   const proxyUrl = useSettingsStore((state) => state.networkProxy)
+  const { t, tm } = useI18n()
   const [status, setStatus] = useState<MergeRuntimeStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const [installing, setInstalling] = useState(mergeRuntimeDownloadSnapshot.active)
@@ -216,7 +226,7 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
       return
     }
     setCheckingUpdate(false)
-    if (!window.confirm(mergeRuntimeUpdatePrompt(updateCheck))) return
+    if (!window.confirm(mergeRuntimeUpdatePrompt(updateCheck, t))) return
     const operation = operationRef.current + 1
     operationRef.current = operation
     const generation = beginMergeRuntimeTask(true)
@@ -313,43 +323,43 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
     <div className="settings-about-card">
       <div className="about-title">
         {status?.ready ? <CheckCircle2 size={24} /> : <Film size={24} />}
-        <h3>视频合并环境</h3>
+        <h3>{t('视频合并环境')}</h3>
       </div>
       <div className="about-grid compact">
         <div>
-          <span>状态</span>
-          <strong>{loading ? '检测中' : status?.ready ? '可用' : '未安装'}</strong>
+          <span>{t('状态')}</span>
+          <strong>{loading ? t('检测中') : status?.ready ? t('可用') : t('未安装')}</strong>
         </div>
         <div>
-          <span>平台</span>
-          <strong>{status?.platform || '检测中'}</strong>
+          <span>{t('平台')}</span>
+          <strong>{status?.platform || t('检测中')}</strong>
         </div>
         <div>
-          <span>包版本</span>
+          <span>{t('包版本')}</span>
           <strong>v{status?.installedVersion ?? status?.expectedVersion ?? '1'}</strong>
         </div>
         <div>
-          <span>组件</span>
+          <span>{t('组件')}</span>
           <strong>FFmpeg / FFprobe</strong>
         </div>
       </div>
       {status?.runtimeDir ? (
         <p className="update-install-path" title={status.runtimeDir}>
-          环境目录：{status.runtimeDir}
+          {t('环境目录：')}{status.runtimeDir}
         </p>
       ) : null}
       <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>
-        {error || (checkingUpdate ? '正在检查更新' : status?.message || '正在检测视频合并环境。')}
+        {error ? tm(error) : checkingUpdate ? t('正在检查更新') : status?.message ? tm(status.message) : t('正在检测视频合并环境。')}
       </p>
       {status?.ffmpegPath ? (
         <p className="update-install-path" title={status.ffmpegPath}>
-          FFmpeg：{status.ffmpegPath}
+          {t('FFmpeg：')}{status.ffmpegPath}
         </p>
       ) : null}
       {progress && (
         <div className="update-progress-block">
           <div>
-            <span>{progress.stage}</span>
+            <span>{tm(progress.stage)}</span>
             <strong>{progressValue.toFixed(0)}%</strong>
           </div>
           <div className="update-progress-track">
@@ -369,27 +379,27 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
           disabled={loading || installing || checkingUpdate}
         >
           <RefreshCw size={17} className={loading ? 'spin-slow' : ''} />
-          刷新
+          {t('刷新')}
         </NeonButton>
         {checkingUpdate ? (
           <NeonButton variant="outline" type="button" disabled>
             <RefreshCw size={17} className="spin-slow" />
-            正在检查更新
+            {t('正在检查更新')}
           </NeonButton>
         ) : installing ? canCancel ? (
           <NeonButton type="button" onClick={() => void handleCancel()}>
             <CircleStop size={17} />
-            取消下载
+            {t('取消下载')}
           </NeonButton>
         ) : (
           <NeonButton variant="outline" type="button" disabled>
             <RefreshCw size={17} className="spin-slow" />
-            正在安装环境
+            {t('正在安装环境')}
           </NeonButton>
         ) : (
           <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate}>
             <Download size={17} />
-            重装/更新环境
+            {t('重装/更新环境')}
           </NeonButton>
         )}
       </div>

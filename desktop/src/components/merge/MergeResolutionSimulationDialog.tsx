@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import { NeonButton } from '@/components/DesignSystem'
+import { useI18n } from '@/i18n/useI18n'
 import { formatPreciseTime } from './mergeFormat'
 import { MergeNumberField as NumberField } from './MergeNumberField'
 
@@ -38,6 +39,7 @@ export function MergeResolutionSimulationDialog({
   onStart,
   onClose,
 }: MergeResolutionSimulationDialogProps) {
+  const { t } = useI18n()
   const closeRef = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     if (!open) return undefined
@@ -60,18 +62,18 @@ export function MergeResolutionSimulationDialog({
       <section className="merge-resolution-simulation-dialog" role="dialog" aria-modal="true" aria-labelledby="merge-resolution-simulation-title">
         <header>
           <div>
-            <span className="eyebrow">预计算高保真预览</span>
-            <h2 id="merge-resolution-simulation-title">模拟真实分辨率清晰度</h2>
+            <span className="eyebrow">{t('预计算高保真预览')}</span>
+            <h2 id="merge-resolution-simulation-title">{t('模拟真实分辨率清晰度')}</h2>
           </div>
-          <button ref={closeRef} type="button" className="icon-button" disabled={calculating} aria-label="关闭清晰度预览设置" onClick={onClose}><X /></button>
+          <button ref={closeRef} type="button" className="icon-button" disabled={calculating} aria-label={t('关闭清晰度预览设置')} onClick={onClose}><X /></button>
         </header>
-        <p>按正式导出参数生成一段缓存视频。计算完成后可在播放器中切换“实时 / 已计算”，已计算模式只播放本次选定范围。</p>
-        <div className="resolution-preview-range-tabs" role="tablist" aria-label="计算范围">
-          <button type="button" role="tab" aria-selected={mode === 'clips'} className={mode === 'clips' ? 'active' : ''} onClick={() => onModeChange('clips')}>选取当前视频线片段</button>
-          <button type="button" role="tab" aria-selected={mode === 'duration'} className={mode === 'duration' ? 'active' : ''} onClick={() => onModeChange('duration')}>从播放头指定时长</button>
+        <p>{t('按正式导出参数生成一段缓存视频。计算完成后可在播放器中切换“实时 / 已计算”，已计算模式只播放本次选定范围。')}</p>
+        <div className="resolution-preview-range-tabs" role="tablist" aria-label={t('计算范围')}>
+          <button type="button" role="tab" aria-selected={mode === 'clips'} className={mode === 'clips' ? 'active' : ''} onClick={() => onModeChange('clips')}>{t('选取当前视频线片段')}</button>
+          <button type="button" role="tab" aria-selected={mode === 'duration'} className={mode === 'duration' ? 'active' : ''} onClick={() => onModeChange('duration')}>{t('从播放头指定时长')}</button>
         </div>
         {mode === 'clips' ? (
-          <div className="resolution-preview-clip-list" aria-label="选择要计算的视频片段">
+          <div className="resolution-preview-clip-list" aria-label={t('选择要计算的视频片段')}>
             {clips.length > 0 ? clips.map((clip) => {
               const checked = selectedClipIds.includes(clip.id)
               return (
@@ -81,14 +83,14 @@ export function MergeResolutionSimulationDialog({
                   <small>{formatPreciseTime(clip.start)} – {formatPreciseTime(clip.start + clip.duration)}</small>
                 </label>
               )
-            }) : <p className="resolution-preview-empty">当前视频线没有可计算的片段。</p>}
+            }) : <p className="resolution-preview-empty">{t('当前视频线没有可计算的片段。')}</p>}
           </div>
         ) : (
-          <NumberField label="从当前播放头计算（秒）" tip="只生成播放头之后的指定时长，超出时间线的部分会自动截断。" value={duration} min={1} max={300} step={1} onChange={onDurationChange} />
+          <NumberField label={t('从当前播放头计算（秒）')} tip={t('只生成播放头之后的指定时长，超出时间线的部分会自动截断。')} value={duration} min={1} max={300} step={1} onChange={onDurationChange} />
         )}
         <footer>
-          <button type="button" className="icon-button" disabled={calculating} onClick={onClose}>取消</button>
-          <NeonButton type="button" disabled={!selectionValid || calculating} onClick={onStart}>{calculating ? '正在计算…' : '开始计算'}</NeonButton>
+          <button type="button" className="icon-button" disabled={calculating} onClick={onClose}>{t('取消')}</button>
+          <NeonButton type="button" disabled={!selectionValid || calculating} onClick={onStart}>{calculating ? t('正在计算…') : t('开始计算')}</NeonButton>
         </footer>
       </section>
     </div>

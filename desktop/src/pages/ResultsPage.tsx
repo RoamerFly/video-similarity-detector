@@ -70,6 +70,13 @@ import {
   type ReportWindow,
 } from '@/utils/reportParser'
 import { getRelationInfo, relationTone } from '@/utils/relation'
+import { useI18n } from '@/i18n/useI18n'
+import {
+  applyReportDeletionResult,
+  findPairsForDeletedPaths,
+  reportPairIdentity,
+  resolveReportVideoPath,
+} from '@/utils/reportRecordDeletion'
 import {
   findReportForPaths,
   mergeReports,
@@ -103,6 +110,7 @@ const pageSizeOptions = [10, 20, 50, 100]
 export function ResultsPage() {
   const navigate = useNavigate()
   const location = useLocation()
+  const { t, tm } = useI18n()
   const reportDir = useSettingsStore((state) => state.reportDir)
   const videoDir = useSettingsStore((state) => state.videoDir)
   const threshold = useSettingsStore((state) => state.defaultMatchThreshold)
@@ -292,7 +300,7 @@ export function ResultsPage() {
         setActiveReport(null)
         setReport(null)
         setResultSummary(null)
-        setNotice('尚未找到可读取的报告文件，完成分析后会自动显示结果。')
+        setNotice(t('尚未找到可读取的报告文件，完成分析后会自动显示结果。'))
         setSelectedIds(new Set())
         return
       }
@@ -309,9 +317,9 @@ export function ResultsPage() {
             const warningText = parsed.warnings.length > 0
               ? `报告已读取，但没有生成视频对结果；报告内有 ${parsed.warnings.length} 条警告，请查看日志或原始报告。`
               : '报告已读取，但没有生成视频对结果。'
-            setNotice(warningText)
+            setNotice(t(warningText))
           } else if (candidate.notice) {
-            setNotice(candidate.notice)
+            setNotice(t(candidate.notice))
           }
           return
         } catch (err) {
@@ -330,7 +338,7 @@ export function ResultsPage() {
     } finally {
       setLoading(false)
     }
-  }, [reportPaths, setReport, setResultSummary, threshold])
+  }, [reportPaths, setReport, setResultSummary, t, threshold])
 
   useEffect(() => {
     if (initializedRef.current) return
@@ -509,34 +517,33 @@ export function ResultsPage() {
     if (deletingPairs.length === 0) return false
 
     setDeletingResults(true)
-    setError('')
     try {
       const result = await updateReportEntries(
         sourcePath,
-        deletingPairs.map((pair) => ({
-          videoA: pair.videoA,
-          videoB: pair.videoB,
-          videoAPath: pair.videoAPath,
-          videoBPath: pair.videoBPath,
-        })),
+        deletingPairs.map(reportPairIdentity),
       )
-      const remainingPairs = report.pairs.filter((pair) => !uniqueIds.includes(pair.id))
-      const nextSummary = summarizePairs(remainingPairs, threshold)
-      setReport({ ...report, pairs: remainingPairs, summary: nextSummary })
-      setResultSummary(nextSummary)
+      const applied = applyReportDeletionResult(report, deletingPairs, result.removedCount, threshold)
+      if (!applied.success || !applied.report) {
+        setError(`${applied.error} 报告文件可能已被外部修改，请刷新报告后重试。`)
+        return false
+      }
+
+      setReport(applied.report)
+      setResultSummary(applied.report.summary)
       if (activeReport) {
         const updatedReport = {
           ...activeReport,
-          pairCount: result.remainingCount,
+          pairCount: applied.report.pairs.length,
           modifiedAt: new Date().toISOString(),
         }
         setActiveReport(updatedReport)
         setReportOptions(reportOptions.map((item) => reportKey(item) === reportKey(activeReport) ? updatedReport : item))
       }
+      setError('')
       setSelectedIds(new Set())
       setSelectedVideoKeys(new Set())
       setSelectedPair(null)
-      setNotice(message)
+      setNotice(tm(message))
       return true
     } catch (deleteError) {
       setError(normalizeBackendError(deleteError))
@@ -549,11 +556,11 @@ export function ResultsPage() {
   async function deletePairs(ids: string[]) {
     const uniqueIds = Array.from(new Set(ids)).filter(Boolean)
     if (uniqueIds.length === 0) return
-    const confirmed = window.confirm(
+    const confirmed = window.confirm(tm(
       uniqueIds.length === 1
         ? '确定删除这条结果数据吗？该条目会同步从 JSON、CSV 和 HTML 报告文件中删除。'
         : `确定删除选中的 ${uniqueIds.length} 条结果数据吗？这些条目会同步从 JSON、CSV 和 HTML 报告文件中删除。`,
-    )
+    ))
     if (!confirmed) return
 
     await removePairsFromReport(
@@ -585,9 +592,9 @@ export function ResultsPage() {
         const reports = await loadReportList({ selectLatest: true })
         if (reports.length > 0) {
           await loadReport({ report: reports[0], reportList: reports })
-          setNotice('已删除当前报告中的全部结果及对应报告文件。')
+          setNotice(t('已删除当前报告中的全部结果及对应报告文件。'))
         } else {
-          setNotice('已删除当前报告中的全部结果及对应报告文件。')
+          setNotice(t('已删除当前报告中的全部结果及对应报告文件。'))
         }
         return
       }
@@ -609,21 +616,15 @@ export function ResultsPage() {
     const uniquePaths = Array.from(new Set(entries.map((entry) => entry.path).filter(Boolean)))
     if (uniquePaths.length === 0) return
     const names = Array.from(new Set(entries.map((entry) => entry.name))).slice(0, 4).join('、')
-    const confirmed = window.confirm(scope === 'all'
+    const confirmed = window.confirm(tm(scope === 'all'
       ? `确定永久删除当前报告全部结果关联的 ${uniquePaths.length} 个视频文件吗？\n${names}${entries.length > 4 ? ' 等' : ''}\n\n文件删除后无法恢复，删除成功的视频对应结果记录也会从当前视图移除。`
-      : `确定永久删除 ${uniquePaths.length} 个视频文件吗？\n${names}${entries.length > 4 ? ' 等' : ''}\n\n文件删除后无法恢复，对应结果记录也会从当前视图移除。`)
+      : `确定永久删除 ${uniquePaths.length} 个视频文件吗？\n${names}${entries.length > 4 ? ' 等' : ''}\n\n文件删除后无法恢复，对应结果记录也会从当前视图移除。`))
     if (!confirmed) return
 
     setError('')
     try {
       const result = await deleteFiles(uniquePaths)
-      const deleted = new Set(result.deletedPaths.map(normalizeComparablePath))
-      const affectedPairIds = (report?.pairs ?? [])
-        .filter((pair) => {
-          const pathA = normalizeComparablePath(resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir))
-          const pathB = normalizeComparablePath(resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir))
-          return deleted.has(pathA) || deleted.has(pathB)
-        })
+      const affectedPairIds = findPairsForDeletedPaths(report?.pairs ?? [], result.deletedPaths, videoDir)
         .map((pair) => pair.id)
       if (affectedPairIds.length > 0) {
         await removePairsFromReport(
@@ -636,7 +637,7 @@ export function ResultsPage() {
       if (result.failed.length > 0) {
         setError(result.failed.map((item) => `${item.path}：${item.error}`).join('；'))
       } else if (affectedPairIds.length === 0) {
-        setNotice(result.message)
+        setNotice(t(result.message))
       }
     } catch (deleteError) {
       setError(normalizeBackendError(deleteError))
@@ -649,7 +650,7 @@ export function ResultsPage() {
     const entry = {
       key: videoSelectionKey(videoContextMenu.pair.id, videoContextMenu.side),
       pairId: videoContextMenu.pair.id,
-      path: resolveResultVideoPath(
+      path: resolveReportVideoPath(
         isA ? videoContextMenu.pair.videoAPath : videoContextMenu.pair.videoBPath,
         isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB,
         videoDir,
@@ -680,13 +681,13 @@ export function ResultsPage() {
     if (!videoContextMenu) return
     const isA = videoContextMenu.side === 'A'
     const name = isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB
-    const path = resolveResultVideoPath(
+    const path = resolveReportVideoPath(
       isA ? videoContextMenu.pair.videoAPath : videoContextMenu.pair.videoBPath,
       name,
       videoDir,
     )
     addMergeVideo(path, name)
-    setNotice(`已将 ${name} 加入合并列表。`)
+    setNotice(t(`已将 ${name} 加入合并列表。`))
     setVideoContextMenu(null)
     if (openMergePage) navigate('/merge')
   }
@@ -695,10 +696,10 @@ export function ResultsPage() {
     if (!videoContextMenu) return
     const pair = videoContextMenu.pair
     const added = addMergeVideos([
-      { path: resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir), name: pair.videoA },
-      { path: resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir), name: pair.videoB },
+      { path: resolveReportVideoPath(pair.videoAPath, pair.videoA, videoDir), name: pair.videoA },
+      { path: resolveReportVideoPath(pair.videoBPath, pair.videoB, videoDir), name: pair.videoB },
     ])
-    setNotice(`已将该视频对中的 ${added} 个视频加入合并列表。`)
+    setNotice(t(`已将该视频对中的 ${added} 个视频加入合并列表。`))
     setVideoContextMenu(null)
   }
 
@@ -1131,7 +1132,7 @@ export function ResultsPage() {
           </button>
           <button type="button" role="menuitem" onClick={() => {
             const isA = videoContextMenu.side === 'A'
-            const path = resolveResultVideoPath(
+            const path = resolveReportVideoPath(
               isA ? videoContextMenu.pair.videoAPath : videoContextMenu.pair.videoBPath,
               isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB,
               videoDir,
@@ -1143,17 +1144,17 @@ export function ResultsPage() {
           </button>
           <button type="button" role="menuitem" onClick={() => {
             const isA = videoContextMenu.side === 'A'
-            const path = resolveResultVideoPath(
+            const path = resolveReportVideoPath(
               isA ? videoContextMenu.pair.videoAPath : videoContextMenu.pair.videoBPath,
               isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB,
               videoDir,
             )
             const currentName = isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB
             setVideoContextMenu(null)
-            const newName = window.prompt('请输入新的文件名（包含扩展名）：', currentName)
+            const newName = window.prompt(t('请输入新的文件名（包含扩展名）：'), currentName)
             if (newName && newName !== currentName) {
               renameFile(path, newName).then((res) => {
-                setNotice(res.message)
+                setNotice(t(res.message))
                 void handleRefreshReports()
               }).catch((error) => setError(normalizeBackendError(error)))
             }
@@ -1163,16 +1164,20 @@ export function ResultsPage() {
           <button className="danger" type="button" role="menuitem" onClick={() => {
             const isA = videoContextMenu.side === 'A'
             const currentName = isA ? videoContextMenu.pair.videoA : videoContextMenu.pair.videoB
-            const relatedIds = report?.pairs
-              .filter(p => p.videoA === currentName || p.videoB === currentName)
-              .map(p => p.id) ?? []
+            const currentPath = resolveReportVideoPath(
+              isA ? videoContextMenu.pair.videoAPath : videoContextMenu.pair.videoBPath,
+              currentName,
+              videoDir,
+            )
+            const relatedIds = findPairsForDeletedPaths(report?.pairs ?? [], [currentPath], videoDir)
+              .map((pair) => pair.id)
             setVideoContextMenu(null)
             if (relatedIds.length > 0) {
-              if (window.confirm(`确定要从报告中删除与该视频相关的 ${relatedIds.length} 条记录吗？`)) {
+              if (window.confirm(tm(`确定要从报告中删除与该视频相关的 ${relatedIds.length} 条记录吗？`))) {
                 void removePairsFromReport(relatedIds, `已删除 ${relatedIds.length} 条与视频 ${currentName} 相关的记录。`)
               }
             } else {
-              setNotice('报告中没有与该视频相关的记录。')
+              setNotice(t('报告中没有与该视频相关的记录。'))
             }
           }}>
             <Trash2 />删除与该视频相关记录
@@ -1204,7 +1209,7 @@ export function ResultsPage() {
               for (const p of paths) {
                 await deleteReport(p)
               }
-              setNotice(`已成功删除 ${paths.length} 个报告。`)
+              setNotice(t(`已成功删除 ${paths.length} 个报告。`))
               setReportListDialogOpen(false)
               if (activeReport && paths.includes(activeReport.jsonPath || activeReport.csvPath || activeReport.htmlPath || activeReport.path || '')) {
                 setReport(null)
@@ -1331,20 +1336,16 @@ function videoEntriesForPairs(pairs: ReportPair[], videoDir: string) {
     {
       key: videoSelectionKey(pair.id, 'A'),
       pairId: pair.id,
-      path: resolveResultVideoPath(pair.videoAPath, pair.videoA, videoDir),
+      path: resolveReportVideoPath(pair.videoAPath, pair.videoA, videoDir),
       name: pair.videoA,
     },
     {
       key: videoSelectionKey(pair.id, 'B'),
       pairId: pair.id,
-      path: resolveResultVideoPath(pair.videoBPath, pair.videoB, videoDir),
+      path: resolveReportVideoPath(pair.videoBPath, pair.videoB, videoDir),
       name: pair.videoB,
     },
   ])
-}
-
-function normalizeComparablePath(path: string) {
-  return path.trim().replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
 }
 
 function formatRelation(relation: string) {
@@ -1476,13 +1477,6 @@ function pageNumbers(current: number, total: number) {
   const start = Math.max(1, Math.min(current - 1, total - 2))
   const end = Math.min(total, start + 2)
   return Array.from({ length: end - start + 1 }, (_, index) => start + index)
-}
-
-function resolveResultVideoPath(path: string, name: string, videoDir: string) {
-  if (/^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(path)) return path
-  const base = videoDir.replace(/[\\/]+$/, '')
-  const separator = base.includes('\\') ? '\\' : '/'
-  return base ? `${base}${separator}${fileName(path || name)}` : path || name
 }
 
 function ReportListDialog({

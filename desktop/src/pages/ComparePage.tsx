@@ -4,13 +4,22 @@ import { useNavigate } from 'react-router-dom'
 import { AlertCircle, ArrowLeft, CheckCircle2, Clapperboard, ExternalLink, Film, FolderOpen, Images, ListPlus, Pause, PlaySquare, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { Badge, GlassPanel, MetricBar, NeonButton, SelectInput } from '@/components/DesignSystem'
 import { Translated } from '@/i18n/Translated'
-import { authorizeMediaPath, captureComparisonFrame, captureVideoFrame, deleteFiles, fileName, formatBytes, localFileSrc, normalizeBackendError, openFile, revealInFolder, type ComparisonFrameOptions, type PathStatus } from '@/services/backend'
+import { useI18n } from '@/i18n/useI18n'
+import { authorizeMediaPath, captureComparisonFrame, captureVideoFrame, deleteFiles, fileName, formatBytes, localFileSrc, normalizeBackendError, openFile, revealInFolder, updateReportEntries, type ComparisonFrameOptions, type PathStatus } from '@/services/backend'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useMergeStore } from '@/stores/mergeStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { ReportFrameMatch, ReportPair, ReportWindow } from '@/utils/reportParser'
 import { formatHHMMSS, formatPercent, formatScore, metricPercent } from '@/utils/reportParser'
 import { getRelationInfo, relationTone } from '@/utils/relation'
+import {
+  findPairsForDeletedPaths,
+  applyReportDeletionResult,
+  pairContainsDeletedPath,
+  reportPairIdentity,
+  reportPairVideoPaths,
+  resolveReportVideoPath,
+} from '@/utils/reportRecordDeletion'
 
 type DirectionFilter = 'all' | 'A_to_B' | 'B_to_A'
 type FrameViewMode = 'original' | 'comparison'
@@ -25,7 +34,12 @@ const EMPTY_FRAME_MATCHES: ReportFrameMatch[] = []
 export function ComparePage() {
   const navigate = useNavigate()
   const selectedPair = useAnalysisStore((state) => state.selectedPair)
+  const report = useAnalysisStore((state) => state.report)
+  const setReport = useAnalysisStore((state) => state.setReport)
+  const setResultSummary = useAnalysisStore((state) => state.setResultSummary)
+  const setSelectedPair = useAnalysisStore((state) => state.setSelectedPair)
   const settings = useSettingsStore()
+  const { t, tm } = useI18n()
   const videoDir = settings.videoDir
   const [direction, setDirection] = useState<DirectionFilter>('all')
   const [frameViewMode, setFrameViewMode] = useState<FrameViewMode>('original')
@@ -76,7 +90,7 @@ export function ComparePage() {
   const totalFrameMatches = selectedPair
     ? selectedPair.matchesAToBTotal + selectedPair.matchesBToATotal || selectedPair.frameMatches.length
     : 0
-  const duplicatePaths = useMemo(() => getDuplicateGroupPaths(selectedPair), [selectedPair])
+  const duplicatePaths = useMemo(() => getDuplicateGroupPaths(selectedPair, videoDir), [selectedPair, videoDir])
   const isDuplicateFileMode = duplicatePaths.length > 0
   const selectedPairId = selectedPair?.id ?? ''
   const selectedMatchKey = selectedMatch
@@ -252,19 +266,79 @@ export function ComparePage() {
     }
   }
 
+  async function syncDeletedPathsToReport(deletedPaths: string[]) {
+    const currentPair = useAnalysisStore.getState().selectedPair ?? selectedPair
+    const currentReport = useAnalysisStore.getState().report ?? report
+    const affectedPairs = currentReport
+      ? findPairsForDeletedPaths(currentReport.pairs, deletedPaths, videoDir)
+      : []
+    const selectedPairDeleted = currentPair
+      ? pairContainsDeletedPath(currentPair, deletedPaths, videoDir)
+      : false
+
+    let reportError = ''
+    if (affectedPairs.length > 0) {
+      const sourcePath = currentReport?.sourcePath?.trim()
+      if (!sourcePath) {
+        reportError = '当前结果没有对应的报告文件，无法同步删除记录。'
+      } else {
+        try {
+          const result = await updateReportEntries(
+            sourcePath,
+            affectedPairs.map(reportPairIdentity),
+          )
+          if (currentReport) {
+            const applied = applyReportDeletionResult(
+              currentReport,
+              affectedPairs,
+              result.removedCount,
+              settings.defaultMatchThreshold,
+            )
+            if (!applied.success || !applied.report) {
+              reportError = applied.error
+            } else {
+              setReport(applied.report)
+              setResultSummary(applied.report.summary)
+            }
+          }
+        } catch (err) {
+          reportError = normalizeBackendError(err)
+        }
+      }
+    }
+
+    // A deleted file must never remain selected in the comparison view, even
+    // when report persistence fails. The report store is only changed after a
+    // successful update_report_entries call above.
+    if (selectedPairDeleted) setSelectedPair(null)
+    return { affectedCount: affectedPairs.length, reportError }
+  }
+
   async function handleDeleteDuplicatePaths(paths: string[], actionLabel: string) {
     const uniquePaths = Array.from(new Set(paths)).filter(Boolean)
     if (uniquePaths.length === 0) return
-    const confirmed = window.confirm(`${actionLabel}：确认永久删除 ${uniquePaths.length} 个文件吗？此操作不可撤销。`)
+    const confirmed = window.confirm(tm(`${actionLabel}：确认永久删除 ${uniquePaths.length} 个文件吗？此操作不可撤销。`))
     if (!confirmed) return
     setError('')
     setDuplicateMessageState({ pairId: selectedPairId, message: '' })
     try {
       const result = await deleteFiles(uniquePaths)
-      setDuplicateMessageState({ pairId: selectedPairId, message: result.message })
       setDuplicateSelection({ pairId: selectedPairId, paths: new Set() })
+      const sync = result.deletedPaths.length > 0
+        ? await syncDeletedPathsToReport(result.deletedPaths)
+        : { affectedCount: 0, reportError: '' }
+      if (sync.reportError) {
+        setError(tm(`已删除 ${result.deletedPaths.length} 个文件，但同步报告记录失败：${sync.reportError}`))
+      } else {
+        const successMessage = t(result.message)
+        setDuplicateMessageState({ pairId: selectedPairId, message: successMessage })
+        setNotice(successMessage)
+      }
       if (result.failed.length > 0) {
-        setError(result.failed.map((item) => `${item.path}: ${item.error}`).join('；'))
+        const fileError = result.failed.map((item) => `${item.path}: ${item.error}`).join('；')
+        setError(sync.reportError
+          ? `${tm(`已删除 ${result.deletedPaths.length} 个文件，但同步报告记录失败：${sync.reportError}`)} ${tm(fileError)}`
+          : tm(fileError))
       }
     } catch (err) {
       setError(normalizeBackendError(err))
@@ -279,6 +353,12 @@ export function ComparePage() {
           <AlertCircle size={34} />
           <h2>尚未选择视频对</h2>
           <p>请先从结果总览选择一条视频比较结果。</p>
+          {(error || notice) && (
+            <div className={error ? 'inline-error compact-message compare-error' : 'compact-message success-message compare-error'}>
+              {error ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+              {error || notice}
+            </div>
+          )}
           <NeonButton type="button" onClick={() => navigate('/results')}>
             <ArrowLeft size={20} />
             返回结果总览
@@ -437,7 +517,7 @@ export function ComparePage() {
     const name = source ? selectedPair.videoA : selectedPair.videoB
     const added = addMergeVideo(path, name)
     setError('')
-    setNotice(added ? `${name} 已加入合并列表。` : `${name} 已在合并列表中。`)
+    setNotice(t(added ? `${name} 已加入合并列表。` : `${name} 已在合并列表中。`))
     setVideoContextMenu(null)
     if (openMergePage) navigate('/merge')
   }
@@ -457,17 +537,27 @@ export function ComparePage() {
     const path = source ? sourceVideoPath : targetVideoPath
     const name = source ? selectedPair.videoA : selectedPair.videoB
     setVideoContextMenu(null)
-    const confirmed = window.confirm(`确定永久删除视频文件“${name}”吗？\n${path}\n\n此操作不可撤销。`)
+    const confirmed = window.confirm(tm(`确定永久删除视频文件“${name}”吗？\n${path}\n\n此操作不可撤销。`))
     if (!confirmed) return
     setError('')
     setNotice('')
     try {
       const result = await deleteFiles([path])
+      const sync = result.deletedPaths.length > 0
+        ? await syncDeletedPathsToReport(result.deletedPaths)
+        : { affectedCount: 0, reportError: '' }
       if (result.failed.length > 0) {
-        setError(result.failed.map((item) => `${item.path}：${item.error}`).join('；'))
+        const fileError = result.failed.map((item) => `${item.path}：${item.error}`).join('；')
+        setError(sync.reportError
+          ? `${tm(`文件已删除，但同步报告记录失败：${sync.reportError}`)} ${tm(fileError)}`
+          : tm(fileError))
         return
       }
-      setNotice(`已删除视频文件：${name}。返回结果总览后可删除对应记录。`)
+      if (sync.reportError) {
+        setError(tm(`已删除视频文件：${name}，但同步报告记录失败：${sync.reportError}`))
+      } else {
+        setNotice(t(`已删除视频文件：${name}，并同步删除相关报告记录。`))
+      }
     } catch (deleteError) {
       setError(normalizeBackendError(deleteError))
     }
@@ -1111,18 +1201,12 @@ function resolveFixedVideoPath(pair: ReportPair, match: ReportFrameMatch, side: 
     : resolveVideoPath(candidate, pair.videoBPath, pair.videoB, videoDir)
 }
 
-function getDuplicateGroupPaths(pair: ReportPair | null) {
+function getDuplicateGroupPaths(pair: ReportPair | null, videoDir: string) {
   if (!pair) return []
-  const rawPaths = Array.isArray(pair.raw.duplicate_group_paths)
-    ? pair.raw.duplicate_group_paths
-    : []
-  const paths = rawPaths
-    .map((path) => String(path ?? '').trim())
-    .filter(Boolean)
-  const fallback = [pair.videoAPath, pair.videoBPath].filter(Boolean)
-  const unique = Array.from(new Set(paths.length > 0 ? paths : fallback))
   const mode = String(pair.raw.analysis_mode ?? '')
-  return mode === 'duplicate_file' || pair.relation === 'identical_file' ? unique : []
+  return mode === 'duplicate_file' || pair.relation === 'identical_file'
+    ? reportPairVideoPaths(pair, videoDir)
+    : []
 }
 
 function numericRawValue(value: unknown) {
@@ -1193,19 +1277,11 @@ function resolveVideoPath(candidate: string, pairPath: string, fallbackName: str
   if (isUsablePath(candidate)) return candidate
   if (isUsablePath(pairPath)) return pairPath
 
-  const name = fileName(candidate || pairPath || fallbackName)
-  if (videoDir && name) return joinPath(videoDir, name)
-  return pairPath || candidate || fallbackName
+  return resolveReportVideoPath(candidate || pairPath, fallbackName, videoDir)
 }
 
 function isUsablePath(path: string) {
   return Boolean(path && (/^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('\\\\') || /[\\/]/.test(path)))
-}
-
-function joinPath(directory: string, name: string) {
-  if (!directory) return name
-  const separator = directory.includes('\\') ? '\\' : '/'
-  return `${directory.replace(/[\\/]+$/, '')}${separator}${name.replace(/^[\\/]+/, '')}`
 }
 
 function isEditableTarget(target: EventTarget | null) {

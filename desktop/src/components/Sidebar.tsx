@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { BarChart3, Clapperboard, Grid2X2, Images, Settings } from 'lucide-react'
+import { AnalysisExportStatus } from '@/components/analysis/AnalysisExportStatus'
 import { MergeExportStatus } from '@/components/merge/MergeExportStatus'
 import { useI18n } from '@/i18n/useI18n'
 import { getAppInfo } from '@/services/backend'
@@ -13,6 +14,13 @@ const navItems = [
   { path: '/merge', label: '合并视频', icon: Clapperboard },
   { path: '/settings', label: '设置', icon: Settings },
 ]
+
+// eslint-disable-next-line react-refresh/only-export-components -- route contract is covered by Sidebar.test.ts.
+export function statusCapsuleRoute(pathname: string): 'analysis' | 'merge' | null {
+  if (pathname === '/') return 'analysis'
+  if (pathname === '/merge') return 'merge'
+  return null
+}
 
 export function Sidebar() {
   const { t } = useI18n()
@@ -57,7 +65,12 @@ export function Sidebar() {
 
       <div className="sidebar-version-row">
         <div className="version-pill">{version ? `v${version}` : 'v...'}</div>
-        {location.pathname === '/merge' && (
+        {statusCapsuleRoute(location.pathname) === 'analysis' && (
+          <div className="merge-export-status-anchor analysis-export-status-anchor">
+            <AnalysisExportStatus />
+          </div>
+        )}
+        {statusCapsuleRoute(location.pathname) === 'merge' && (
           <div className="merge-export-status-anchor">
             <MergeExportStatus />
           </div>

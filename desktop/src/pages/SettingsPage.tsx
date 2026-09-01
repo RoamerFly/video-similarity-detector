@@ -35,6 +35,7 @@ import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
 import { RuntimeSettingsCard } from '@/components/RuntimeSettingsCard'
 import { MergeRuntimeSettingsCard } from '@/components/MergeRuntimeSettingsCard'
 import { Translated } from '@/i18n/Translated'
+import { useI18n } from '@/i18n/useI18n'
 import {
   cancelUpdateDownload,
   checkClipModelUpdate,
@@ -292,25 +293,31 @@ function isCurrentDownloadGeneration(kind: DownloadTaskKind, generation: number)
   return downloadTaskSnapshots[kind].generation === generation
 }
 
-function formatResourceCheckDetails(check: ResourceUpdateCheck) {
+function formatResourceCheckDetails(
+  check: ResourceUpdateCheck,
+  translate: (value: string) => string = (value) => value,
+) {
   const versions = check.installedVersion && check.remoteVersion
-    ? `（本地 v${check.installedVersion}，GitHub v${check.remoteVersion}）`
+    ? `(${translate('本地')} v${check.installedVersion}, GitHub v${check.remoteVersion})`
     : check.remoteVersion
-      ? `（GitHub v${check.remoteVersion}）`
+      ? `(GitHub v${check.remoteVersion})`
       : ''
   const hashes = check.localSha256 && check.remoteSha256
-    ? `（本地 SHA-256 ${check.localSha256.slice(0, 12)}…，远端 ${check.remoteSha256.slice(0, 12)}…）`
+    ? `(${translate('本地')} SHA-256 ${check.localSha256.slice(0, 12)}…, ${translate('远端')} ${check.remoteSha256.slice(0, 12)}…)`
     : ''
   return `${versions}${hashes}`
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
-export function clipModelUpdatePrompt(check: ResourceUpdateCheck) {
-  const details = formatResourceCheckDetails(check)
-  if (!check.installed) return `已找到 GitHub 最新版离线 CLIP 模型${details}，是否安装？`
-  if (check.comparisonAvailable && check.updateAvailable) return `检测到离线 CLIP 模型有可用更新${details}，是否更新？`
-  if (check.comparisonAvailable) return `当前离线 CLIP 模型已是最新版${details}。是否仍要强制重装？`
-  return '无法可靠比较离线 CLIP 模型的本地版本与 GitHub 最新版。是否强制重装？'
+export function clipModelUpdatePrompt(
+  check: ResourceUpdateCheck,
+  translate: (value: string) => string = (value) => value,
+) {
+  const details = formatResourceCheckDetails(check, translate)
+  if (!check.installed) return `${translate('已找到 GitHub 最新版离线 CLIP 模型')}${details}，${translate('是否安装？')}`
+  if (check.comparisonAvailable && check.updateAvailable) return `${translate('检测到离线 CLIP 模型有可用更新')}${details}，${translate('是否更新？')}`
+  if (check.comparisonAvailable) return `${translate('当前离线 CLIP 模型已是最新版')}${details}。${translate('是否仍要强制重装？')}`
+  return translate('无法可靠比较离线 CLIP 模型的本地版本与 GitHub 最新版。是否强制重装？')
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -379,6 +386,7 @@ async function runEnvironmentCheck(quickCheck = false) {
 
 export function SettingsPage() {
   const settings = useSettingsStore()
+  const { tm } = useI18n()
   const [activeTab, setActiveTab] = useState<SettingsTab>('base')
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const environment = useEnvironmentStore((state) => state.status)
@@ -596,7 +604,7 @@ export function SettingsPage() {
       setError('请先选择要清理的缓存项目。')
       return
     }
-    const confirmed = window.confirm(`确认清理选中的 ${paths.length} 个缓存项目吗？此操作不可撤销，但不会删除原始视频。`)
+    const confirmed = window.confirm(tm(`确认清理选中的 ${paths.length} 个缓存项目吗？此操作不可撤销，但不会删除原始视频。`))
     if (!confirmed) return
 
     setClearingCache(true)
@@ -617,7 +625,7 @@ export function SettingsPage() {
   }
 
   function handleReset() {
-    if (!window.confirm(resetConfirmMessage)) return
+    if (!window.confirm(tm(resetConfirmMessage))) return
     if (activeTab === 'analysis') {
       settings.resetAnalysisSettings()
       showSettingsMessage('已恢复默认分析配置，请点击“保存设置”应用。')
@@ -835,6 +843,7 @@ function BaseSettings({
   onResourceCompleted: (message: string) => void
 }) {
   const settings = useSettingsStore()
+  const { tm } = useI18n()
   const [modelStatus, setModelStatus] = useState<ClipModelStatus | null>(null)
   const [modelLoading, setModelLoading] = useState(false)
   const [modelInstalling, setModelInstalling] = useState(() => getDownloadTaskSnapshot('clip-model').active)
@@ -1009,7 +1018,7 @@ function BaseSettings({
       return
     }
     setModelChecking(false)
-    const confirmed = window.confirm(clipModelUpdatePrompt(updateCheck))
+    const confirmed = window.confirm(clipModelUpdatePrompt(updateCheck, tm))
     if (!confirmed) return
     const operation = modelOperationRef.current + 1
     modelOperationRef.current = operation
@@ -1274,7 +1283,8 @@ function resourceStatus(ready: boolean | undefined, loading: boolean): ResourceS
 }
 
 function ResourceStatusBadge({ state }: { state: ResourceStatus }) {
-  const label = state === 'installed' ? '已安装' : state === 'missing' ? '缺失' : '检测中'
+  const { t } = useI18n()
+  const label = state === 'installed' ? t('已安装') : state === 'missing' ? t('缺失') : t('检测中')
   return <span className={`settings-resource-status ${state}`}>{label}</span>
 }
 
@@ -1303,26 +1313,27 @@ function ClipModelSettingsCard({
   onInstall: () => void
   onCancel: () => void
 }) {
+  const { t } = useI18n()
   const canCancel = installing && clipModelProgressCanCancel(progress?.stage || '')
   return (
     <div className="settings-about-card">
       <div className="about-grid compact">
-        <div><span>安装状态</span><strong>{loading ? '检测中' : status?.installed ? '已安装' : '未安装'}</strong></div>
-        <div><span>模型大小</span><strong>{status?.sizeBytes ? formatBytes(status.sizeBytes) : '未检测到'}</strong></div>
+        <div><span>{t('安装状态')}</span><strong>{loading ? t('检测中') : status?.installed ? t('已安装') : t('未安装')}</strong></div>
+        <div><span>{t('模型大小')}</span><strong>{status?.sizeBytes ? formatBytes(status.sizeBytes) : t('未检测到')}</strong></div>
       </div>
-      {status?.modelDir ? <p className="update-install-path" title={status.modelDir}>模型目录：{status.modelDir}</p> : null}
-      <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{error || (checking ? '正在检查更新' : status?.message || '正在检测离线模型状态。')}</p>
-      {missingFiles.length > 0 ? <p className="update-install-path">缺失文件：{missingFiles.join(', ')}</p> : null}
+      {status?.modelDir ? <p className="update-install-path" title={status.modelDir}>{t('模型目录：')}{status.modelDir}</p> : null}
+      <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{error ? t(error) : checking ? t('正在检查更新') : t(status?.message || '正在检测离线模型状态。')}</p>
+      {missingFiles.length > 0 ? <p className="update-install-path">{t('缺失文件：')}{missingFiles.join(', ')}</p> : null}
       {progress && (
         <div className="update-progress-block">
-          <div><span>{progress.stage || '正在处理模型'}</span><strong>{progressValue.toFixed(0)}%</strong></div>
+          <div><span>{t(progress.stage || '正在处理模型')}</span><strong>{progressValue.toFixed(0)}%</strong></div>
           <div className="update-progress-track"><span style={{ width: `${progressValue}%` }} /></div>
           <small>{formatBytes(progress.downloadedBytes)}{progress.totalBytes ? ` / ${formatBytes(progress.totalBytes)}` : ''}</small>
         </div>
       )}
       <div className="settings-path-actions">
         <NeonButton variant="outline" type="button" onClick={onRefresh} disabled={loading || installing || checking}>
-          <RefreshCw size={17} />刷新
+          <RefreshCw size={17} />{t('刷新')}
         </NeonButton>
         <NeonButton
           variant={installing || checking ? 'outline' : 'primary'}
@@ -1331,7 +1342,7 @@ function ClipModelSettingsCard({
           disabled={checking || (installing && !canCancel)}
         >
           {checking ? <RefreshCw size={17} className="spin-slow" /> : installing && canCancel ? <CircleStop size={17} /> : installing ? <RefreshCw size={17} className="spin-slow" /> : <Download size={17} />}
-          {checking ? '正在检查更新' : installing && canCancel ? '取消下载' : installing ? '正在安装模型' : '重装/更新环境'}
+          {checking ? t('正在检查更新') : installing && canCancel ? t('取消下载') : installing ? t('正在安装模型') : t('重装/更新环境')}
         </NeonButton>
       </div>
     </div>
@@ -1385,6 +1396,7 @@ function UpdateDialog({
   proxyUrl: string
   onClose: () => void
 }) {
+  const { tm } = useI18n()
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(() => getDownloadTaskSnapshot('update').active)
@@ -1494,7 +1506,7 @@ function UpdateDialog({
   async function handleInstallUpdate() {
     if (!update?.canAutoInstall || installing) return
     const confirmed = window.confirm(
-      `将下载 ${update.buildFlavor.toUpperCase()} 安装包，完成后自动退出并覆盖安装到：\n${update.installRoot}\n\n数据、报告、缓存和设置不会被删除。是否继续？`,
+      tm(`将下载 ${update.buildFlavor.toUpperCase()} 安装包，完成后自动退出并覆盖安装到：\n${update.installRoot}\n\n数据、报告、缓存和设置不会被删除。是否继续？`),
     )
     if (!confirmed) return
     const operation = updateOperationRef.current + 1
@@ -1800,6 +1812,7 @@ function formatUpdatePublishedAt(value: string) {
 
 function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: string) => void }) {
   const settings = useSettingsStore()
+  const { tm } = useI18n()
   const activePreset = settings.selectedAnalysisPreset
   const activePresetOption = analysisPresetOptions.find((preset) => preset.id === activePreset)
   const saveTargetPreset = activePreset === 'custom' ? settings.customAnalysisPresetSource : activePreset
@@ -1824,7 +1837,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
   }, [refreshTemplates])
 
   async function saveAnalysisTemplate(template?: ConfigTemplateRecord<AnalysisPresetConfig>) {
-    const name = template?.name ?? window.prompt('请输入分析配置模板名称：')?.trim()
+    const name = template?.name ?? window.prompt(tm('请输入分析配置模板名称：'))?.trim()
     if (!name) return
     try {
       const saved = await saveConfigTemplate(
@@ -1843,7 +1856,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
   }
 
   async function removeTemplate(kind: 'analysis' | 'error_tolerance', id: string, name: string) {
-    if (!id || !window.confirm(`确认删除模板“${name}”吗？`)) return
+    if (!id || !window.confirm(tm(`确认删除模板“${name}”吗？`))) return
     try {
       await deleteConfigTemplate(kind, id, settings.projectRoot)
       await refreshTemplates()
@@ -1902,7 +1915,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
           onSave={() => void saveAnalysisTemplate()}
           onOverwrite={() => {
             const template = analysisTemplates.find((item) => item.id === selectedAnalysisTemplate)
-            if (template && window.confirm(`使用当前分析配置覆盖模板“${template.name}”吗？`)) {
+            if (template && window.confirm(tm(`使用当前分析配置覆盖模板“${template.name}”吗？`))) {
               void saveAnalysisTemplate(template)
             }
           }}
@@ -1995,6 +2008,7 @@ function AnalysisSettings({ onPresetSaved }: { onPresetSaved: (presetName: strin
 
 function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) => void }) {
   const settings = useSettingsStore()
+  const { tm } = useI18n()
   const [templates, setTemplates] = useState<ConfigTemplateRecord<ErrorToleranceTemplateConfig>[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState('')
   const [templateMessage, setTemplateMessage] = useState('')
@@ -2025,7 +2039,7 @@ function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) =>
   }
 
   async function saveTemplate(template?: ConfigTemplateRecord<ErrorToleranceTemplateConfig>) {
-    const name = template?.name ?? window.prompt('请输入错误容忍模板名称：')?.trim()
+    const name = template?.name ?? window.prompt(tm('请输入错误容忍模板名称：'))?.trim()
     if (!name) return
     try {
       const saved = await saveConfigTemplate(
@@ -2046,7 +2060,7 @@ function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) =>
 
   async function removeTemplate() {
     const template = templates.find((item) => item.id === selectedTemplate)
-    if (!template || !window.confirm(`确认删除模板“${template.name}”吗？`)) return
+    if (!template || !window.confirm(tm(`确认删除模板“${template.name}”吗？`))) return
     try {
       await deleteConfigTemplate('error_tolerance', template.id, settings.projectRoot)
       await refreshTemplates()
@@ -2123,7 +2137,7 @@ function ErrorToleranceSettings({ onMessage }: { onMessage: (message: string) =>
         onSave={() => void saveTemplate()}
         onOverwrite={() => {
           const template = templates.find((item) => item.id === selectedTemplate)
-          if (template && window.confirm(`使用当前错误容忍设置覆盖模板“${template.name}”吗？`)) {
+          if (template && window.confirm(tm(`使用当前错误容忍设置覆盖模板“${template.name}”吗？`))) {
             void saveTemplate(template)
           }
         }}

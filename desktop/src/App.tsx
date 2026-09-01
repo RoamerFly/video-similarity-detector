@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom'
 import { AppLayout } from '@/components/AppLayout'
+import { useI18n } from '@/i18n/useI18n'
 
 const loadResultsPage = () => import('@/pages/ResultsPage').then((module) => ({ default: module.ResultsPage }))
 const loadComparePage = () => import('@/pages/ComparePage').then((module) => ({ default: module.ComparePage }))
@@ -15,8 +16,9 @@ const SettingsPage = lazy(loadSettingsPage)
 const MergePage = lazy(loadMergePage)
 
 function LazyRoute({ children }: { children: ReactNode }) {
+  const { t } = useI18n()
   return (
-    <Suspense fallback={<div className="app-route-loading">正在加载页面…</div>}>
+    <Suspense fallback={<div className="app-route-loading">{t('正在加载页面…')}</div>}>
       {children}
     </Suspense>
   )

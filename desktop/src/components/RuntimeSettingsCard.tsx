@@ -17,6 +17,7 @@ import {
   type UpdateDownloadProgress,
   type ResourceUpdateCheck,
 } from '@/services/backend'
+import { useI18n } from '@/i18n/useI18n'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 interface RuntimeDownloadSnapshot {
@@ -125,25 +126,33 @@ function beginRuntimeTask(task: RuntimeTask, notifyCompletion = false) {
   return generation
 }
 
-function formatResourceCheckDetails(check: ResourceUpdateCheck) {
+function formatResourceCheckDetails(check: ResourceUpdateCheck, translate: (value: string) => string = (value) => value) {
+  const isEnglish = translate('本地') !== '本地'
+  const open = isEnglish ? ' (' : '（'
+  const close = isEnglish ? ')' : '）'
+  const comma = isEnglish ? ', ' : '，'
   const versions = check.installedVersion && check.remoteVersion
-    ? `（本地 v${check.installedVersion}，GitHub v${check.remoteVersion}）`
+    ? `${open}${translate('本地')} v${check.installedVersion}${comma}GitHub v${check.remoteVersion}${close}`
     : check.remoteVersion
-      ? `（GitHub v${check.remoteVersion}）`
+      ? `${open}GitHub v${check.remoteVersion}${close}`
       : ''
   const hashes = check.localSha256 && check.remoteSha256
-    ? `（本地 SHA-256 ${check.localSha256.slice(0, 12)}…，远端 ${check.remoteSha256.slice(0, 12)}…）`
+    ? `${open}${translate('本地')} SHA-256 ${check.localSha256.slice(0, 12)}${isEnglish ? '…' : '…'}${comma}${translate('远端')} ${check.remoteSha256.slice(0, 12)}…${close}`
     : ''
   return `${versions}${hashes}`
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
-export function runtimeUpdatePrompt(check: ResourceUpdateCheck) {
-  const details = formatResourceCheckDetails(check)
-  if (!check.installed) return `已找到 GitHub 最新版 AI 运行环境${details}，是否安装？`
-  if (check.comparisonAvailable && check.updateAvailable) return `检测到 AI 运行环境有可用更新${details}，是否更新？`
-  if (check.comparisonAvailable) return `当前 AI 运行环境已是最新版${details}。是否仍要强制重装？`
-  return `无法可靠比较 AI 运行环境的本地版本与 GitHub 最新版。是否强制重装？`
+export function runtimeUpdatePrompt(check: ResourceUpdateCheck, translate?: (value: string) => string) {
+  const t = translate ?? ((value: string) => value)
+  const isEnglish = t('本地') !== '本地'
+  const separator = isEnglish ? '. ' : '，'
+  const end = isEnglish ? '.' : '。'
+  const details = formatResourceCheckDetails(check, t)
+  if (!check.installed) return `${t('已找到 GitHub 最新版 AI 运行环境')}${details}${separator}${t('是否安装？')}`
+  if (check.comparisonAvailable && check.updateAvailable) return `${t('检测到 AI 运行环境有可用更新')}${details}${separator}${t('是否更新？')}`
+  if (check.comparisonAvailable) return `${t('当前 AI 运行环境已是最新版')}${details}${end} ${t('是否仍要强制重装？')}`
+  return t('无法可靠比较 AI 运行环境的本地版本与 GitHub 最新版。是否强制重装？')
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -153,6 +162,7 @@ export function runtimeProgressCanCancel(stage: string) {
 
 export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void }) {
   const proxyUrl = useSettingsStore((state) => state.networkProxy)
+  const { t, tm } = useI18n()
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const [installing, setInstalling] = useState(runtimeDownloadSnapshot.active)
@@ -264,7 +274,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
       return
     }
     setCheckingUpdate(false)
-    if (!window.confirm(runtimeUpdatePrompt(updateCheck))) return
+    if (!window.confirm(runtimeUpdatePrompt(updateCheck, t))) return
     const operation = operationRef.current + 1
     operationRef.current = operation
     const nextTask: RuntimeTask = 'runtime'
@@ -372,7 +382,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
   async function handleCleanup() {
     if (installing) return
     const legacyPath = status?.legacyRuntimeDir || '旧版内置目录'
-    if (!window.confirm(`确认删除旧版运行环境？\n${legacyPath}\n\n当前托管环境不会受影响。`)) return
+    if (!window.confirm(tm(`确认删除旧版运行环境？\n${legacyPath}\n\n当前托管环境不会受影响。`))) return
     const operation = operationRef.current + 1
     operationRef.current = operation
     const generation = beginRuntimeTask('runtime-cleanup')
@@ -416,51 +426,51 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
   const percentage = Math.max(0, Math.min(100, progress?.progress ?? 0))
   const canCancel = runtimeTaskCanCancel(task, installing, progress?.stage === '正在取消下载') && runtimeProgressCanCancel(progress?.stage || '')
   const cancelLabel = task === 'runtime-migration'
-    ? '取消迁移'
+    ? t('取消迁移')
     : task === 'runtime-cleanup'
-      ? '取消清理'
-      : '取消下载'
+      ? t('取消清理')
+      : t('取消下载')
   const busyLabel = task === 'runtime-migration'
-    ? '正在迁移运行环境'
+    ? t('正在迁移运行环境')
     : task === 'runtime-cleanup'
-      ? '正在清理旧环境'
-    : '正在安装环境'
+      ? t('正在清理旧环境')
+    : t('正在安装环境')
   return (
     <div className="settings-about-card">
       <div className="about-title">
         {status?.ready ? <CheckCircle2 size={24} /> : <HardDrive size={24} />}
-        <h3>AI 运行环境</h3>
+        <h3>{t('AI 运行环境')}</h3>
       </div>
       <div className="about-grid compact">
         <div>
-          <span>状态</span>
-          <strong>{loading ? '检测中' : status?.ready ? '可用' : '未安装'}</strong>
+          <span>{t('状态')}</span>
+          <strong>{loading ? t('检测中') : status?.ready ? t('可用') : t('未安装')}</strong>
         </div>
         <div>
-          <span>环境</span>
+          <span>{t('环境')}</span>
           <strong>{status?.flavor === 'gpu' ? 'GPU / CUDA' : 'CPU'}</strong>
         </div>
         <div>
-          <span>版本</span>
+          <span>{t('版本')}</span>
           <strong>v{status?.installedVersion ?? status?.expectedVersion ?? '1'}</strong>
         </div>
         <div>
-          <span>存储方式</span>
-          <strong>{status?.managed ? '安装目录 env' : status?.legacyFallback ? '现有 env' : '待安装'}</strong>
+          <span>{t('存储方式')}</span>
+          <strong>{status?.managed ? t('安装目录 env') : status?.legacyFallback ? t('现有 env') : t('待安装')}</strong>
         </div>
       </div>
       {status?.runtimeDir && (
         <p className="update-install-path" title={status.runtimeDir}>
-          运行环境目录：{status.runtimeDir}
+          {t('运行环境目录：')}{status.runtimeDir}
         </p>
       )}
       <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>
-        {error || (checkingUpdate ? '正在检查更新' : status?.message || '正在检测运行环境。')}
+        {error ? tm(error) : checkingUpdate ? t('正在检查更新') : status?.message ? tm(status.message) : t('正在检测运行环境。')}
       </p>
       {progress && (
         <div className="update-progress-block">
           <div>
-            <span>{progress.stage}</span>
+            <span>{tm(progress.stage)}</span>
             <strong>{percentage.toFixed(0)}%</strong>
           </div>
           <div className="update-progress-track">
@@ -480,12 +490,12 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
           disabled={loading || installing || checkingUpdate}
         >
           <RefreshCw size={17} />
-          刷新
+          {t('刷新')}
         </NeonButton>
         {checkingUpdate ? (
           <NeonButton variant="outline" type="button" disabled>
             <RefreshCw size={17} className="spin-slow" />
-            正在检查更新
+            {t('正在检查更新')}
           </NeonButton>
         ) : installing ? canCancel ? (
           <NeonButton type="button" onClick={() => void handleCancel()}>
@@ -500,7 +510,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
         ) : (
           <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate}>
             <Download size={17} />
-            重装/更新环境
+            {t('重装/更新环境')}
           </NeonButton>
         )}
         {status?.legacyCleanupAvailable && (
@@ -511,7 +521,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
             disabled={installing}
           >
             <Trash2 size={17} />
-            清理旧环境
+            {t('清理旧环境')}
           </NeonButton>
         )}
       </div>

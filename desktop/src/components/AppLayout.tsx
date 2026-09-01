@@ -6,7 +6,6 @@ import { NeonButton } from '@/components/DesignSystem'
 import { RuntimeSetupDialog } from '@/components/RuntimeSetupDialog'
 import { Sidebar } from '@/components/Sidebar'
 import { WindowControls } from '@/components/WindowControls'
-import { translateMultiline } from '@/i18n/messages'
 import { useI18n } from '@/i18n/useI18n'
 import {
   closeWindow,
@@ -39,7 +38,7 @@ export function AppLayout() {
   const reportDir = useSettingsStore((state) => state.reportDir)
   const closeBehavior = useSettingsStore((state) => state.closeBehavior)
   const resultSummary = useAnalysisStore((state) => state.resultSummary)
-  const { t } = useI18n()
+  const { t, tm } = useI18n()
   const copy = getRouteCopy(location.pathname, resultSummary)
 
   useEffect(() => {
@@ -56,7 +55,7 @@ export function AppLayout() {
   }, [])
 
   const performCloseAction = useCallback(async (action: Exclude<CloseBehavior, 'ask'>, remember = false) => {
-    if (action === 'exit' && !(await confirmExitWhileMoving())) return
+    if (action === 'exit' && !(await confirmExitWhileMoving(tm))) return
 
     if (remember) {
       const settings = useSettingsStore.getState()
@@ -66,7 +65,7 @@ export function AppLayout() {
     }
 
     await closeWindow(action === 'tray')
-  }, [])
+  }, [tm])
 
   const handleExitRequest = useCallback(() => {
     const behavior = useSettingsStore.getState().closeBehavior
@@ -330,11 +329,11 @@ export function AppLayout() {
           <div className="header-actions">
             <NeonButton variant="outline" onClick={() => void revealInFolder(reportDir || 'data/reports').catch(() => undefined)}>
               <FolderOpen size={22} />
-              打开报告目录
+              {t('打开报告目录')}
             </NeonButton>
             <NeonButton onClick={() => navigate('/')}>
               <GitBranch size={22} />
-              重新分析
+              {t('重新分析')}
             </NeonButton>
           </div>
         )}
@@ -365,7 +364,7 @@ export function AppLayout() {
   )
 }
 
-async function confirmExitWhileMoving() {
+async function confirmExitWhileMoving(translate: (value: string) => string) {
   let status: FileMoveStatus
   try {
     status = await getFileMoveStatus()
@@ -374,24 +373,25 @@ async function confirmExitWhileMoving() {
   }
 
   if (!status.running) return true
-  const language = useSettingsStore.getState().appLanguage
-  return window.confirm(translateMultiline(formatMovingExitWarning(status), language))
+  return window.confirm(formatMovingExitWarning(status, translate))
 }
 
-function formatMovingExitWarning(status: FileMoveStatus) {
+function formatMovingExitWarning(status: FileMoveStatus, translate: (value: string) => string = (value) => value) {
   const affected = status.pendingPaths
     .slice(0, 6)
     .map((path) => `- ${fileNameFromPath(path)}`)
     .join('\n')
-  const more = status.pendingPaths.length > 6 ? `\n- 以及另外 ${status.pendingPaths.length - 6} 个文件` : ''
-  const current = status.currentPath ? `\n当前文件：${fileNameFromPath(status.currentPath)}` : ''
-  const target = status.targetDir ? `\n目标目录：${status.targetDir}` : ''
+  const more = status.pendingPaths.length > 6
+    ? `\n- ${translate('以及另外')} ${status.pendingPaths.length - 6} ${translate('个文件')}`
+    : ''
+  const current = status.currentPath ? `\n${translate('当前文件：')}${fileNameFromPath(status.currentPath)}` : ''
+  const target = status.targetDir ? `\n${translate('目标目录：')}${status.targetDir}` : ''
   return [
-    '尚有文件在移动，是否确认退出？',
-    '退出程序会中断移动任务，正在复制的文件可能需要重新整理。',
+    translate('尚有文件在移动，是否确认退出？'),
+    translate('退出程序会中断移动任务，正在复制的文件可能需要重新整理。'),
     current,
     target,
-    affected ? `\n可能受影响的视频：\n${affected}${more}` : '',
+    affected ? `\n${translate('可能受影响的视频：')}\n${affected}${more}` : '',
   ].filter(Boolean).join('\n')
 }
 
@@ -430,13 +430,13 @@ function CloseChoiceDialog({
 
         <div className="close-dialog-actions">
           <NeonButton variant="outline" type="button" onClick={onCancel}>
-            取消
+            {t('取消')}
           </NeonButton>
           <NeonButton variant="outline" type="button" onClick={() => onChoose('tray')}>
-            最小化到托盘运行
+            {t('最小化到托盘运行')}
           </NeonButton>
           <NeonButton tone="red" type="button" onClick={() => onChoose('exit')}>
-            退出程序
+            {t('退出程序')}
           </NeonButton>
         </div>
       </section>

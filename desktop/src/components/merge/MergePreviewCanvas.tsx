@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import { Film, RotateCcw, X } from 'lucide-react'
 
 import { localFileSrc, type VideoMetadata } from '@/services/backend'
+import { useI18n } from '@/i18n/useI18n'
 import type {
   MergeQueueItem,
   MergeSettings,
@@ -144,6 +145,7 @@ export function MergePreviewCanvas({
   onNudge,
   onFullscreenError,
 }: MergePreviewCanvasProps) {
+  const { t } = useI18n()
   const fullscreenRef = useRef<HTMLDivElement | null>(null)
   const previewStageRef = useRef<HTMLDivElement | null>(null)
   const computedPreviewRef = useRef<HTMLVideoElement | null>(null)
@@ -235,7 +237,7 @@ export function MergePreviewCanvas({
       fallbackFullscreenRef.current = true
       setFallbackFullscreen(true)
       setIsFullscreen(true)
-      onFullscreenError?.('系统全屏不可用，已切换到窗口内全屏预览。')
+      onFullscreenError?.(t('系统全屏不可用，已切换到窗口内全屏预览。'))
     }
   }
 
@@ -365,7 +367,7 @@ export function MergePreviewCanvas({
                 ].filter(Boolean).join(' ')}
                 key={layout.item.id}
                 title={activeLayoutCount > 1
-                  ? `${layout.item.name}：拖动可调整画面位置`
+                  ? `${layout.item.name}${t('：拖动可调整画面位置')}`
                   : layout.item.name}
                 style={displayedCell ? {
                   left: displayedCell.left,
@@ -412,7 +414,7 @@ export function MergePreviewCanvas({
           }) : (
             <div className="editor-preview-empty">
               <Film />
-              <strong>将视频拖入窗口或点击“添加视频”</strong>
+              <strong>{t('将视频拖入窗口或点击“添加视频”')}</strong>
             </div>
           )}
 
@@ -434,7 +436,7 @@ export function MergePreviewCanvas({
                   color: item.color,
                   backgroundColor: item.backgroundColor,
                 }}
-                title="拖动调整文本位置，右键打开属性编辑内容和样式"
+                title={t('拖动调整文本位置，右键打开属性编辑内容和样式')}
                 onPointerDown={(event) => onPreviewTextPointerDown(event, item)}
                 onContextMenu={(event) => onPreviewTextContextMenu(event, item)}
               >
@@ -444,7 +446,7 @@ export function MergePreviewCanvas({
                     type="button"
                     key={handle}
                     className={`editor-preview-text-resize-handle ${handle}`}
-                    aria-label={`调整文本大小 ${handle}`}
+                    aria-label={`${t('调整文本大小')} ${handle}`}
                     onPointerDown={(event) => onPreviewTextResizePointerDown(event, item, handle)}
                   />
                 ))}
@@ -455,8 +457,8 @@ export function MergePreviewCanvas({
           {suspendMedia && previewLayouts.length > 0 && (
             <div className="editor-preview-suspended" role="status">
               <Film />
-              <strong>正在后台处理视频</strong>
-              <span>预览解码已暂停，以释放内存和处理器资源</span>
+              <strong>{t('正在后台处理视频')}</strong>
+              <span>{t('预览解码已暂停，以释放内存和处理器资源')}</span>
             </div>
           )}
 
@@ -466,13 +468,13 @@ export function MergePreviewCanvas({
               style={displayedGroupPixelRect}
               onPointerDown={(event) => onGroupLayoutPointerDown(event, 'move')}
             >
-              <span>组合画面</span>
+              <span>{t('组合画面')}</span>
               {resizeHandles.map((handle) => (
                 <button
                   type="button"
                   key={handle}
                   className={`editor-group-handle ${handle}`}
-                  aria-label={`调整组合画面 ${handle}`}
+                  aria-label={`${t('调整组合画面')} ${handle}`}
                   onPointerDown={(event) => onGroupLayoutPointerDown(event, handle)}
                 />
               ))}
@@ -499,13 +501,13 @@ export function MergePreviewCanvas({
                 style={cropSelectionStyle(draft?.crop?.id === previewClip.id ? draft.crop.rect : cropRectFromClip(previewClip, cropGeometry), cropGeometry)}
                 onPointerDown={(event) => onCropPointerDown(event, 'move')}
               >
-                <span>导出区域</span>
+                <span>{t('导出区域')}</span>
                 {resizeHandles.map((handle) => (
                   <button
                     type="button"
                     key={handle}
                     className={`video-crop-handle ${handle}`}
-                    aria-label={`调整选区 ${handle}`}
+                    aria-label={`${t('调整选区')} ${handle}`}
                     onPointerDown={(event) => onCropPointerDown(event, handle)}
                   />
                 ))}
@@ -520,7 +522,7 @@ export function MergePreviewCanvas({
               ref={computedPreviewRef}
               className="editor-preview-computed-video"
               src={localFileSrc(resolutionPreview.path)}
-              aria-label={`已计算真实分辨率预览，时长 ${resolutionPreview.duration.toFixed(1)} 秒`}
+              aria-label={`${t('已计算真实分辨率预览')}，${t('时长')} ${resolutionPreview.duration.toFixed(1)} ${t('秒')}`}
               style={{ left: 0, top: 0, width: outputCanvasGeometry.width, height: outputCanvasGeometry.height }}
               playsInline
               onPlay={() => setComputedPreviewPlaying(true)}
@@ -536,27 +538,27 @@ export function MergePreviewCanvas({
                 setComputedPreviewTime(resolutionPreview.duration)
               }}
             />
-            <span className="editor-preview-computed-label">已计算预览 · {settings.width} × {settings.height} · {resolutionPreview.duration.toFixed(1)} 秒</span>
+            <span className="editor-preview-computed-label">{t('已计算预览')} · {settings.width} × {settings.height} · {resolutionPreview.duration.toFixed(1)} {t('秒')}</span>
           </>
         )}
 
         {previewClip && cropEditing && (
-          <div className="video-crop-reset-button" role="group" aria-label="裁剪编辑操作" style={{ gap: 9 }}>
+          <div className="video-crop-reset-button" role="group" aria-label={t('裁剪编辑操作')} style={{ gap: 9 }}>
             <button
               type="button"
-              title="将裁剪框恢复到完整视频画面"
+              title={t('将裁剪框恢复到完整视频画面')}
               onClick={onResetCropSelection}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: 0, color: 'inherit', border: 0, background: 'transparent', font: 'inherit', whiteSpace: 'nowrap' }}
             >
-              <RotateCcw />重置裁剪框
+              <RotateCcw />{t('重置裁剪框')}
             </button>
             <button
               type="button"
-              title="取消裁剪调整"
+              title={t('取消裁剪调整')}
               onClick={onCancelCropEditing}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: 0, color: 'inherit', border: 0, background: 'transparent', font: 'inherit', whiteSpace: 'nowrap' }}
             >
-              <X />取消
+              <X />{t('取消')}
             </button>
           </div>
         )}

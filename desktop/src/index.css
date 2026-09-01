@@ -12471,7 +12471,7 @@ select {
 
 }
 
-/* Final frozen-bar overrides. Keep these at the end so responsive legacy rules cannot undo them. */
+/* Final analysis workspace overrides. Keep these at the end so responsive legacy rules cannot undo them. */
 .analyze-workspace.route-fill {
   position: relative;
   display: block;
@@ -12485,7 +12485,7 @@ select {
   position: absolute;
   top: 0;
   right: 0;
-  bottom: 58px;
+  bottom: 0;
   left: 0;
   width: auto;
   height: auto;
@@ -12494,35 +12494,6 @@ select {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-}
-
-.analyze-workspace > .analysis-log-drawer,
-.analyze-workspace > .analysis-log-drawer.collapsed,
-.analyze-workspace > .analysis-log-drawer.open {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 90;
-  width: auto;
-  margin: 0;
-  pointer-events: auto;
-}
-
-.analyze-workspace > .analysis-log-drawer.collapsed {
-  height: 48px;
-}
-
-.analyze-workspace > .analysis-log-drawer.open {
-  max-height: min(48vh, 430px);
-}
-
-.analyze-workspace > .analysis-log-drawer .log-drawer-handle {
-  min-height: 48px;
-}
-
-.analyze-workspace > .analysis-log-drawer.open .analysis-log-panel {
-  max-height: min(31vh, 290px);
 }
 
 .settings-shell.route-fill {
@@ -12560,16 +12531,7 @@ select {
 
 @media (max-width: 760px) {
   .analyze-workspace > .analysis-page-content {
-    bottom: 56px;
-  }
-
-  .analyze-workspace > .analysis-log-drawer,
-  .analyze-workspace > .analysis-log-drawer.collapsed,
-  .analyze-workspace > .analysis-log-drawer.open {
-    right: 0;
     bottom: 0;
-    left: 0;
-    width: auto;
   }
 }
 
@@ -13241,7 +13203,7 @@ select {
 
 /* Final sidebar-collapse ownership: at ≤1120px the sidebar collapses to an
    icon-only rail (76px). The later "Usability pass" rules — .app-sidebar
-   { width: 196px } and .app-main/.analysis-log-drawer { left: 224px } — sit
+   { width: 196px } and .app-main { left: 224px } — sit
    later in source and would otherwise override the collapse, leaving the main
    content overlapping the still-wide rail. Re-assert the collapsed geometry
    with a higher-specificity selector so it always wins. */
@@ -13250,9 +13212,7 @@ select {
     width: 76px;
   }
 
-  .app-frame .app-main,
-  .app-frame .analysis-log-drawer,
-  .app-frame .analysis-log-drawer.collapsed {
+  .app-frame .app-main {
     left: 102px;
   }
 }
@@ -13261,11 +13221,24 @@ select {
    纯数字，缩窄上一页/下一页与跳转输入，分页行整体压矮，让表格获得更多
    可视空间。数字按钮保持 title/aria-label 语义（第 N 页），无碍无障碍。 */
 .results-page.route-fill .pagination-row {
-  height: 50px;
+  height: 44px;
   grid-template-columns: 120px minmax(0, 1fr) 170px;
 }
 
-.pagination-row .page-number-button {
+/* Keep the report path close to the controls and cards so the table gets the
+   reclaimed vertical space. These overrides are scoped to Results and do not
+   change the shared report list or other pages. */
+.results-page.route-fill {
+  gap: 8px;
+}
+
+.results-page.route-fill .report-context-row {
+  min-height: 27px;
+  margin-bottom: 2px;
+  padding-block: 4px;
+}
+
+.results-page.route-fill .pagination-row .page-number-button {
   width: 34px;
   min-width: 34px;
   height: 32px;
@@ -13274,7 +13247,7 @@ select {
   border-radius: 7px;
 }
 
-.pagination-row .page-nav-button {
+.results-page.route-fill .pagination-row .page-nav-button {
   min-width: 64px;
   height: 32px;
   padding: 0 8px;
@@ -13282,12 +13255,12 @@ select {
   white-space: nowrap;
 }
 
-.pagination-row .page-jump-control {
+.results-page.route-fill .pagination-row .page-jump-control {
   gap: 4px;
   font-size: 13px;
 }
 
-.pagination-row .page-jump-control input {
+.results-page.route-fill .pagination-row .page-jump-control input {
   width: 42px;
   height: 30px;
 }
@@ -13295,12 +13268,12 @@ select {
 /* 分页栏贴底：收窄表格面板底部内边距（16px → 6px），消掉分页栏下方约 17px
    的空隙，分页栏随之下移，底部空间不再浪费。 */
 .results-page.route-fill .results-table-panel {
-  padding: 0 14px 6px;
+  padding: 0 14px 2px;
 }
 
 /* 「每页」标签保持横向紧凑：禁止换行、禁止 flex 压缩。否则右边这一格不够宽时
    会被压窄，两个字「每」「页」折成两行、看起来是竖排。 */
-.pagination-row .page-size-control span {
+.results-page.route-fill .pagination-row .page-size-control span {
   line-height: 1;
   white-space: nowrap;
   flex-shrink: 0;
@@ -13310,6 +13283,18 @@ select {
    一行、看起来是竖排），改为横向换行：各控件保持一行内的横排，放不下时
    整组换到下一行。 */
 @media (max-width: 980px) {
+  .results-page.route-fill {
+    height: auto;
+    min-height: 100%;
+    overflow: auto;
+    grid-template-rows: auto auto;
+    align-content: start;
+  }
+
+  .results-page.route-fill .results-table-panel {
+    min-height: 460px;
+  }
+
   .results-page.route-fill .pagination-row {
     height: auto;
     display: flex;
@@ -13318,7 +13303,11 @@ select {
     align-items: center;
     justify-content: space-between;
     gap: 8px 14px;
-    padding-block: 10px;
+    padding-block: 6px;
+  }
+
+  .results-page.route-fill .results-table-panel {
+    padding-bottom: 2px;
   }
 
   .results-page.route-fill .pagination-center {
@@ -13586,6 +13575,42 @@ select {
   flex: 0 0 auto;
   color: rgba(123, 220, 255, 0.96);
   font-size: 15px;
+}
+
+.analysis-export-substage {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 4px 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(70, 105, 176, 0.08);
+}
+
+.analysis-export-substage > span {
+  grid-column: 1 / -1;
+  color: rgba(203, 218, 247, 0.5);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.analysis-export-substage > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(241, 246, 255, 0.84);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-export-substage > b {
+  color: rgba(123, 220, 255, 0.88);
+  font-size: 11px;
+}
+
+.analysis-export-substage > .merge-progress-track {
+  grid-column: 1 / -1;
+  height: 5px;
 }
 
 .merge-export-logs-tab {

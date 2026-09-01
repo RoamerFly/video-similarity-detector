@@ -18,6 +18,7 @@ import {
 } from './timelineModel'
 import { timelineDragOverlayPosition } from './timelineGesture'
 import type { MergeTextItem, MergeTrack } from '@/stores/mergeStore'
+import { useI18n } from '@/i18n/useI18n'
 
 interface MergeTimelineProps {
   clock: PlaybackClock
@@ -107,6 +108,7 @@ export const MergeTimeline = memo(function MergeTimeline({
   onTextTrimPointerDown,
   onTextContextMenu,
 }: MergeTimelineProps) {
+  const { t } = useI18n()
   const dragPreviewValue = useTimelineDragPreview(dragPreview)
   const [viewport, setViewport] = useState({ left: 0, width: 0 })
 
@@ -171,12 +173,12 @@ export const MergeTimeline = memo(function MergeTimeline({
       <div className="timeline-track-labels">
         <span className="timeline-label-heading">
           <Clock3 />
-          <span>时间线</span>
+          <span>{t('时间线')}</span>
           <button
             type="button"
             className="timeline-align-button"
-            aria-label="一键对齐时间线"
-            title={alignTimelineDisabledReason}
+            aria-label={t('一键对齐时间线')}
+            title={t(alignTimelineDisabledReason)}
             disabled={!canAlignTimeline}
             onClick={onAlignTimeline}
           >
@@ -185,17 +187,17 @@ export const MergeTimeline = memo(function MergeTimeline({
         </span>
         <div className="timeline-track-label-list" style={{ gridTemplateRows: tracksTemplate }}>
           {videoTracks.map((track) => (
-            <button type="button" key={track.id} title="右键新建视频线" onContextMenu={(event) => onTrackContextMenu(event, 'video', track.id)}>
+            <button type="button" key={track.id} title={t('右键新建视频线')} onContextMenu={(event) => onTrackContextMenu(event, 'video', track.id)}>
               <Film />{track.name}
             </button>
           ))}
           {audioTracks.map((track) => (
-            <button type="button" key={track.id} title="右键新建音频线" onContextMenu={(event) => onTrackContextMenu(event, 'audio', track.id)}>
+            <button type="button" key={track.id} title={t('右键新建音频线')} onContextMenu={(event) => onTrackContextMenu(event, 'audio', track.id)}>
               <Music2 />{track.name}
             </button>
           ))}
           {textTracks.map((track) => (
-            <button type="button" key={track.id} title="右键新建或管理文本线" onContextMenu={(event) => onTextTrackContextMenu(event, track.id)}>
+            <button type="button" key={track.id} title={t('右键新建或管理文本线')} onContextMenu={(event) => onTextTrackContextMenu(event, track.id)}>
               <Type />{track.name}
             </button>
           ))}
@@ -222,17 +224,17 @@ export const MergeTimeline = memo(function MergeTimeline({
                     const start = trimPreview ? (dragPreviewValue?.start ?? layout.start) : layout.start
                     const duration = trimPreview && dragPreviewValue?.duration !== undefined ? dragPreviewValue.duration : layout.duration
                     return (
-                    <button type="button" key={layout.item.id} data-clip-id={layout.item.id} className={['timeline-video-clip', selectedClipId === layout.item.id ? 'selected' : '', draggedClipId === layout.item.id ? 'long-press-dragging' : '', dragPreviewValue?.kind === 'video' && dragPreviewValue.targetClipId === layout.item.id ? 'drag-target' : ''].filter(Boolean).join(' ')} style={{ left: timelinePixel(start, pixelsPerSecond), width: timelineLength(duration, pixelsPerSecond) }} title={`${fileStem(layout.item.name)}\n短按或拖动定位播放头`} onPointerDown={(event) => onVideoPointerDown(event, layout)} onContextMenu={(event) => onVideoContextMenu(event, layout)}>
+                    <button type="button" key={layout.item.id} data-clip-id={layout.item.id} className={['timeline-video-clip', selectedClipId === layout.item.id ? 'selected' : '', draggedClipId === layout.item.id ? 'long-press-dragging' : '', dragPreviewValue?.kind === 'video' && dragPreviewValue.targetClipId === layout.item.id ? 'drag-target' : ''].filter(Boolean).join(' ')} style={{ left: timelinePixel(start, pixelsPerSecond), width: timelineLength(duration, pixelsPerSecond) }} title={`${fileStem(layout.item.name)}\n${t('短按或拖动定位播放头')}`} onPointerDown={(event) => onVideoPointerDown(event, layout)} onContextMenu={(event) => onVideoContextMenu(event, layout)}>
                       <span className="timeline-clip-trim-handle start" aria-hidden="true" onPointerDown={(event) => onVideoTrimPointerDown(event, layout, 'start')} />
                       <span>{fileStem(layout.item.name)}</span>
-                      {layout.item.rotation !== 0 && <RotateCw className="timeline-transform-icon" aria-label={`右旋 ${layout.item.rotation} 度`} />}
-                      {layout.item.cropEnabled && <SquareDashedMousePointer className="timeline-transform-icon" aria-label="该片段已裁剪" />}
-                      {layout.item.muted && <VolumeX className="timeline-muted-icon" aria-label="该片段已静音" />}
+                      {layout.item.rotation !== 0 && <RotateCw className="timeline-transform-icon" aria-label={`${t('右旋')} ${layout.item.rotation} ${t('度')}`} />}
+                      {layout.item.cropEnabled && <SquareDashedMousePointer className="timeline-transform-icon" aria-label={t('该片段已裁剪')} />}
+                      {layout.item.muted && <VolumeX className="timeline-muted-icon" aria-label={t('该片段已静音')} />}
                       <span className="timeline-clip-trim-handle end" aria-hidden="true" onPointerDown={(event) => onVideoTrimPointerDown(event, layout, 'end')} />
                     </button>
                     )
                   })}
-                  {renderDragTarget(dragPreviewValue, 'video', track.id, pixelsPerSecond)}
+                  {renderDragTarget(dragPreviewValue, 'video', track.id, pixelsPerSecond, t)}
                 </div>
               )
             })}
@@ -245,20 +247,20 @@ export const MergeTimeline = memo(function MergeTimeline({
                   event.preventDefault()
                   onTrackContextMenu(event, 'audio', track.id)
                 }}>
-                  {trackIsEmpty && <span className="timeline-empty-hint">拖入音频，或右键视频片段提取音频</span>}
+                  {trackIsEmpty && <span className="timeline-empty-hint">{t('拖入音频，或右键视频片段提取音频')}</span>}
                   {layouts.map((layout) => {
                     const trimPreview = dragPreviewValue?.id === layout.item.id && dragPreviewValue.kind === 'audio' && dragPreviewValue.mode?.startsWith('trim-')
                     const start = trimPreview ? (dragPreviewValue?.start ?? layout.start) : layout.start
                     const duration = trimPreview && dragPreviewValue?.duration !== undefined ? dragPreviewValue.duration : layout.duration
                     return (
-                    <button type="button" key={layout.item.id} data-clip-id={layout.item.id} className={['timeline-audio-clip', selectedAudioId === layout.item.id ? 'selected' : '', draggedAudioId === layout.item.id ? 'long-press-dragging' : '', dragPreviewValue?.kind === 'audio' && dragPreviewValue.targetClipId === layout.item.id ? 'drag-target' : ''].filter(Boolean).join(' ')} style={{ left: timelinePixel(start, pixelsPerSecond), width: timelineLength(duration, pixelsPerSecond) }} title={`${layout.item.name}\n长按后拖动可调整时间线位置`} onPointerDown={(event) => onAudioPointerDown(event, layout)} onContextMenu={(event) => onAudioContextMenu(event, layout)}>
+                    <button type="button" key={layout.item.id} data-clip-id={layout.item.id} className={['timeline-audio-clip', selectedAudioId === layout.item.id ? 'selected' : '', draggedAudioId === layout.item.id ? 'long-press-dragging' : '', dragPreviewValue?.kind === 'audio' && dragPreviewValue.targetClipId === layout.item.id ? 'drag-target' : ''].filter(Boolean).join(' ')} style={{ left: timelinePixel(start, pixelsPerSecond), width: timelineLength(duration, pixelsPerSecond) }} title={`${layout.item.name}\n${t('长按后拖动可调整时间线位置')}`} onPointerDown={(event) => onAudioPointerDown(event, layout)} onContextMenu={(event) => onAudioContextMenu(event, layout)}>
                       <span className="timeline-clip-trim-handle start" aria-hidden="true" onPointerDown={(event) => onAudioTrimPointerDown(event, layout, 'start')} />
                       <Music2 /><span>{layout.item.name}</span>
                       <span className="timeline-clip-trim-handle end" aria-hidden="true" onPointerDown={(event) => onAudioTrimPointerDown(event, layout, 'end')} />
                     </button>
                     )
                   })}
-                  {renderDragTarget(dragPreviewValue, 'audio', track.id, pixelsPerSecond)}
+                  {renderDragTarget(dragPreviewValue, 'audio', track.id, pixelsPerSecond, t)}
                 </div>
               )
             })}
@@ -271,20 +273,20 @@ export const MergeTimeline = memo(function MergeTimeline({
                   event.preventDefault()
                   onTextTrackContextMenu(event, track.id)
                 }}>
-                  {trackIsEmpty && <span className="timeline-empty-hint">右键添加文本片段</span>}
+                  {trackIsEmpty && <span className="timeline-empty-hint">{t('右键添加文本片段')}</span>}
                   {items.map((item) => {
                     const trimPreview = dragPreviewValue?.id === item.id && dragPreviewValue.kind === 'text' && dragPreviewValue.mode?.startsWith('trim-')
                     const start = trimPreview ? (dragPreviewValue?.start ?? item.startTime) : item.startTime
                     const duration = trimPreview && dragPreviewValue?.duration !== undefined ? dragPreviewValue.duration : item.duration
                     return (
-                    <button type="button" key={item.id} data-clip-id={item.id} className={['timeline-text-clip', selectedTextId === item.id ? 'selected' : '', draggedTextId === item.id ? 'long-press-dragging' : '', dragPreviewValue?.kind === 'text' && dragPreviewValue.targetClipId === item.id ? 'drag-target' : ''].filter(Boolean).join(' ')} style={{ left: timelinePixel(start, pixelsPerSecond), width: timelineLength(duration, pixelsPerSecond) }} title={`${item.text}\n长按后拖动可调整时间线位置`} onPointerDown={(event) => onTextPointerDown(event, item)} onContextMenu={(event) => onTextContextMenu(event, item)}>
+                    <button type="button" key={item.id} data-clip-id={item.id} className={['timeline-text-clip', selectedTextId === item.id ? 'selected' : '', draggedTextId === item.id ? 'long-press-dragging' : '', dragPreviewValue?.kind === 'text' && dragPreviewValue.targetClipId === item.id ? 'drag-target' : ''].filter(Boolean).join(' ')} style={{ left: timelinePixel(start, pixelsPerSecond), width: timelineLength(duration, pixelsPerSecond) }} title={`${item.text}\n${t('长按后拖动可调整时间线位置')}`} onPointerDown={(event) => onTextPointerDown(event, item)} onContextMenu={(event) => onTextContextMenu(event, item)}>
                       <span className="timeline-clip-trim-handle start" aria-hidden="true" onPointerDown={(event) => onTextTrimPointerDown(event, item, 'start')} />
                       <span>{item.text}</span>
                       <span className="timeline-clip-trim-handle end" aria-hidden="true" onPointerDown={(event) => onTextTrimPointerDown(event, item, 'end')} />
                     </button>
                     )
                   })}
-                  {renderDragTarget(dragPreviewValue, 'text', track.id, pixelsPerSecond)}
+                  {renderDragTarget(dragPreviewValue, 'text', track.id, pixelsPerSecond, t)}
                 </div>
               )
             })}
@@ -313,6 +315,7 @@ function renderDragTarget(
   kind: 'video' | 'audio' | 'text',
   trackId: string,
   pixelsPerSecond: number,
+  translate: (value: string) => string,
 ) {
   if (!value || value.kind !== kind || value.trackId !== trackId || value.duration === undefined) return null
   return (
@@ -322,7 +325,7 @@ function renderDragTarget(
       aria-hidden="true"
       data-target-clip-id={value.targetClipId ?? undefined}
     >
-      <span>{value.targetClipId ? `交换 ${value.targetClipId}` : value.valid === false ? '不可放置' : '放置位置'}</span>
+      <span>{value.targetClipId ? `${translate('交换')} ${value.targetClipId}` : value.valid === false ? translate('不可放置') : translate('放置位置')}</span>
     </div>
   )
 }
