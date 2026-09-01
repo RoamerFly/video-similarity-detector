@@ -4704,10 +4704,10 @@ fn finalize_merge_outputs(
         let source_text = path_text.trim();
         let source_candidate = resolve_merge_result_path(source_text, &temporary_output_dir)
             .map_err(|error| format!("合并结果路径无效「{source_text}」: {error}"))?;
-        // FFmpeg writes outputs directly into the task directory.  Requiring
-        // the lexical parent to be that exact directory also blocks a
-        // symlink/junction alias such as `.task-output\alias\merged.mp4`
-        // before canonicalization could hide it.
+        // FFmpeg writes outputs directly into the task directory.  Require the
+        // parent to resolve to this exact directory while rejecting reparse
+        // points in every component; this accepts Windows path aliases such
+        // as 8.3 names without allowing a junction alias to escape the task.
         let candidate_parent = source_candidate
             .parent()
             .ok_or_else(|| format!("合并结果缺少父目录「{}」", source_candidate.display()))?;
@@ -4911,7 +4911,52 @@ fn merge_path_key(path: &Path) -> String {
 }
 
 fn merge_paths_equal(left: &Path, right: &Path) -> bool {
-    merge_path_key(left) == merge_path_key(right)
+    #[cfg(windows)]
+    {
+        // Windows can expose the same directory through a case-variant path,
+        // alternate separators, or an 8.3 short name (for example,
+        // `C:\\Users\\RUNNER~1`).  Canonicalizing both existing parents lets
+        // the operating system resolve those equivalent spellings.  Inspect
+        // every component first so a junction or symlink alias cannot become
+        // an accepted parent merely because canonicalization follows it.
+        if merge_path_has_no_reparse_component(left) && merge_path_has_no_reparse_component(right) {
+            if let (Ok(left_canonical), Ok(right_canonical)) =
+                (fs::canonicalize(left), fs::canonicalize(right))
+            {
+                return merge_path_key(&left_canonical) == merge_path_key(&right_canonical);
+            }
+        }
+
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        merge_path_key(left) == merge_path_key(right)
+    }
+}
+
+#[cfg(windows)]
+fn merge_path_has_no_reparse_component(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return false;
+        }
+        current.push(component.as_os_str());
+        // Prefix and root components are not complete filesystem paths on
+        // their own (notably for `\\\\?\\C:`), so inspect each real name
+        // after it has been appended to the complete path.
+        if matches!(component, std::path::Component::Normal(_)) {
+            let Ok(metadata) = fs::symlink_metadata(&current) else {
+                return false;
+            };
+            if metadata_is_link_or_reparse(&metadata) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn move_merge_output_noreplace(source: &Path, destination: &Path) -> Result<(), String> {
