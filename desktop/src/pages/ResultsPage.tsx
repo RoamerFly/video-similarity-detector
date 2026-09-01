@@ -80,6 +80,11 @@ interface ReportCandidate {
   notice: string
 }
 
+interface ReportListOptions {
+  refresh?: boolean
+  selectLatest?: boolean
+}
+
 interface VideoContextMenuState {
   x: number
   y: number
@@ -183,12 +188,13 @@ export function ResultsPage() {
     }
   }, [hydrateAppDefaults])
 
-  const loadReportList = useCallback(async (options?: { selectLatest?: boolean }) => {
+  const loadReportList = useCallback(async (options?: ReportListOptions) => {
     setReportListLoading(true)
     setReportListError('')
     try {
+      const refresh = Boolean(options?.refresh || options?.selectLatest)
       const lists = await Promise.all(
-        uniqueNonEmpty([reportDir, defaultReportDir]).map((dir) => listReports(dir, Boolean(options?.selectLatest))),
+        uniqueNonEmpty([reportDir, defaultReportDir]).map((dir) => listReports(dir, refresh)),
       )
       const latestPaths: { reportJson?: string; reportCsv?: string } = reportPaths ? await existingReportPaths(reportPaths) : {}
       const merged = mergeReports([
@@ -327,10 +333,10 @@ export function ResultsPage() {
     const initialize = async () => {
       if (report) return
 
-      let reports = useResultsViewStore.getState().reportOptions
-      if (reports.length === 0) {
-        reports = await loadReportList()
-      }
+      // Report rows describe the filesystem and must be refreshed on every
+      // first visit. Persisted rows can be stale when a completed task wrote a
+      // report with a different configuration or timestamp.
+      const reports = await loadReportList({ refresh: true })
 
       // 初始进入结果页时不自动读取报告，只填充下拉框并保持「选择报告文件」占位，
       // 避免刚进入即解析大报告导致卡顿；仅当任务完成（onFinished 通过路由 state 标记
@@ -344,8 +350,8 @@ export function ResultsPage() {
       const latestPaths: { reportJson?: string; reportCsv?: string } = reportPaths
         ? await existingReportPaths(reportPaths)
         : {}
-      const currentKey = useResultsViewStore.getState().selectedReportKey
-      const selected = reports.find((item) => reportKey(item) === currentKey) ?? reports[0] ?? null
+      const selected = findReportForPaths(reports, latestPaths) ?? reports[0] ?? null
+      if (selected) setSelectedReportKey(reportKey(selected))
       await loadReport({
         report: selected,
         reportList: reports,
@@ -1412,22 +1418,56 @@ function selectReportPaths(paths: { reportJson?: string; reportCsv?: string }, f
   return paths
 }
 
-function mergeReports(reports: ReportSummary[]) {
+export function mergeReports(reports: ReportSummary[]) {
   const byKey = new Map<string, ReportSummary>()
   for (const report of reports) {
     if (!report.jsonPath && !report.csvPath) continue
     const key = reportKey(report)
     if (!key) continue
     const current = byKey.get(key)
-    if (!current || timeValue(report.modifiedAt) > timeValue(current.modifiedAt)) {
+    if (
+      !current
+      || (isSyntheticReport(current) && !isSyntheticReport(report))
+      || (!isSyntheticReport(report) && timeValue(report.modifiedAt) > timeValue(current.modifiedAt))
+    ) {
       byKey.set(key, report)
     }
   }
   return Array.from(byKey.values()).sort((left, right) => compareNullableNumber(timeValue(right.modifiedAt), timeValue(left.modifiedAt)))
 }
 
-function reportKey(report: ReportSummary) {
+export function reportKey(report: ReportSummary) {
   return report.path || report.jsonPath || report.csvPath || report.htmlPath || report.id
+}
+
+function isSyntheticReport(report: ReportSummary) {
+  return report.id === 'latest-report' && report.sizeBytes === 0
+}
+
+function normalizedReportPath(path?: string) {
+  const normalized = path?.trim().replaceAll('\\', '/').replace(/\/+$/, '') || ''
+  // Windows drive and UNC paths are case-insensitive. Preserve case for
+  // POSIX paths so similarly shaped paths such as /reports/A and /reports/a
+  // remain distinct on macOS/Linux.
+  return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//')
+    ? normalized.toLowerCase()
+    : normalized
+}
+
+function reportContainsPath(report: ReportSummary, path?: string) {
+  const target = normalizedReportPath(path)
+  if (!target) return false
+  return [report.path, report.jsonPath, report.csvPath, report.htmlPath]
+    .some((candidate) => normalizedReportPath(candidate) === target)
+}
+
+export function findReportForPaths(
+  reports: ReportSummary[],
+  paths: { reportJson?: string; reportCsv?: string },
+) {
+  return reports.find((report) => (
+    reportContainsPath(report, paths.reportJson) || reportContainsPath(report, paths.reportCsv)
+  )) ?? null
 }
 
 function reportOptionLabel(report: ReportSummary) {
@@ -1446,7 +1486,7 @@ function reportOptionTitle(report?: ReportSummary) {
   ].join('\n')
 }
 
-function syntheticReportFromPaths(paths: { reportJson?: string; reportCsv?: string }, id: string): ReportSummary {
+export function syntheticReportFromPaths(paths: { reportJson?: string; reportCsv?: string }, id: string): ReportSummary {
   const path = paths.reportJson || paths.reportCsv || ''
   const now = new Date().toISOString()
   return {

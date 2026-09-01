@@ -43,6 +43,26 @@ interface ResultsViewState {
   resetPage: () => void
 }
 
+export const RESULTS_VIEW_STORAGE_VERSION = 5
+
+/**
+ * Migrate view preferences without carrying filesystem-derived report rows
+ * across launches. Report rows are refreshed from the configured directories
+ * when ResultsPage is entered; filters, sorting, and pagination remain user
+ * preferences.
+ */
+export function migrateResultsViewState(persistedState: unknown) {
+  if (!persistedState || typeof persistedState !== 'object') return persistedState
+  const state = persistedState as Partial<ResultsViewState>
+  const { reportOptions: _legacyReportOptions, ...next } = state
+  // v4: 结果总览默认每页显示更多行，配合紧凑分页节省空间。
+  next.pageSize = 20
+  if (!next.sortState || next.sortState.key === 'completedAt') {
+    next.sortState = { key: 'symmetricSimilarity', direction: 'desc' }
+  }
+  return next
+}
+
 export const useResultsViewStore = create<ResultsViewState>()(
   persist(
     (set) => ({
@@ -68,18 +88,8 @@ export const useResultsViewStore = create<ResultsViewState>()(
     }),
     {
       name: 'video-similarity-results-view:v2',
-      version: 4,
-      migrate: (persistedState) => {
-        if (!persistedState || typeof persistedState !== 'object') return persistedState
-        const state = persistedState as Partial<ResultsViewState>
-        const next: Partial<ResultsViewState> = { ...state }
-        // v4: 结果总览默认每页显示更多行，配合紧凑分页节省空间。
-        next.pageSize = 20
-        if (!next.sortState || next.sortState.key === 'completedAt') {
-          next.sortState = { key: 'symmetricSimilarity', direction: 'desc' }
-        }
-        return next
-      },
+      version: RESULTS_VIEW_STORAGE_VERSION,
+      migrate: migrateResultsViewState,
       partialize: (state) => ({
         activeTab: state.activeTab,
         query: state.query,
@@ -87,7 +97,6 @@ export const useResultsViewStore = create<ResultsViewState>()(
         reportReadFormat: state.reportReadFormat,
         sortState: state.sortState,
         selectedReportKey: state.selectedReportKey,
-        reportOptions: state.reportOptions,
         page: state.page,
         pageSize: state.pageSize,
       }),
