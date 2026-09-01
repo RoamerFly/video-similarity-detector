@@ -37,9 +37,8 @@ export function AppLayout() {
   const [rememberCloseChoice, setRememberCloseChoice] = useState(false)
   const reportDir = useSettingsStore((state) => state.reportDir)
   const closeBehavior = useSettingsStore((state) => state.closeBehavior)
-  const resultSummary = useAnalysisStore((state) => state.resultSummary)
   const { t, tm } = useI18n()
-  const copy = getRouteCopy(location.pathname, resultSummary)
+  const copy = getRouteCopy(location.pathname)
 
   useEffect(() => {
     // Tauri's WebView otherwise exposes the browser context menu (Back,
@@ -444,14 +443,9 @@ function CloseChoiceDialog({
   )
 }
 
-function getRouteCopy(pathname: string, resultSummary: { videos: number; pairs: number } | null) {
+function getRouteCopy(pathname: string) {
   if (pathname === '/results') {
-    return {
-      title: '结果总览',
-      subtitle: resultSummary
-        ? `共分析 ${resultSummary.videos} 个视频，生成 ${resultSummary.pairs} 对比较结果`
-        : '',
-    }
+    return { title: '结果总览', subtitle: '' }
   }
 
   if (pathname === '/compare') {
