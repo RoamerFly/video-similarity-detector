@@ -1565,15 +1565,37 @@ fn resolve_export_target_directory(root: &Path, target: &str) -> Result<PathBuf,
 /// launcher/finalizer.
 fn validate_export_path_chain(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
+    let mut saw_prefix = false;
+    let mut saw_root = false;
     for component in path.components() {
         match component {
-            std::path::Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            std::path::Component::RootDir => current.push(component.as_os_str()),
+            std::path::Component::Prefix(prefix) => {
+                // A Windows verbatim prefix such as `\\?\D:` is not itself a
+                // filesystem path.  Querying it with symlink_metadata returns
+                // ERROR_INVALID_FUNCTION on Windows, so defer inspection
+                // until the following RootDir has completed the drive/UNC
+                // root.
+                current.push(prefix.as_os_str());
+                saw_prefix = true;
+                continue;
+            }
+            std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+                saw_root = true;
+            }
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
                 current.pop();
             }
             std::path::Component::Normal(name) => current.push(name),
+        }
+
+        // Drive-relative paths such as `C:exports` have a Prefix but no
+        // RootDir and are resolved relative to the process's current
+        // directory on that drive.  Reject them instead of validating an
+        // incomplete prefix or accidentally weakening the path-chain check.
+        if saw_prefix && !saw_root {
+            continue;
         }
 
         match fs::symlink_metadata(&current) {
@@ -1595,6 +1617,9 @@ fn validate_export_path_chain(path: &Path) -> Result<(), String> {
                 return Err(format!("读取导出文件夹路径失败: {error}"));
             }
         }
+    }
+    if saw_prefix && !saw_root {
+        return Err("导出文件夹路径包含不完整的 Windows 根路径。".to_string());
     }
     Ok(())
 }
@@ -9428,6 +9453,30 @@ mod tests {
         assert!(!merge_output_name_fits_target(&target, "merged", "mp4"));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn merge_export_path_validation_accepts_canonicalized_windows_path() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-export-canonical-{}",
+            next_merge_task_id("test")
+        ));
+        fs::create_dir_all(&root).expect("create canonical path fixture");
+        let canonical = fs::canonicalize(&root).expect("canonicalize path fixture");
+
+        validate_export_path_chain(&canonical)
+            .expect("canonicalized Windows path must pass path-chain validation");
+
+        fs::remove_dir_all(root).expect("remove canonical path fixture");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn merge_export_path_validation_rejects_drive_relative_path() {
+        let error = validate_export_path_chain(Path::new("C:exports"))
+            .expect_err("drive-relative path must be rejected");
+        assert!(error.contains("不完整") || error.contains("Windows"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn merge_export_path_validation_rejects_symlink_parent() {
@@ -9693,6 +9742,39 @@ mod tests {
             b"windows merged"
         );
         fs::remove_dir_all(&task_directory).expect("remove Windows path fixture");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn finalize_merge_outputs_accepts_canonicalized_final_output_directory() {
+        let task_directory = std::env::temp_dir().join(format!(
+            "video-similarity-merge-canonical-final-{}",
+            next_merge_task_id("test")
+        ));
+        let temporary_output_dir = task_directory.join("temporary");
+        let final_output_dir = task_directory.join("final");
+        fs::create_dir_all(&temporary_output_dir).expect("create canonical final fixture");
+        fs::create_dir_all(&final_output_dir).expect("create canonical final directory");
+        let canonical_final_output_dir =
+            fs::canonicalize(&final_output_dir).expect("canonicalize final output directory");
+        let source = temporary_output_dir.join("merged.mp4");
+        fs::write(&source, b"canonical final merged").expect("write canonical final fixture");
+
+        let finalized = finalize_merge_outputs(
+            MergeFinishedPayload {
+                output_paths: vec![source.to_string_lossy().into_owned()],
+                message: "完成".to_string(),
+            },
+            &temporary_output_dir,
+            &canonical_final_output_dir,
+        )
+        .expect("canonicalized final output directory must be accepted");
+
+        assert_eq!(
+            fs::read(&finalized.output_paths[0]).unwrap(),
+            b"canonical final merged"
+        );
+        fs::remove_dir_all(&task_directory).expect("remove canonical final fixture");
     }
 
     #[test]
