@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  clipModelProgressCanCancel,
+  clipModelUpdatePrompt,
   downloadProgressEventIsActive,
   downloadProgressIsTerminal,
   downloadStatusHasSettled,
@@ -58,5 +60,47 @@ describe('settings download task state', () => {
     }
     expect(downloadStatusHasSettled('clip-model', finalStage, 'success')).toBe(false)
     expect(downloadStatusHasSettled('clip-model', { ...finalStage, running: false }, 'success')).toBe(true)
+  })
+
+  it('uses the same update confirmation policy for an offline model', () => {
+    expect(clipModelUpdatePrompt({
+      installed: false,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: 'clip.zip',
+      remoteVersion: 'main',
+      message: '',
+    })).toContain('找到 GitHub 最新版')
+    expect(clipModelUpdatePrompt({
+      installed: true,
+      updateAvailable: true,
+      comparisonAvailable: true,
+      assetName: 'clip.zip',
+      installedVersion: 'old',
+      remoteVersion: 'new',
+      message: '',
+    })).toContain('有可用更新')
+    expect(clipModelUpdatePrompt({
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: true,
+      assetName: 'clip.zip',
+      installedVersion: 'new',
+      remoteVersion: 'new',
+      message: '',
+    })).toContain('已是最新版')
+    expect(clipModelUpdatePrompt({
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: 'clip.zip',
+      message: '',
+    })).toContain('无法可靠比较')
+  })
+
+  it('keeps model installation disabled during extraction and verification', () => {
+    expect(clipModelProgressCanCancel('正在下载离线 CLIP 模型')).toBe(true)
+    expect(clipModelProgressCanCancel('正在取消模型下载')).toBe(false)
+    expect(clipModelProgressCanCancel('正在解压并校验模型')).toBe(false)
   })
 })

@@ -979,6 +979,150 @@ jobs:
           ls -lh model-assets
           ls -lh release-assets
 
+      - name: Generate and validate resource manifest
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          runtime_version="$(tr -d '[:space:]' < desktop/runtime-version.txt)"
+          merge_runtime_version="$(tr -d '[:space:]' < desktop/ffmpeg-runtime-version.txt)"
+          model_dir="$RUNNER_TEMP/clip-model/clip-vit-base-patch32"
+          model_asset="clip-vit-base-patch32.zip"
+
+          sha256_from_checksum() {
+            local checksum="$1"
+            test -s "$checksum"
+            awk 'NF >= 1 { print tolower($1); exit }' "$checksum"
+          }
+          sha256_asset() {
+            local asset="$1"
+            local checksum="${asset}.sha256"
+            test -s "$asset"
+            test -s "$checksum"
+            (
+              cd "$(dirname "$asset")"
+              sha256sum -c "$(basename "$checksum")" >/dev/null
+            )
+            local hash
+            hash="$(sha256_from_checksum "$checksum")"
+            [[ "$hash" =~ ^[0-9a-fA-F]{64}$ ]] || {
+              echo "Invalid SHA-256 sidecar: $checksum" >&2
+              exit 1
+            }
+            printf '%s\n' "${hash,,}"
+          }
+
+          win_cpu_asset="${APP_NAME}-runtime-v${runtime_version}-windows-x64-cpu.zip"
+          win_gpu_asset="${APP_NAME}-runtime-v${runtime_version}-windows-x64-gpu.zip"
+          mac_arm_asset="${APP_NAME}-runtime-v${runtime_version}-macos-arm64.zip"
+          mac_x64_asset="${APP_NAME}-runtime-v${runtime_version}-macos-x64.zip"
+          linux_asset="${APP_NAME}-runtime-v${runtime_version}-linux-x64.zip"
+          win_merge_asset="${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-windows-x64.zip"
+          mac_arm_merge_asset="${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-arm64.zip"
+          mac_x64_merge_asset="${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-macos-x64.zip"
+          linux_merge_asset="${APP_NAME}-ffmpeg-runtime-v${merge_runtime_version}-linux-x64.zip"
+
+          win_cpu_sha="$(sha256_asset "release-assets/$win_cpu_asset")"
+          win_gpu_sha="$(sha256_asset "release-assets/$win_gpu_asset")"
+          mac_arm_sha="$(sha256_asset "release-assets/$mac_arm_asset")"
+          mac_x64_sha="$(sha256_asset "release-assets/$mac_x64_asset")"
+          linux_sha="$(sha256_asset "release-assets/$linux_asset")"
+          win_merge_sha="$(sha256_asset "release-assets/$win_merge_asset")"
+          mac_arm_merge_sha="$(sha256_asset "release-assets/$mac_arm_merge_asset")"
+          mac_x64_merge_sha="$(sha256_asset "release-assets/$mac_x64_merge_asset")"
+          linux_merge_sha="$(sha256_asset "release-assets/$linux_merge_asset")"
+
+          clip_archive_sha="$(sha256sum "model-assets/$model_asset" | awk '{ print tolower($1) }')"
+          clip_config_sha="$(sha256sum "$model_dir/config.json" | awk '{ print tolower($1) }')"
+          clip_preprocessor_sha="$(sha256sum "$model_dir/preprocessor_config.json" | awk '{ print tolower($1) }')"
+          clip_weights_sha="$(sha256sum "$model_dir/pytorch_model.bin" | awk '{ print tolower($1) }')"
+          for hash in \
+            "$win_cpu_sha" "$win_gpu_sha" "$mac_arm_sha" "$mac_x64_sha" "$linux_sha" \
+            "$win_merge_sha" "$mac_arm_merge_sha" "$mac_x64_merge_sha" "$linux_merge_sha" \
+            "$clip_archive_sha" "$clip_config_sha" "$clip_preprocessor_sha" "$clip_weights_sha"; do
+            [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "Invalid SHA-256 generated for resource manifest: $hash" >&2
+              exit 1
+            }
+          done
+
+          jq -n \
+            --arg releaseTag "$TAG_NAME" \
+            --arg runtimeVersion "$runtime_version" \
+            --arg mergeRuntimeVersion "$merge_runtime_version" \
+            --arg clipRevision "$CLIP_MODEL_REVISION" \
+            --arg clipAssetName "$model_asset" \
+            --arg clipArchiveSha "$clip_archive_sha" \
+            --arg clipConfigSha "$clip_config_sha" \
+            --arg clipPreprocessorSha "$clip_preprocessor_sha" \
+            --arg clipWeightsSha "$clip_weights_sha" \
+            --arg winCpuAsset "$win_cpu_asset" --arg winCpuSha "$win_cpu_sha" \
+            --arg winGpuAsset "$win_gpu_asset" --arg winGpuSha "$win_gpu_sha" \
+            --arg macArmAsset "$mac_arm_asset" --arg macArmSha "$mac_arm_sha" \
+            --arg macX64Asset "$mac_x64_asset" --arg macX64Sha "$mac_x64_sha" \
+            --arg linuxAsset "$linux_asset" --arg linuxSha "$linux_sha" \
+            --arg winMergeAsset "$win_merge_asset" --arg winMergeSha "$win_merge_sha" \
+            --arg macArmMergeAsset "$mac_arm_merge_asset" --arg macArmMergeSha "$mac_arm_merge_sha" \
+            --arg macX64MergeAsset "$mac_x64_merge_asset" --arg macX64MergeSha "$mac_x64_merge_sha" \
+            --arg linuxMergeAsset "$linux_merge_asset" --arg linuxMergeSha "$linux_merge_sha" \
+            ' {
+                schemaVersion: 1,
+                releaseTag: $releaseTag,
+                aiRuntimes: [
+                  {platform: "windows-x64", flavor: "cpu", version: $runtimeVersion, assetName: $winCpuAsset, sha256: $winCpuSha},
+                  {platform: "windows-x64", flavor: "gpu", version: $runtimeVersion, assetName: $winGpuAsset, sha256: $winGpuSha},
+                  {platform: "macos-arm64", flavor: "cpu", version: $runtimeVersion, assetName: $macArmAsset, sha256: $macArmSha},
+                  {platform: "macos-x64", flavor: "cpu", version: $runtimeVersion, assetName: $macX64Asset, sha256: $macX64Sha},
+                  {platform: "linux-x64", flavor: "cpu", version: $runtimeVersion, assetName: $linuxAsset, sha256: $linuxSha}
+                ],
+                mergeRuntimes: [
+                  {platform: "windows-x64", version: $mergeRuntimeVersion, assetName: $winMergeAsset, sha256: $winMergeSha},
+                  {platform: "macos-arm64", version: $mergeRuntimeVersion, assetName: $macArmMergeAsset, sha256: $macArmMergeSha},
+                  {platform: "macos-x64", version: $mergeRuntimeVersion, assetName: $macX64MergeAsset, sha256: $macX64MergeSha},
+                  {platform: "linux-x64", version: $mergeRuntimeVersion, assetName: $linuxMergeAsset, sha256: $linuxMergeSha}
+                ],
+                clipModel: {
+                  revision: $clipRevision,
+                  assetName: $clipAssetName,
+                  archiveSha256: $clipArchiveSha,
+                  files: {
+                    "config.json": $clipConfigSha,
+                    "preprocessor_config.json": $clipPreprocessorSha,
+                    "pytorch_model.bin": $clipWeightsSha
+                  }
+                }
+              }' > release-assets/resource-manifest.json
+
+          jq -e '
+            .schemaVersion == 1
+            and (.releaseTag | type == "string" and length > 0)
+            and (.aiRuntimes | length == 5)
+            and (.mergeRuntimes | length == 4)
+            and ([.aiRuntimes[] | (.platform + ":" + .flavor)] | sort == [
+              "linux-x64:cpu",
+              "macos-arm64:cpu",
+              "macos-x64:cpu",
+              "windows-x64:cpu",
+              "windows-x64:gpu"
+            ])
+            and ([.mergeRuntimes[] | .platform] | sort == [
+              "linux-x64",
+              "macos-arm64",
+              "macos-x64",
+              "windows-x64"
+            ])
+            and ([.aiRuntimes[], .mergeRuntimes[], .clipModel] | all(.assetName | test("^[A-Za-z0-9._-]+$")))
+            and ([.aiRuntimes[], .mergeRuntimes[]] | all(.sha256 | test("^[0-9a-f]{64}$")))
+            and (.clipModel.revision | type == "string" and length > 0)
+            and (.clipModel.archiveSha256 | test("^[0-9a-f]{64}$"))
+            and (.clipModel.files | keys == ["config.json", "preprocessor_config.json", "pytorch_model.bin"])
+            and (.clipModel.files | to_entries | all(.value | test("^[0-9a-f]{64}$")))
+          ' release-assets/resource-manifest.json
+          test -s release-assets/resource-manifest.json
+          jq -e . release-assets/resource-manifest.json
+
       - name: Generate release body
         shell: bash
         env:
@@ -1080,3 +1224,60 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
             --jq '.[].name' | sort -u > published-assets.txt
           diff -u expected-assets.txt published-assets.txt
+
+      - name: Verify online resource manifest and referenced assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" --jq '.id')"
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[].name' | sort -u > published-assets.txt
+          test -s published-assets.txt
+          grep -Fxq "resource-manifest.json" published-assets.txt
+
+          online_manifest="$(mktemp)"
+          trap 'rm -f "$online_manifest" online-resource-assets.txt' EXIT
+          curl --fail --location --retry 8 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/resource-manifest.json" \
+            --output "$online_manifest"
+          jq -e --arg tag "$TAG_NAME" '
+            .schemaVersion == 1
+            and .releaseTag == $tag
+            and (.aiRuntimes | length == 5)
+            and (.mergeRuntimes | length == 4)
+            and ([.aiRuntimes[] | (.platform + ":" + .flavor)] | sort == [
+              "linux-x64:cpu",
+              "macos-arm64:cpu",
+              "macos-x64:cpu",
+              "windows-x64:cpu",
+              "windows-x64:gpu"
+            ])
+            and ([.mergeRuntimes[] | .platform] | sort == [
+              "linux-x64",
+              "macos-arm64",
+              "macos-x64",
+              "windows-x64"
+            ])
+            and (.clipModel.files | keys == ["config.json", "preprocessor_config.json", "pytorch_model.bin"])
+            and ([.aiRuntimes[], .mergeRuntimes[]] | all(.sha256 | test("^[0-9a-f]{64}$")))
+            and (.clipModel.archiveSha256 | test("^[0-9a-f]{64}$"))
+            and (.clipModel.files | to_entries | all(.value | test("^[0-9a-f]{64}$")))
+          ' "$online_manifest"
+          jq -r '
+            (.aiRuntimes[] | .assetName),
+            (.mergeRuntimes[] | .assetName),
+            .clipModel.assetName
+          ' "$online_manifest" | sort -u > online-resource-assets.txt
+          while IFS= read -r asset; do
+            test -n "$asset"
+            grep -Fxq "$asset" published-assets.txt || {
+              echo "Resource manifest references an unpublished asset: $asset" >&2
+              exit 1
+            }
+            curl --fail --location --retry 8 --retry-all-errors --retry-delay 5 --retry-max-time 180 --head \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/${asset}"
+          done < online-resource-assets.txt

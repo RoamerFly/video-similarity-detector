@@ -5,16 +5,17 @@ import { NeonButton } from '@/components/DesignSystem'
 import {
   formatBytes,
   cancelRuntimeInstall,
+  checkRuntimeUpdate,
   getRuntimeDownloadStatus,
   getRuntimeStatus,
   installRuntime,
   listenRuntimeInstallProgress,
-  migrateLegacyRuntime,
   normalizeBackendError,
   removeLegacyRuntime,
   type RuntimeStatus,
   type DownloadTaskStatus,
   type UpdateDownloadProgress,
+  type ResourceUpdateCheck,
 } from '@/services/backend'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -24,6 +25,8 @@ interface RuntimeDownloadSnapshot {
   error: string
   task: RuntimeTask | ''
   generation: number
+  terminal?: RuntimeTerminal
+  notifyCompletion: boolean
 }
 
 export type RuntimeTask = 'runtime' | 'runtime-migration' | 'runtime-cleanup'
@@ -37,6 +40,7 @@ const runtimeDownloadSnapshot: RuntimeDownloadSnapshot = {
   error: '',
   task: '',
   generation: 0,
+  notifyCompletion: false,
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -111,15 +115,43 @@ async function waitForRuntimeDownloadSettlement(task: RuntimeTask, expected?: Ru
   return status
 }
 
-function beginRuntimeTask(task: RuntimeTask) {
+function beginRuntimeTask(task: RuntimeTask, notifyCompletion = false) {
   const generation = runtimeDownloadSnapshot.generation + 1
   runtimeDownloadSnapshot.generation = generation
   runtimeDownloadSnapshot.task = task
   runtimeDownloadSnapshot.active = true
+  runtimeDownloadSnapshot.terminal = undefined
+  runtimeDownloadSnapshot.notifyCompletion = notifyCompletion
   return generation
 }
 
-export function RuntimeSettingsCard() {
+function formatResourceCheckDetails(check: ResourceUpdateCheck) {
+  const versions = check.installedVersion && check.remoteVersion
+    ? `（本地 v${check.installedVersion}，GitHub v${check.remoteVersion}）`
+    : check.remoteVersion
+      ? `（GitHub v${check.remoteVersion}）`
+      : ''
+  const hashes = check.localSha256 && check.remoteSha256
+    ? `（本地 SHA-256 ${check.localSha256.slice(0, 12)}…，远端 ${check.remoteSha256.slice(0, 12)}…）`
+    : ''
+  return `${versions}${hashes}`
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function runtimeUpdatePrompt(check: ResourceUpdateCheck) {
+  const details = formatResourceCheckDetails(check)
+  if (!check.installed) return `已找到 GitHub 最新版 AI 运行环境${details}，是否安装？`
+  if (check.comparisonAvailable && check.updateAvailable) return `检测到 AI 运行环境有可用更新${details}，是否更新？`
+  if (check.comparisonAvailable) return `当前 AI 运行环境已是最新版${details}。是否仍要强制重装？`
+  return `无法可靠比较 AI 运行环境的本地版本与 GitHub 最新版。是否强制重装？`
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function runtimeProgressCanCancel(stage: string) {
+  return !/正在取消|解压|校验|验证|提交|切换|正在安装|收尾|已完成/.test(stage)
+}
+
+export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void }) {
   const proxyUrl = useSettingsStore((state) => state.networkProxy)
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
   const [loading, setLoading] = useState(false)
@@ -127,6 +159,7 @@ export function RuntimeSettingsCard() {
   const [progress, setProgress] = useState<UpdateDownloadProgress | null>(runtimeDownloadSnapshot.progress)
   const [error, setError] = useState(runtimeDownloadSnapshot.error)
   const [task, setTask] = useState<RuntimeTask | ''>(runtimeDownloadSnapshot.task)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const operationRef = useRef(0)
 
   const refresh = useCallback(async () => {
@@ -152,6 +185,10 @@ export function RuntimeSettingsCard() {
       const next = await getRuntimeDownloadStatus().catch(() => null)
       const nextTask = next && runtimeTaskFromStatus(next.task)
       if (!active || !next || !nextTask) return
+      // A status response can race with the terminal event/promise that has
+      // already settled this generation. Do not reopen a completed task from
+      // that stale running snapshot.
+      if (runtimeDownloadSnapshot.terminal === 'success' && next.running === true) return
       const settled = runtimeStatusHasSettled(nextTask, next)
       const isRunning = next.running || (runtimeDownloadSnapshot.active && !settled)
       const nextProgress = progressFromRuntimeStatus(next)
@@ -192,10 +229,14 @@ export function RuntimeSettingsCard() {
           if (!active || runtimeDownloadSnapshot.generation !== generation || !finalStatus) return
           if (!runtimeStatusHasSettled(nextTask, finalStatus, expected, nextTask !== 'runtime')) return
           const settledProgress = progressFromRuntimeStatus(finalStatus)
+          const shouldNotify = expected === 'success' && runtimeDownloadSnapshot.notifyCompletion
           runtimeDownloadSnapshot.active = false
+          runtimeDownloadSnapshot.terminal = expected
+          runtimeDownloadSnapshot.notifyCompletion = false
           runtimeDownloadSnapshot.progress = settledProgress.stage ? settledProgress : payload
           setProgress(settledProgress.stage ? settledProgress : payload)
           setInstalling(false)
+          if (shouldNotify) onCompleted?.()
         })
       }
     }).then((unlisten) => {
@@ -208,17 +249,26 @@ export function RuntimeSettingsCard() {
       active = false
       stop()
     }
-  }, [])
+  }, [onCompleted])
 
   async function handleInstall() {
-    if (installing) return
-    const canMigrate = status?.legacyFallback && status.legacyMigrationAvailable
-    const action = status?.managed ? '从最新 Release 重新下载并更新' : canMigrate ? '就地登记现有环境' : '下载'
-    if (!window.confirm(`${action} ${status?.flavor === 'gpu' ? 'GPU / CUDA' : 'CPU'} 运行环境？`)) return
+    if (installing || checkingUpdate) return
+    setCheckingUpdate(true)
+    setError('')
+    let updateCheck: ResourceUpdateCheck
+    try {
+      updateCheck = await checkRuntimeUpdate(proxyUrl)
+    } catch (reason) {
+      setError(normalizeBackendError(reason))
+      setCheckingUpdate(false)
+      return
+    }
+    setCheckingUpdate(false)
+    if (!window.confirm(runtimeUpdatePrompt(updateCheck))) return
     const operation = operationRef.current + 1
     operationRef.current = operation
-    const nextTask: RuntimeTask = canMigrate ? 'runtime-migration' : 'runtime'
-    const generation = beginRuntimeTask(nextTask)
+    const nextTask: RuntimeTask = 'runtime'
+    const generation = beginRuntimeTask(nextTask, true)
     setInstalling(true)
     runtimeDownloadSnapshot.active = true
     runtimeDownloadSnapshot.task = nextTask
@@ -228,45 +278,51 @@ export function RuntimeSettingsCard() {
       downloadedBytes: 0,
       totalBytes: 0,
       progress: 0,
-      stage: canMigrate ? '正在准备本地迁移（无需下载）' : '正在准备运行环境安装',
+      stage: '正在准备运行环境安装',
     }
     setProgress(initialProgress)
     runtimeDownloadSnapshot.progress = initialProgress
     setTask(nextTask)
     try {
-      const nextStatus = canMigrate ? await migrateLegacyRuntime() : await installRuntime(proxyUrl)
+      const nextStatus = await installRuntime(proxyUrl)
       if (operation !== operationRef.current || runtimeDownloadSnapshot.generation !== generation) return
       setStatus(nextStatus)
       const finalProgress = {
         ...(runtimeDownloadSnapshot.progress || initialProgress),
         progress: 100,
-        stage: canMigrate ? '旧版运行环境迁移完成' : 'AI 运行环境已安装',
+        stage: 'AI 运行环境已安装',
       }
       runtimeDownloadSnapshot.active = true
       runtimeDownloadSnapshot.progress = finalProgress
       setProgress(finalProgress)
-      const finalStatus = await waitForRuntimeDownloadSettlement(nextTask, 'success', canMigrate)
+      const finalStatus = await waitForRuntimeDownloadSettlement(nextTask, 'success')
       if (operation !== operationRef.current || runtimeDownloadSnapshot.generation !== generation) return
-      if (finalStatus && runtimeStatusHasSettled(nextTask, finalStatus, 'success', canMigrate)) {
+      if (finalStatus && runtimeStatusHasSettled(nextTask, finalStatus, 'success')) {
+        const shouldNotify = runtimeDownloadSnapshot.notifyCompletion
         runtimeDownloadSnapshot.active = false
+        runtimeDownloadSnapshot.terminal = 'success'
+        runtimeDownloadSnapshot.notifyCompletion = false
         setInstalling(false)
+        if (shouldNotify) onCompleted?.()
       }
     } catch (reason) {
       if (operation !== operationRef.current || runtimeDownloadSnapshot.generation !== generation) return
       const message = normalizeBackendError(reason)
       setError(message)
       runtimeDownloadSnapshot.error = message
-      const finalStatus = await waitForRuntimeDownloadSettlement(nextTask, undefined, canMigrate)
+      const finalStatus = await waitForRuntimeDownloadSettlement(nextTask)
       if (operation !== operationRef.current || runtimeDownloadSnapshot.generation !== generation) return
-      if (finalStatus && runtimeStatusHasSettled(nextTask, finalStatus, undefined, canMigrate)) {
+      if (finalStatus && runtimeStatusHasSettled(nextTask, finalStatus)) {
         runtimeDownloadSnapshot.active = false
+        runtimeDownloadSnapshot.terminal = runtimeStatusTerminal(nextTask, finalStatus, false) || 'failed'
+        runtimeDownloadSnapshot.notifyCompletion = false
         setInstalling(false)
       }
     }
   }
 
   async function handleCancel() {
-    if (!installing || !runtimeTaskCanCancel(task, true) || progress?.stage === '正在取消下载') return
+    if (!installing || !runtimeTaskCanCancel(task, true) || !runtimeProgressCanCancel(progress?.stage || '')) return
     const currentTask = runtimeTaskFromStatus(task)
     if (!currentTask) return
     operationRef.current += 1
@@ -298,6 +354,8 @@ export function RuntimeSettingsCard() {
               : '运行环境下载已取消',
       }
       runtimeDownloadSnapshot.active = false
+      runtimeDownloadSnapshot.terminal = 'cancelled'
+      runtimeDownloadSnapshot.notifyCompletion = false
       runtimeDownloadSnapshot.progress = cancelledProgress
       runtimeDownloadSnapshot.task = 'runtime'
       setInstalling(false)
@@ -305,6 +363,7 @@ export function RuntimeSettingsCard() {
       setTask('runtime')
     } catch (reason) {
       const message = normalizeBackendError(reason)
+      runtimeDownloadSnapshot.notifyCompletion = false
       runtimeDownloadSnapshot.error = message
       setError(message)
     }
@@ -355,7 +414,7 @@ export function RuntimeSettingsCard() {
   }
 
   const percentage = Math.max(0, Math.min(100, progress?.progress ?? 0))
-  const canCancel = runtimeTaskCanCancel(task, installing, progress?.stage === '正在取消下载')
+  const canCancel = runtimeTaskCanCancel(task, installing, progress?.stage === '正在取消下载') && runtimeProgressCanCancel(progress?.stage || '')
   const cancelLabel = task === 'runtime-migration'
     ? '取消迁移'
     : task === 'runtime-cleanup'
@@ -365,7 +424,7 @@ export function RuntimeSettingsCard() {
     ? '正在迁移运行环境'
     : task === 'runtime-cleanup'
       ? '正在清理旧环境'
-      : '正在安装环境'
+    : '正在安装环境'
   return (
     <div className="settings-about-card">
       <div className="about-title">
@@ -396,7 +455,7 @@ export function RuntimeSettingsCard() {
         </p>
       )}
       <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>
-        {error || status?.message || '正在检测运行环境。'}
+        {error || (checkingUpdate ? '正在检查更新' : status?.message || '正在检测运行环境。')}
       </p>
       {progress && (
         <div className="update-progress-block">
@@ -418,12 +477,17 @@ export function RuntimeSettingsCard() {
           variant="outline"
           type="button"
           onClick={() => void refresh()}
-          disabled={loading || installing}
+          disabled={loading || installing || checkingUpdate}
         >
           <RefreshCw size={17} />
           刷新
         </NeonButton>
-        {installing ? canCancel ? (
+        {checkingUpdate ? (
+          <NeonButton variant="outline" type="button" disabled>
+            <RefreshCw size={17} className="spin-slow" />
+            正在检查更新
+          </NeonButton>
+        ) : installing ? canCancel ? (
           <NeonButton type="button" onClick={() => void handleCancel()}>
             <CircleStop size={17} />
             {cancelLabel}
@@ -434,15 +498,9 @@ export function RuntimeSettingsCard() {
             {busyLabel}
           </NeonButton>
         ) : (
-          <NeonButton type="button" onClick={() => void handleInstall()}>
+          <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate}>
             <Download size={17} />
-            {status?.managed
-              ? '更新/重装最新环境'
-              : status?.legacyFallback && status.legacyMigrationAvailable
-                ? '就地登记'
-                : status?.legacyFallback
-                  ? '重新安装环境'
-                  : '安装环境'}
+            重装/更新环境
           </NeonButton>
         )}
         {status?.legacyCleanupAvailable && (

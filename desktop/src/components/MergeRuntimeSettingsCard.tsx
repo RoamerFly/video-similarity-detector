@@ -4,6 +4,7 @@ import { CheckCircle2, CircleStop, Download, Film, RefreshCw } from 'lucide-reac
 import { NeonButton } from '@/components/DesignSystem'
 import {
   cancelMergeRuntimeInstall,
+  checkMergeRuntimeUpdate,
   formatBytes,
   getRuntimeDownloadStatus,
   getMergeRuntimeStatus,
@@ -13,6 +14,7 @@ import {
   type MergeRuntimeStatus,
   type DownloadTaskStatus,
   type UpdateDownloadProgress,
+  type ResourceUpdateCheck,
 } from '@/services/backend'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -21,6 +23,8 @@ interface MergeRuntimeDownloadSnapshot {
   progress: UpdateDownloadProgress | null
   error: string
   generation: number
+  terminal?: MergeRuntimeTerminal
+  notifyCompletion: boolean
 }
 
 const mergeRuntimeDownloadSnapshot: MergeRuntimeDownloadSnapshot = {
@@ -28,6 +32,7 @@ const mergeRuntimeDownloadSnapshot: MergeRuntimeDownloadSnapshot = {
   progress: null,
   error: '',
   generation: 0,
+  notifyCompletion: false,
 }
 
 type MergeRuntimeTerminal = 'success' | 'cancelled' | 'failed'
@@ -69,20 +74,49 @@ async function waitForMergeRuntimeDownloadSettlement(expected?: MergeRuntimeTerm
   return status
 }
 
-function beginMergeRuntimeTask() {
+function beginMergeRuntimeTask(notifyCompletion = false) {
   const generation = mergeRuntimeDownloadSnapshot.generation + 1
   mergeRuntimeDownloadSnapshot.generation = generation
   mergeRuntimeDownloadSnapshot.active = true
+  mergeRuntimeDownloadSnapshot.terminal = undefined
+  mergeRuntimeDownloadSnapshot.notifyCompletion = notifyCompletion
   return generation
 }
 
-export function MergeRuntimeSettingsCard() {
+function formatResourceCheckDetails(check: ResourceUpdateCheck) {
+  const versions = check.installedVersion && check.remoteVersion
+    ? `（本地 v${check.installedVersion}，GitHub v${check.remoteVersion}）`
+    : check.remoteVersion
+      ? `（GitHub v${check.remoteVersion}）`
+      : ''
+  const hashes = check.localSha256 && check.remoteSha256
+    ? `（本地 SHA-256 ${check.localSha256.slice(0, 12)}…，远端 ${check.remoteSha256.slice(0, 12)}…）`
+    : ''
+  return `${versions}${hashes}`
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function mergeRuntimeUpdatePrompt(check: ResourceUpdateCheck) {
+  const details = formatResourceCheckDetails(check)
+  if (!check.installed) return `已找到 GitHub 最新版视频合并环境${details}，是否安装？`
+  if (check.comparisonAvailable && check.updateAvailable) return `检测到视频合并环境有可用更新${details}，是否更新？`
+  if (check.comparisonAvailable) return `当前视频合并环境已是最新版${details}。是否仍要强制重装？`
+  return '无法可靠比较视频合并环境的本地版本与 GitHub 最新版。是否强制重装？'
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function mergeRuntimeProgressCanCancel(stage: string) {
+  return !/正在取消|解压|校验|验证|提交|切换|正在安装|收尾|已完成/.test(stage)
+}
+
+export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void }) {
   const proxyUrl = useSettingsStore((state) => state.networkProxy)
   const [status, setStatus] = useState<MergeRuntimeStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const [installing, setInstalling] = useState(mergeRuntimeDownloadSnapshot.active)
   const [progress, setProgress] = useState<UpdateDownloadProgress | null>(mergeRuntimeDownloadSnapshot.progress)
   const [error, setError] = useState(mergeRuntimeDownloadSnapshot.error)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const operationRef = useRef(0)
   const statusRequestRef = useRef(0)
 
@@ -110,6 +144,9 @@ export function MergeRuntimeSettingsCard() {
       statusRequestRef.current = request
       const next = await getRuntimeDownloadStatus().catch(() => null)
       if (!active || !next || request !== statusRequestRef.current || next.task !== 'merge-runtime') return
+      // Ignore a delayed running response after the terminal success state has
+      // already released the action for this generation.
+      if (mergeRuntimeDownloadSnapshot.terminal === 'success' && next.running === true) return
       const settled = mergeRuntimeStatusHasSettled(next)
       const isRunning = next.running || (mergeRuntimeDownloadSnapshot.active && !settled)
       mergeRuntimeDownloadSnapshot.active = isRunning
@@ -144,10 +181,14 @@ export function MergeRuntimeSettingsCard() {
           if (!active || mergeRuntimeDownloadSnapshot.generation !== generation || !finalStatus) return
           if (!mergeRuntimeStatusHasSettled(finalStatus, expected)) return
           const settledProgress = progressFromMergeRuntimeStatus(finalStatus)
+          const shouldNotify = expected === 'success' && mergeRuntimeDownloadSnapshot.notifyCompletion
           mergeRuntimeDownloadSnapshot.active = false
+          mergeRuntimeDownloadSnapshot.terminal = expected
+          mergeRuntimeDownloadSnapshot.notifyCompletion = false
           mergeRuntimeDownloadSnapshot.progress = settledProgress.stage ? settledProgress : payload
           setProgress(settledProgress.stage ? settledProgress : payload)
           setInstalling(false)
+          if (shouldNotify) onCompleted?.()
         })
       }
     }).then((unlisten) => {
@@ -160,15 +201,25 @@ export function MergeRuntimeSettingsCard() {
       active = false
       stop()
     }
-  }, [])
+  }, [onCompleted])
 
   async function handleInstall() {
-    if (installing) return
-    const action = status?.ready ? '从最新 Release 重新下载并更新' : '下载'
-    if (!window.confirm(action + '视频合并环境（FFmpeg / FFprobe）？')) return
+    if (installing || checkingUpdate) return
+    setCheckingUpdate(true)
+    setError('')
+    let updateCheck: ResourceUpdateCheck
+    try {
+      updateCheck = await checkMergeRuntimeUpdate(proxyUrl)
+    } catch (reason) {
+      setError(normalizeBackendError(reason))
+      setCheckingUpdate(false)
+      return
+    }
+    setCheckingUpdate(false)
+    if (!window.confirm(mergeRuntimeUpdatePrompt(updateCheck))) return
     const operation = operationRef.current + 1
     operationRef.current = operation
-    const generation = beginMergeRuntimeTask()
+    const generation = beginMergeRuntimeTask(true)
     statusRequestRef.current += 1
     setInstalling(true)
     mergeRuntimeDownloadSnapshot.active = true
@@ -199,25 +250,31 @@ export function MergeRuntimeSettingsCard() {
       const finalStatus = await waitForMergeRuntimeDownloadSettlement('success')
       if (operation !== operationRef.current || mergeRuntimeDownloadSnapshot.generation !== generation) return
       if (finalStatus && mergeRuntimeStatusHasSettled(finalStatus, 'success')) {
+        const shouldNotify = mergeRuntimeDownloadSnapshot.notifyCompletion
         mergeRuntimeDownloadSnapshot.active = false
+        mergeRuntimeDownloadSnapshot.terminal = 'success'
+        mergeRuntimeDownloadSnapshot.notifyCompletion = false
         setInstalling(false)
+        if (shouldNotify) onCompleted?.()
       }
     } catch (reason) {
       if (operation !== operationRef.current || mergeRuntimeDownloadSnapshot.generation !== generation) return
       const message = normalizeBackendError(reason)
       setError(message)
       mergeRuntimeDownloadSnapshot.error = message
+      mergeRuntimeDownloadSnapshot.notifyCompletion = false
       const finalStatus = await waitForMergeRuntimeDownloadSettlement()
       if (operation !== operationRef.current || mergeRuntimeDownloadSnapshot.generation !== generation) return
       if (finalStatus && mergeRuntimeStatusHasSettled(finalStatus)) {
         mergeRuntimeDownloadSnapshot.active = false
+        mergeRuntimeDownloadSnapshot.terminal = mergeRuntimeStatusTerminal(finalStatus) || 'failed'
         setInstalling(false)
       }
     }
   }
 
   async function handleCancel() {
-    if (!installing) return
+    if (!installing || !mergeRuntimeProgressCanCancel(progress?.stage || '')) return
     operationRef.current += 1
     statusRequestRef.current += 1
     setError('')
@@ -237,17 +294,21 @@ export function MergeRuntimeSettingsCard() {
       }
       const cancelledProgress = { ...pendingProgress, stage: '视频合并环境下载已取消' }
       mergeRuntimeDownloadSnapshot.active = false
+      mergeRuntimeDownloadSnapshot.terminal = 'cancelled'
+      mergeRuntimeDownloadSnapshot.notifyCompletion = false
       mergeRuntimeDownloadSnapshot.progress = cancelledProgress
       setInstalling(false)
       setProgress(cancelledProgress)
     } catch (reason) {
       const message = normalizeBackendError(reason)
+      mergeRuntimeDownloadSnapshot.notifyCompletion = false
       mergeRuntimeDownloadSnapshot.error = message
       setError(message)
     }
   }
 
   const progressValue = Math.max(0, Math.min(100, progress?.progress ?? 0))
+  const canCancel = installing && mergeRuntimeProgressCanCancel(progress?.stage || '')
   return (
     <div className="settings-about-card">
       <div className="about-title">
@@ -278,7 +339,7 @@ export function MergeRuntimeSettingsCard() {
         </p>
       ) : null}
       <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>
-        {error || status?.message || '正在检测视频合并环境。'}
+        {error || (checkingUpdate ? '正在检查更新' : status?.message || '正在检测视频合并环境。')}
       </p>
       {status?.ffmpegPath ? (
         <p className="update-install-path" title={status.ffmpegPath}>
@@ -305,20 +366,30 @@ export function MergeRuntimeSettingsCard() {
           variant="outline"
           type="button"
           onClick={() => void refresh()}
-          disabled={loading || installing}
+          disabled={loading || installing || checkingUpdate}
         >
           <RefreshCw size={17} className={loading ? 'spin-slow' : ''} />
           刷新
         </NeonButton>
-        {installing ? (
+        {checkingUpdate ? (
+          <NeonButton variant="outline" type="button" disabled>
+            <RefreshCw size={17} className="spin-slow" />
+            正在检查更新
+          </NeonButton>
+        ) : installing ? canCancel ? (
           <NeonButton type="button" onClick={() => void handleCancel()}>
             <CircleStop size={17} />
             取消下载
           </NeonButton>
         ) : (
-          <NeonButton type="button" onClick={() => void handleInstall()}>
+          <NeonButton variant="outline" type="button" disabled>
+            <RefreshCw size={17} className="spin-slow" />
+            正在安装环境
+          </NeonButton>
+        ) : (
+          <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate}>
             <Download size={17} />
-            {status?.ready ? '更新到最新环境' : '安装环境'}
+            重装/更新环境
           </NeonButton>
         )}
       </div>

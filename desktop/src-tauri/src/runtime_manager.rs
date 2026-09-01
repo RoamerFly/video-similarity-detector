@@ -14,6 +14,9 @@ const RUNTIME_VERSION: &str = include_str!("../../runtime-version.txt");
 const FFMPEG_RUNTIME_VERSION: &str = include_str!("../../ffmpeg-runtime-version.txt");
 const RELEASE_DOWNLOAD_ROOT: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download";
+const RESOURCE_MANIFEST_NAME: &str = "resource-manifest.json";
+const RESOURCE_MANIFEST_SCHEMA_VERSION: u8 = 1;
+const RESOURCE_MANIFEST_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
 pub struct RuntimeManagerState {
@@ -192,6 +195,23 @@ pub struct MergeRuntimeStatus {
     message: String,
 }
 
+/// The result of comparing one installed, managed resource with the latest
+/// release resource manifest.  Keep these names stable: the settings UI uses
+/// this shape for all three independently downloadable resources.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResourceUpdateCheck {
+    pub installed: bool,
+    pub update_available: bool,
+    pub comparison_available: bool,
+    pub asset_name: String,
+    pub installed_version: Option<String>,
+    pub remote_version: Option<String>,
+    pub local_sha256: Option<String>,
+    pub remote_sha256: Option<String>,
+    pub message: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeManifest {
@@ -202,8 +222,281 @@ struct RuntimeManifest {
     installed_at_ms: u128,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ResourceManifest {
+    pub(crate) schema_version: u8,
+    pub(crate) release_tag: String,
+    pub(crate) ai_runtimes: Vec<AiRuntimeResource>,
+    pub(crate) merge_runtimes: Vec<MergeRuntimeResource>,
+    pub(crate) clip_model: ClipModelResource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AiRuntimeResource {
+    pub(crate) platform: String,
+    pub(crate) flavor: String,
+    pub(crate) version: String,
+    pub(crate) asset_name: String,
+    pub(crate) sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MergeRuntimeResource {
+    pub(crate) platform: String,
+    pub(crate) version: String,
+    pub(crate) asset_name: String,
+    pub(crate) sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ClipModelResource {
+    pub(crate) revision: String,
+    pub(crate) asset_name: String,
+    pub(crate) archive_sha256: String,
+    pub(crate) files: std::collections::BTreeMap<String, String>,
+}
+
+impl ResourceManifest {
+    fn select_ai_runtime(
+        &self,
+        platform: &str,
+        flavor: &str,
+    ) -> Result<&AiRuntimeResource, String> {
+        self.ai_runtimes
+            .iter()
+            .find(|entry| entry.platform == platform && entry.flavor == flavor)
+            .ok_or_else(|| {
+                format!("最新 Release 尚未提供当前平台的 AI 运行环境：{platform}/{flavor}。")
+            })
+    }
+
+    fn select_merge_runtime(&self, platform: &str) -> Result<&MergeRuntimeResource, String> {
+        self.merge_runtimes
+            .iter()
+            .find(|entry| entry.platform == platform)
+            .ok_or_else(|| format!("最新 Release 尚未提供当前平台的视频合并环境：{platform}。"))
+    }
+}
+
+fn valid_resource_version(value: &str) -> bool {
+    !value.is_empty()
+        && value == value.trim()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| !character.is_control() && character != '/' && character != '\\')
+}
+
+fn valid_clip_revision(value: &str) -> bool {
+    !value.is_empty()
+        && value == value.trim()
+        && value.len() <= 256
+        && value.chars().all(|character| !character.is_control())
+}
+
+fn valid_asset_basename(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.len() <= 255
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+}
+
+fn valid_resource_platform(value: &str) -> bool {
+    matches!(
+        value,
+        "windows-x64" | "macos-arm64" | "macos-x64" | "linux-x64"
+    )
+}
+
+fn validate_resource_manifest(manifest: &ResourceManifest) -> Result<(), String> {
+    if manifest.schema_version != RESOURCE_MANIFEST_SCHEMA_VERSION {
+        return Err(format!(
+            "资源清单 schemaVersion 不受支持：{}。",
+            manifest.schema_version
+        ));
+    }
+    if !valid_resource_version(&manifest.release_tag) {
+        return Err("资源清单 releaseTag 无效。".to_string());
+    }
+    if manifest.ai_runtimes.is_empty() || manifest.merge_runtimes.is_empty() {
+        return Err("资源清单缺少 AI 或视频合并环境条目。".to_string());
+    }
+
+    for (index, entry) in manifest.ai_runtimes.iter().enumerate() {
+        if !valid_resource_platform(&entry.platform)
+            || !matches!(entry.flavor.as_str(), "cpu" | "gpu")
+            || (entry.platform != "windows-x64" && entry.flavor != "cpu")
+            || !valid_resource_version(&entry.version)
+            || !valid_asset_basename(&entry.asset_name)
+            || !valid_sha256(&entry.sha256)
+        {
+            return Err(format!("资源清单 AI 运行环境条目无效：{index}。"));
+        }
+    }
+    for (index, entry) in manifest.merge_runtimes.iter().enumerate() {
+        if !valid_resource_platform(&entry.platform)
+            || !valid_resource_version(&entry.version)
+            || !valid_asset_basename(&entry.asset_name)
+            || !valid_sha256(&entry.sha256)
+        {
+            return Err(format!("资源清单视频合并环境条目无效：{index}。"));
+        }
+    }
+    let clip = &manifest.clip_model;
+    let required_clip_files = [
+        "config.json",
+        "preprocessor_config.json",
+        "pytorch_model.bin",
+    ];
+    if !valid_clip_revision(&clip.revision)
+        || !valid_asset_basename(&clip.asset_name)
+        || !valid_sha256(&clip.archive_sha256)
+        || clip.files.len() != required_clip_files.len()
+        || required_clip_files
+            .iter()
+            .any(|name| !clip.files.contains_key(*name))
+        || clip.files.iter().any(|(name, hash)| {
+            !required_clip_files.contains(&name.as_str()) || !valid_sha256(hash)
+        })
+    {
+        return Err("资源清单 CLIP 模型条目无效。".to_string());
+    }
+
+    let mut ai_keys = std::collections::BTreeSet::new();
+    for entry in &manifest.ai_runtimes {
+        if !ai_keys.insert((&entry.platform, &entry.flavor)) {
+            return Err(format!(
+                "资源清单包含重复的 AI 运行环境条目：{}/{}。",
+                entry.platform, entry.flavor
+            ));
+        }
+    }
+    let mut merge_keys = std::collections::BTreeSet::new();
+    for entry in &manifest.merge_runtimes {
+        if !merge_keys.insert(&entry.platform) {
+            return Err(format!(
+                "资源清单包含重复的视频合并环境条目：{}。",
+                entry.platform
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_resource_manifest(content: &[u8]) -> Result<ResourceManifest, String> {
+    if content.len() > RESOURCE_MANIFEST_MAX_BYTES {
+        return Err("资源清单过大。".to_string());
+    }
+    let manifest: ResourceManifest =
+        serde_json::from_slice(content).map_err(|error| format!("解析资源清单失败：{error}"))?;
+    validate_resource_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+/// Fetch and validate the release resource manifest.  The URL is deliberately
+/// assembled from the fixed release root; the manifest can select filenames,
+/// but it cannot inject a download host or arbitrary URL.
+pub(crate) async fn fetch_resource_manifest(
+    proxy_url: Option<&str>,
+) -> Result<ResourceManifest, String> {
+    let client = build_client(proxy_url)?;
+    let url = format!("{RELEASE_DOWNLOAD_ROOT}/{RESOURCE_MANIFEST_NAME}");
+    let response = client
+        .get(url)
+        .header(USER_AGENT, "video-similarity-desktop")
+        .header(ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("连接资源清单地址失败: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("获取资源清单失败: HTTP {}", response.status()));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > RESOURCE_MANIFEST_MAX_BYTES as u64)
+    {
+        return Err("资源清单过大。".to_string());
+    }
+    let mut response = response;
+    let mut content = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取资源清单失败: {error}"))?
+    {
+        append_resource_manifest_chunk(&mut content, &chunk)?;
+    }
+    parse_resource_manifest(&content)
+}
+
+fn append_resource_manifest_chunk(content: &mut Vec<u8>, chunk: &[u8]) -> Result<(), String> {
+    if content.len().saturating_add(chunk.len()) > RESOURCE_MANIFEST_MAX_BYTES {
+        return Err("资源清单过大。".to_string());
+    }
+    content.extend_from_slice(chunk);
+    Ok(())
+}
+
+fn comparable_runtime_manifest(manifest: Option<&RuntimeManifest>, expected_flavor: &str) -> bool {
+    manifest.is_some_and(|entry| {
+        entry.flavor == expected_flavor
+            && valid_resource_version(&entry.version)
+            && valid_asset_basename(&entry.asset_name)
+            && valid_sha256(&entry.sha256)
+    })
+}
+
+fn resource_update_check(
+    installed: bool,
+    comparison_available: bool,
+    local: Option<&RuntimeManifest>,
+    remote_version: &str,
+    remote_asset_name: &str,
+    remote_sha256: &str,
+    resource_name: &str,
+) -> ResourceUpdateCheck {
+    let remote_sha256 = remote_sha256.to_ascii_lowercase();
+    let local_sha256 = local
+        .filter(|_| comparison_available)
+        .map(|entry| entry.sha256.to_ascii_lowercase());
+    let update_available = if !installed {
+        true
+    } else if comparison_available {
+        local_sha256.as_deref() != Some(remote_sha256.as_str())
+    } else {
+        false
+    };
+    let message = if !installed {
+        format!("尚未安装{resource_name}，可安装远端最新版本。")
+    } else if !comparison_available {
+        format!("已检测到{resource_name}，但本地版本清单无法比对；可由用户决定是否重装。")
+    } else if update_available {
+        format!("发现{resource_name}更新：{}。", remote_version)
+    } else {
+        format!("{resource_name}已是最新版本。")
+    };
+    ResourceUpdateCheck {
+        installed,
+        update_available,
+        comparison_available,
+        asset_name: remote_asset_name.to_string(),
+        installed_version: local.map(|entry| entry.version.clone()),
+        remote_version: Some(remote_version.to_string()),
+        local_sha256,
+        remote_sha256: Some(remote_sha256),
+        message,
+    }
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimePartsManifest {
     archive_name: String,
     archive_sha256: String,
@@ -211,7 +504,7 @@ struct RuntimePartsManifest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimePart {
     name: String,
     sha256: String,
@@ -227,6 +520,30 @@ struct DownloadProgress<'a> {
 #[tauri::command]
 pub fn get_runtime_status(app: tauri::AppHandle) -> Result<RuntimeStatus, String> {
     runtime_status(&app)
+}
+
+#[tauri::command]
+pub async fn check_runtime_update(
+    app: tauri::AppHandle,
+    proxy_url: Option<String>,
+) -> Result<ResourceUpdateCheck, String> {
+    let manifest = fetch_resource_manifest(proxy_url.as_deref()).await?;
+    let flavor = detect_build_flavor();
+    let platform = runtime_platform();
+    let remote = manifest.select_ai_runtime(platform, &flavor)?;
+    let root = storage_root(&app)?;
+    let local_manifest = read_manifest(&root.join("env").join(".runtime.json"));
+    let installed = first_existing_python(&root).is_some() || runtime_status(&app)?.legacy_fallback;
+    let comparison_available = comparable_runtime_manifest(local_manifest.as_ref(), &flavor);
+    Ok(resource_update_check(
+        installed,
+        comparison_available,
+        local_manifest.as_ref(),
+        &remote.version,
+        &remote.asset_name,
+        &remote.sha256,
+        "AI 运行环境",
+    ))
 }
 
 #[tauri::command]
@@ -277,6 +594,32 @@ pub fn cancel_runtime_install(state: State<'_, RuntimeManagerState>) {
 #[tauri::command]
 pub fn get_merge_runtime_status(app: tauri::AppHandle) -> Result<MergeRuntimeStatus, String> {
     merge_runtime_status(&app)
+}
+
+#[tauri::command]
+pub async fn check_merge_runtime_update(
+    app: tauri::AppHandle,
+    proxy_url: Option<String>,
+) -> Result<ResourceUpdateCheck, String> {
+    let manifest = fetch_resource_manifest(proxy_url.as_deref()).await?;
+    let platform = runtime_platform();
+    let remote = manifest.select_merge_runtime(platform)?;
+    let root = storage_root(&app)?;
+    let local_manifest = read_manifest(&root.join("merge-env").join(".runtime.json"));
+    let status = merge_runtime_status(&app)?;
+    let installed = status.ready
+        || (executable_in_env(&root.join("merge-env"), "ffmpeg").is_some()
+            && executable_in_env(&root.join("merge-env"), "ffprobe").is_some());
+    let comparison_available = comparable_runtime_manifest(local_manifest.as_ref(), platform);
+    Ok(resource_update_check(
+        installed,
+        comparison_available,
+        local_manifest.as_ref(),
+        &remote.version,
+        &remote.asset_name,
+        &remote.sha256,
+        "视频合并环境",
+    ))
 }
 
 #[tauri::command]
@@ -489,11 +832,19 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
 
     if let (Some(python), Some(manifest)) = (managed_python, manifest.as_ref()) {
         let version_matches = manifest.version.eq(&expected_version) && manifest.flavor == flavor;
+        // The latest resource manifest can advance independently of the app
+        // binary.  A package whose archive hash was recorded by the installer
+        // remains usable after such an update; check_runtime_update is the
+        // authority for whether it should be replaced.
+        let managed_manifest_is_usable = manifest.flavor == flavor
+            && valid_resource_version(&manifest.version)
+            && valid_asset_basename(&manifest.asset_name)
+            && valid_sha256(&manifest.sha256);
         let cleanup_legacy = safe_legacy_dir
             .as_ref()
             .filter(|legacy| !paths_equivalent(legacy, &runtime_dir));
         return Ok(RuntimeStatus {
-            ready: version_matches,
+            ready: version_matches || managed_manifest_is_usable,
             managed: true,
             legacy_fallback: false,
             legacy_migration_available: false,
@@ -507,7 +858,7 @@ fn runtime_status(app: &tauri::AppHandle) -> Result<RuntimeStatus, String> {
             runtime_dir: display_path(&runtime_dir),
             python_path: display_path(&python),
             asset_name,
-            message: if version_matches {
+            message: if version_matches || managed_manifest_is_usable {
                 "env 运行环境已就绪。".to_string()
             } else {
                 "检测到运行环境文件，但版本清单缺失或不匹配，请重新安装。".to_string()
@@ -580,7 +931,14 @@ fn merge_runtime_status(app: &tauri::AppHandle) -> Result<MergeRuntimeStatus, St
         let bundled = is_bundled_runtime_root(base);
         let version_matches = manifest
             .as_ref()
-            .is_some_and(|entry| entry.version == expected_version)
+            .is_some_and(|entry| entry.version == expected_version && entry.flavor == platform)
+            || (managed
+                && manifest.as_ref().is_some_and(|entry| {
+                    entry.flavor == platform
+                        && valid_resource_version(&entry.version)
+                        && valid_asset_basename(&entry.asset_name)
+                        && valid_sha256(&entry.sha256)
+                }))
             || (!managed && (candidate != runtime_dir || bundled));
         return Ok(MergeRuntimeStatus {
             ready: version_matches,
@@ -878,12 +1236,15 @@ async fn install_merge_runtime_impl(
     state: &RuntimeManagerState,
     proxy_url: Option<&str>,
 ) -> Result<bool, String> {
-    let version = merge_expected_version();
     let platform = runtime_platform().to_string();
     if platform == "unsupported" {
         return Err("当前平台没有可用的视频合并环境包。".to_string());
     }
-    let asset_name = ffmpeg_runtime_asset_name(&version, &platform);
+    let resource_manifest = fetch_resource_manifest(proxy_url).await?;
+    let remote_resource = resource_manifest.select_merge_runtime(&platform)?;
+    let version = remote_resource.version.clone();
+    let asset_name = remote_resource.asset_name.clone();
+    let expected_hash = remote_resource.sha256.to_ascii_lowercase();
     let download_root = storage_root(app)?
         .join("data")
         .join(".downloads")
@@ -891,27 +1252,9 @@ async fn install_merge_runtime_impl(
     fs::create_dir_all(&download_root)
         .map_err(|error| format!("创建视频合并环境下载目录失败: {error}"))?;
     let archive_path = download_root.join(&asset_name);
-    let checksum_path = download_root.join(format!("{asset_name}.sha256"));
     let client = build_client(proxy_url)?;
     let asset_url = format!("{RELEASE_DOWNLOAD_ROOT}/{asset_name}");
-    emit_progress(app, 0, 0, 1.0, "正在获取独立 FFmpeg 环境校验文件");
-    download_small_file(
-        &client,
-        &format!("{asset_url}.sha256"),
-        &checksum_path,
-        &state.cancel_requested,
-    )
-        .await
-        .map_err(|error| {
-            if error.contains("HTTP 404") {
-                format!(
-                    "最新 Release 尚未提供当前平台的独立 FFmpeg 环境：{asset_name}。不会回退下载大型 AI 运行环境。"
-                )
-            } else {
-                error
-            }
-        })?;
-    let expected_hash = parse_checksum(&checksum_path)?;
+    emit_progress(app, 0, 0, 1.0, "正在读取独立 FFmpeg 环境校验信息");
     download_archive(
         app,
         state,
@@ -970,7 +1313,6 @@ async fn install_merge_runtime_impl(
     .map_err(|error| format!("视频合并环境安装任务异常: {error}"))??;
 
     let _ = fs::remove_file(archive_path);
-    let _ = fs::remove_file(checksum_path);
     Ok(committed)
 }
 
@@ -983,8 +1325,12 @@ async fn install_runtime_impl(
     if flavor == "gpu" {
         ensure_cuda_13_compatible()?;
     }
-    let version = expected_version();
-    let asset_name = runtime_asset_name(&version, &flavor);
+    let platform = runtime_platform();
+    let resource_manifest = fetch_resource_manifest(proxy_url).await?;
+    let remote_resource = resource_manifest.select_ai_runtime(platform, &flavor)?;
+    let version = remote_resource.version.clone();
+    let asset_name = remote_resource.asset_name.clone();
+    let manifest_hash = remote_resource.sha256.to_ascii_lowercase();
     let download_root = storage_root(app)?
         .join("data")
         .join(".downloads")
@@ -992,7 +1338,6 @@ async fn install_runtime_impl(
     fs::create_dir_all(&download_root)
         .map_err(|error| format!("创建运行环境下载目录失败: {error}"))?;
     let archive_path = download_root.join(&asset_name);
-    let checksum_path = download_root.join(format!("{asset_name}.sha256"));
 
     let client = build_client(proxy_url)?;
     let asset_url = format!("{RELEASE_DOWNLOAD_ROOT}/{asset_name}");
@@ -1095,19 +1440,12 @@ async fn install_runtime_impl(
         })
         .await
         .map_err(|error| format!("GPU 运行环境分卷合并任务异常: {error}"))??;
-        parts_manifest.archive_sha256
+        if parts_manifest.archive_sha256.to_ascii_lowercase() != manifest_hash {
+            return Err("GPU 运行环境分卷清单与资源清单中的整包 SHA-256 不一致。".to_string());
+        }
+        manifest_hash.clone()
     } else {
-        let checksum_url = format!("{asset_url}.sha256");
-        emit_progress(app, 0, 0, 1.0, "正在获取运行环境校验文件");
-        download_small_file(
-            &client,
-            &checksum_url,
-            &checksum_path,
-            &state.cancel_requested,
-        )
-        .await?;
-        cleanup_paths.push(checksum_path.clone());
-        let expected_hash = parse_checksum(&checksum_path)?;
+        emit_progress(app, 0, 0, 1.0, "正在读取运行环境校验信息");
         download_archive(
             app,
             state,
@@ -1121,7 +1459,7 @@ async fn install_runtime_impl(
             },
         )
         .await?;
-        expected_hash
+        manifest_hash.clone()
     };
     if state.cancel_requested.load(Ordering::SeqCst) {
         return Err("运行环境下载已取消。".to_string());
@@ -1400,7 +1738,7 @@ fn parse_parts_manifest(
 ) -> Result<RuntimePartsManifest, String> {
     let content =
         fs::read(path).map_err(|error| format!("读取 GPU 运行环境分卷清单失败: {error}"))?;
-    let manifest: RuntimePartsManifest = serde_json::from_slice(&content)
+    let mut manifest: RuntimePartsManifest = serde_json::from_slice(&content)
         .map_err(|error| format!("解析 GPU 运行环境分卷清单失败: {error}"))?;
     if manifest.archive_name != expected_archive_name {
         return Err("GPU 运行环境分卷清单与当前构建不匹配。".to_string());
@@ -1420,6 +1758,10 @@ fn parse_parts_manifest(
         {
             return Err(format!("GPU 运行环境分卷清单条目无效: {}", part.name));
         }
+    }
+    manifest.archive_sha256.make_ascii_lowercase();
+    for part in &mut manifest.parts {
+        part.sha256.make_ascii_lowercase();
     }
     Ok(manifest)
 }
@@ -1460,7 +1802,10 @@ fn copy_with_cancel<R: Read, W: Write>(
     destination: &mut W,
     cancel: &AtomicBool,
 ) -> Result<u64, String> {
-    let mut buffer = [0_u8; 1024 * 1024];
+    // This function runs on a blocking worker, but it is also called from
+    // recursive archive/copy paths.  Keep the 1 MiB transfer buffer on the
+    // heap so a small-stack worker cannot overflow before the first read.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     let mut copied = 0u64;
     loop {
         check_cancel(cancel)?;
@@ -2012,20 +2357,12 @@ fn read_manifest(path: &Path) -> Option<RuntimeManifest> {
     serde_json::from_slice(&content).ok()
 }
 
-fn parse_checksum(path: &Path) -> Result<String, String> {
-    let content =
-        fs::read_to_string(path).map_err(|error| format!("读取运行环境校验文件失败: {error}"))?;
-    let hash = content.split_whitespace().next().unwrap_or_default();
-    if !valid_sha256(hash) {
-        return Err("运行环境校验文件格式无效。".to_string());
-    }
-    Ok(hash.to_ascii_lowercase())
-}
-
 fn sha256_file_cancelable(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| format!("打开运行环境压缩包失败: {error}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Hashing is commonly run in a small-stack blocking worker.  A Vec keeps
+    // this large scratch buffer out of that worker's stack frame.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err("运行环境下载已取消。".to_string());
@@ -2107,12 +2444,42 @@ mod tests {
     use super::{
         copy_dir_recursive_cancelable, cuda_13_compatibility_issue_from_output,
         ffmpeg_runtime_asset_name, install_archive_cancelable, install_merge_archive_cancelable,
-        parse_checksum, parse_parts_manifest, partial_download_path, python_candidates_below,
-        runtime_asset_name, runtime_asset_name_for_platform, RuntimeManagerState, RuntimeManifest,
+        parse_parts_manifest, parse_resource_manifest, partial_download_path,
+        python_candidates_below, runtime_asset_name, runtime_asset_name_for_platform,
+        sha256_file_cancelable, RuntimeManagerState, RuntimeManifest,
     };
     use std::fs;
-    use std::io::Write as _;
+    use std::io::{Cursor, Write as _};
     use std::sync::atomic::AtomicBool;
+
+    fn valid_resource_manifest_json() -> String {
+        let hash = "a".repeat(64);
+        format!(
+            r#"{{
+                "schemaVersion": 1,
+                "releaseTag": "v1.3.0",
+                "aiRuntimes": [
+                    {{"platform":"windows-x64","flavor":"cpu","version":"1","assetName":"runtime.zip","sha256":"{hash}"}},
+                    {{"platform":"windows-x64","flavor":"gpu","version":"1","assetName":"runtime-gpu.zip","sha256":"{hash}"}},
+                    {{"platform":"linux-x64","flavor":"cpu","version":"1","assetName":"runtime-linux.zip","sha256":"{hash}"}}
+                ],
+                "mergeRuntimes": [
+                    {{"platform":"windows-x64","version":"1","assetName":"ffmpeg.zip","sha256":"{hash}"}},
+                    {{"platform":"linux-x64","version":"1","assetName":"ffmpeg-linux.zip","sha256":"{hash}"}}
+                ],
+                "clipModel": {{
+                    "revision":"openai/clip-vit-base-patch32",
+                    "assetName":"clip-vit-base-patch32.zip",
+                    "archiveSha256":"{hash}",
+                    "files": {{
+                        "config.json":"{hash}",
+                        "preprocessor_config.json":"{hash}",
+                        "pytorch_model.bin":"{hash}"
+                    }}
+                }}
+            }}"#
+        )
+    }
 
     #[test]
     fn runtime_asset_name_includes_version_platform_and_flavor() {
@@ -2183,15 +2550,151 @@ mod tests {
     }
 
     #[test]
-    fn checksum_parser_accepts_sha256_sidecar_format() {
-        let path = std::env::temp_dir().join(format!(
-            "video-similarity-runtime-checksum-{}.txt",
+    fn resource_manifest_requires_strict_schema_and_safe_entries() {
+        let manifest = parse_resource_manifest(valid_resource_manifest_json().as_bytes()).unwrap();
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.clip_model.asset_name, "clip-vit-base-patch32.zip");
+
+        let malformed =
+            valid_resource_manifest_json().replace("\"schemaVersion\": 1", "\"schemaVersion\": 2");
+        assert!(parse_resource_manifest(malformed.as_bytes()).is_err());
+        let unknown = valid_resource_manifest_json().replace(
+            "\"releaseTag\": \"v1.3.0\"",
+            "\"releaseTag\": \"v1.3.0\", \"unexpected\": true",
+        );
+        assert!(parse_resource_manifest(unknown.as_bytes()).is_err());
+        let traversal = valid_resource_manifest_json().replace("runtime.zip", "../runtime.zip");
+        assert!(parse_resource_manifest(traversal.as_bytes()).is_err());
+        let invalid_platform =
+            valid_resource_manifest_json().replace("windows-x64", "windows-arm64");
+        assert!(parse_resource_manifest(invalid_platform.as_bytes()).is_err());
+        let invalid_flavor =
+            valid_resource_manifest_json().replace("\"flavor\":\"cpu\"", "\"flavor\":\"debug\"");
+        assert!(parse_resource_manifest(invalid_flavor.as_bytes()).is_err());
+        let bad_hash = valid_resource_manifest_json().replace(&"a".repeat(64), &"z".repeat(64));
+        assert!(parse_resource_manifest(bad_hash.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn resource_manifest_body_enforces_limit_without_content_length() {
+        let mut content = Vec::new();
+        let chunk = vec![b'x'; super::RESOURCE_MANIFEST_MAX_BYTES];
+        super::append_resource_manifest_chunk(&mut content, &chunk).unwrap();
+        assert_eq!(content.len(), super::RESOURCE_MANIFEST_MAX_BYTES);
+        assert!(super::append_resource_manifest_chunk(&mut content, b"x").is_err());
+        assert_eq!(content.len(), super::RESOURCE_MANIFEST_MAX_BYTES);
+    }
+
+    #[test]
+    fn resource_manifest_selects_platform_and_flavor() {
+        let manifest = parse_resource_manifest(valid_resource_manifest_json().as_bytes()).unwrap();
+        assert_eq!(
+            manifest
+                .select_ai_runtime("windows-x64", "gpu")
+                .unwrap()
+                .asset_name,
+            "runtime-gpu.zip"
+        );
+        assert_eq!(
+            manifest
+                .select_ai_runtime("linux-x64", "cpu")
+                .unwrap()
+                .asset_name,
+            "runtime-linux.zip"
+        );
+        assert!(manifest.select_ai_runtime("linux-x64", "gpu").is_err());
+        assert_eq!(
+            manifest
+                .select_merge_runtime("windows-x64")
+                .unwrap()
+                .asset_name,
+            "ffmpeg.zip"
+        );
+    }
+
+    #[test]
+    fn resource_update_check_distinguishes_matching_mismatching_and_missing_local_hash() {
+        let hash = "a".repeat(64);
+        let local = RuntimeManifest {
+            version: "1".to_string(),
+            flavor: "cpu".to_string(),
+            asset_name: "runtime.zip".to_string(),
+            sha256: hash.clone(),
+            installed_at_ms: 1,
+        };
+        let current = super::resource_update_check(
+            true,
+            true,
+            Some(&local),
+            "1",
+            "runtime.zip",
+            &hash,
+            "AI 运行环境",
+        );
+        assert!(!current.update_available);
+        assert!(current.comparison_available);
+        assert_eq!(current.local_sha256.as_deref(), Some(hash.as_str()));
+
+        let other_hash = "b".repeat(64);
+        let changed = super::resource_update_check(
+            true,
+            true,
+            Some(&local),
+            "2",
+            "runtime-v2.zip",
+            &other_hash,
+            "AI 运行环境",
+        );
+        assert!(changed.update_available);
+        assert_eq!(changed.remote_version.as_deref(), Some("2"));
+
+        let missing = super::resource_update_check(
+            false,
+            false,
+            None,
+            "1",
+            "runtime.zip",
+            &hash,
+            "AI 运行环境",
+        );
+        assert!(missing.update_available);
+        assert!(!missing.comparison_available);
+        assert!(missing.local_sha256.is_none());
+    }
+
+    #[test]
+    fn copy_and_hash_work_on_a_small_stack() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-runtime-small-stack-{}",
             super::timestamp_millis()
         ));
-        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        fs::write(&path, format!("{hash}  runtime.zip\n")).unwrap();
-        assert_eq!(parse_checksum(&path).unwrap(), hash);
-        let _ = fs::remove_file(path);
+        fs::create_dir_all(&root).unwrap();
+        let source = vec![0x5a_u8; 1024 * 1024 + 17];
+        let source_path = root.join("source.bin");
+        let destination_path = root.join("destination.bin");
+        fs::write(&source_path, &source).unwrap();
+        let source_for_copy = source.clone();
+        let destination_for_copy = destination_path.clone();
+        let copy_thread = std::thread::Builder::new()
+            .name("runtime-small-stack-copy".to_string())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let mut input = Cursor::new(source_for_copy);
+                let mut output = fs::File::create(destination_for_copy).unwrap();
+                super::copy_with_cancel(&mut input, &mut output, &AtomicBool::new(false)).unwrap()
+            })
+            .unwrap();
+        assert_eq!(copy_thread.join().unwrap(), source.len() as u64);
+        assert_eq!(fs::read(&destination_path).unwrap(), source);
+
+        let hash_path = source_path.clone();
+        let hash_thread = std::thread::Builder::new()
+            .name("runtime-small-stack-hash".to_string())
+            .stack_size(64 * 1024)
+            .spawn(move || sha256_file_cancelable(&hash_path, &AtomicBool::new(false)).unwrap())
+            .unwrap();
+        assert_eq!(hash_thread.join().unwrap().len(), 64);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

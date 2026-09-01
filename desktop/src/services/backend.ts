@@ -58,6 +58,23 @@ export interface ClipModelStatus {
   missingFiles: string[]
 }
 
+/**
+ * Result of comparing an installed managed resource with the latest GitHub
+ * release asset.  The comparison fields are optional because older releases
+ * and offline/proxy failures may not expose both sides of the comparison.
+ */
+export interface ResourceUpdateCheck {
+  installed: boolean
+  updateAvailable: boolean
+  comparisonAvailable: boolean
+  assetName: string
+  installedVersion?: string
+  remoteVersion?: string
+  localSha256?: string
+  remoteSha256?: string
+  message: string
+}
+
 export interface RuntimeStatus {
   ready: boolean
   managed: boolean
@@ -601,6 +618,19 @@ export async function installRuntime(proxyUrl?: string) {
   return invoke<RuntimeStatus>('install_runtime', { proxyUrl: proxyUrl?.trim() || null })
 }
 
+export async function checkRuntimeUpdate(proxyUrl?: string) {
+  if (!hasTauriRuntime()) {
+    return {
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: '',
+      message: '浏览器预览模式无法比较运行环境版本。',
+    } satisfies ResourceUpdateCheck
+  }
+  return invoke<ResourceUpdateCheck>('check_runtime_update', { proxyUrl: proxyUrl?.trim() || null })
+}
+
 export async function migrateLegacyRuntime() {
   if (!hasTauriRuntime()) throw new Error('旧版运行环境迁移需要在桌面应用中执行。')
   return invoke<RuntimeStatus>('migrate_legacy_runtime')
@@ -654,6 +684,19 @@ export async function installMergeRuntime(proxyUrl?: string) {
   return invoke<MergeRuntimeStatus>('install_merge_runtime', { proxyUrl: proxyUrl?.trim() || null })
 }
 
+export async function checkMergeRuntimeUpdate(proxyUrl?: string) {
+  if (!hasTauriRuntime()) {
+    return {
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: '',
+      message: '浏览器预览模式无法比较视频合并环境版本。',
+    } satisfies ResourceUpdateCheck
+  }
+  return invoke<ResourceUpdateCheck>('check_merge_runtime_update', { proxyUrl: proxyUrl?.trim() || null })
+}
+
 export async function cancelMergeRuntimeInstall() {
   if (!hasTauriRuntime()) return
   return invoke<void>('cancel_merge_runtime_install')
@@ -676,6 +719,19 @@ export async function getClipModelStatus() {
 export async function installClipModel(proxyUrl?: string) {
   if (!hasTauriRuntime()) throw new Error('离线模型安装需要在桌面应用中运行。')
   return invoke<ClipModelStatus>('install_clip_model', { proxyUrl: proxyUrl?.trim() || null })
+}
+
+export async function checkClipModelUpdate(proxyUrl?: string) {
+  if (!hasTauriRuntime()) {
+    return {
+      installed: false,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: '',
+      message: '浏览器预览模式无法比较离线 CLIP 模型版本。',
+    } satisfies ResourceUpdateCheck
+  }
+  return invoke<ResourceUpdateCheck>('check_clip_model_update', { proxyUrl: proxyUrl?.trim() || null })
 }
 
 export async function cancelClipModelInstall() {

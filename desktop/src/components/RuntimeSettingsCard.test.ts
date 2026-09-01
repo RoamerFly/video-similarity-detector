@@ -5,6 +5,8 @@ import {
   runtimeStatusHasSettled,
   runtimeTaskCanCancel,
   runtimeTaskFromStatus,
+  runtimeProgressCanCancel,
+  runtimeUpdatePrompt,
 } from './RuntimeSettingsCard'
 
 describe('runtime environment task state', () => {
@@ -43,5 +45,48 @@ describe('runtime environment task state', () => {
     completed.stage = 'AI 运行环境已安装'
     expect(runtimeStatusHasSettled('runtime', completed, 'success')).toBe(false)
     expect(runtimeStatusHasSettled('runtime', { ...completed, running: false }, 'success')).toBe(true)
+  })
+
+  it('asks before installing, updating, or forcing a reinstall', () => {
+    expect(runtimeUpdatePrompt({
+      installed: false,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: 'runtime.zip',
+      remoteVersion: '1.3.0',
+      message: '',
+    })).toContain('找到 GitHub 最新版')
+    expect(runtimeUpdatePrompt({
+      installed: true,
+      updateAvailable: true,
+      comparisonAvailable: true,
+      assetName: 'runtime.zip',
+      installedVersion: '1.2.3',
+      remoteVersion: '1.3.0',
+      message: '',
+    })).toContain('有可用更新')
+    expect(runtimeUpdatePrompt({
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: true,
+      assetName: 'runtime.zip',
+      installedVersion: '1.3.0',
+      remoteVersion: '1.3.0',
+      message: '',
+    })).toContain('已是最新版')
+    expect(runtimeUpdatePrompt({
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: 'runtime.zip',
+      message: '',
+    })).toContain('无法可靠比较')
+  })
+
+  it('disables cancellation while the installer is extracting or committing', () => {
+    expect(runtimeProgressCanCancel('正在下载运行环境')).toBe(true)
+    expect(runtimeProgressCanCancel('正在取消下载')).toBe(false)
+    expect(runtimeProgressCanCancel('正在解压运行环境')).toBe(false)
+    expect(runtimeProgressCanCancel('正在切换运行环境')).toBe(false)
   })
 })

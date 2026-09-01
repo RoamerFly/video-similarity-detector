@@ -37,6 +37,7 @@ import { MergeRuntimeSettingsCard } from '@/components/MergeRuntimeSettingsCard'
 import { Translated } from '@/i18n/Translated'
 import {
   cancelUpdateDownload,
+  checkClipModelUpdate,
   checkPythonEnv,
   checkForUpdates,
   clearCacheItems,
@@ -70,6 +71,7 @@ import {
   type ConfigTemplateRecord,
   type UpdateDownloadProgress,
   type UpdateInfo,
+  type ResourceUpdateCheck,
 } from '@/services/backend'
 import * as backendApi from '@/services/backend'
 import { useEnvironmentStore } from '@/stores/environmentStore'
@@ -103,6 +105,7 @@ interface DownloadTaskSnapshot {
   error: string
   terminal?: 'success' | 'cancelled' | 'failed'
   generation: number
+  notifyCompletion?: boolean
 }
 
 interface BackendDownloadTaskStatus {
@@ -256,8 +259,8 @@ async function waitForDownloadTaskSettlement(
 // intentionally ephemeral (and may be closed while a download continues), so
 // local modal state must never be the source of truth for the action button.
 const downloadTaskSnapshots: Record<DownloadTaskKind, DownloadTaskSnapshot> = {
-  'clip-model': { active: false, progress: null, error: '', generation: 0 },
-  update: { active: false, progress: null, error: '', generation: 0 },
+  'clip-model': { active: false, progress: null, error: '', generation: 0, notifyCompletion: false },
+  update: { active: false, progress: null, error: '', generation: 0, notifyCompletion: false },
 }
 
 function getDownloadTaskSnapshot(kind: DownloadTaskKind): DownloadTaskSnapshot {
@@ -268,6 +271,7 @@ function getDownloadTaskSnapshot(kind: DownloadTaskKind): DownloadTaskSnapshot {
     error: snapshot.error,
     terminal: snapshot.terminal,
     generation: snapshot.generation,
+    notifyCompletion: snapshot.notifyCompletion,
   }
 }
 
@@ -278,14 +282,40 @@ function setDownloadTaskSnapshot(kind: DownloadTaskKind, patch: Partial<Download
   }
 }
 
-function beginDownloadTask(kind: DownloadTaskKind) {
+function beginDownloadTask(kind: DownloadTaskKind, notifyCompletion = false) {
   const generation = downloadTaskSnapshots[kind].generation + 1
-  setDownloadTaskSnapshot(kind, { generation, active: true, terminal: undefined })
+  setDownloadTaskSnapshot(kind, { generation, active: true, terminal: undefined, notifyCompletion })
   return generation
 }
 
 function isCurrentDownloadGeneration(kind: DownloadTaskKind, generation: number) {
   return downloadTaskSnapshots[kind].generation === generation
+}
+
+function formatResourceCheckDetails(check: ResourceUpdateCheck) {
+  const versions = check.installedVersion && check.remoteVersion
+    ? `（本地 v${check.installedVersion}，GitHub v${check.remoteVersion}）`
+    : check.remoteVersion
+      ? `（GitHub v${check.remoteVersion}）`
+      : ''
+  const hashes = check.localSha256 && check.remoteSha256
+    ? `（本地 SHA-256 ${check.localSha256.slice(0, 12)}…，远端 ${check.remoteSha256.slice(0, 12)}…）`
+    : ''
+  return `${versions}${hashes}`
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function clipModelUpdatePrompt(check: ResourceUpdateCheck) {
+  const details = formatResourceCheckDetails(check)
+  if (!check.installed) return `已找到 GitHub 最新版离线 CLIP 模型${details}，是否安装？`
+  if (check.comparisonAvailable && check.updateAvailable) return `检测到离线 CLIP 模型有可用更新${details}，是否更新？`
+  if (check.comparisonAvailable) return `当前离线 CLIP 模型已是最新版${details}。是否仍要强制重装？`
+  return '无法可靠比较离线 CLIP 模型的本地版本与 GitHub 最新版。是否强制重装？'
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function clipModelProgressCanCancel(stage: string) {
+  return !/正在取消|解压|校验|验证|提交|切换|正在安装|收尾|已完成/.test(stage)
 }
 
 interface ErrorToleranceTemplateConfig {
@@ -515,11 +545,16 @@ export function SettingsPage() {
     }
   }
 
-  function showSettingsMessage(message: string, duration = 2200) {
+  const showSettingsMessage = useCallback((message: string, duration = 2200) => {
     setSavedMessage(message)
     if (saveMessageTimer.current) window.clearTimeout(saveMessageTimer.current)
     saveMessageTimer.current = window.setTimeout(() => setSavedMessage(''), duration)
-  }
+  }, [])
+
+  const showResourceCompleted = useCallback((message: string) => {
+    setError('')
+    showSettingsMessage(message)
+  }, [showSettingsMessage])
 
   function handleSave(message = '设置已保存，后续任务将使用新配置。') {
     if (saveFeedbackTimer.current) window.clearTimeout(saveFeedbackTimer.current)
@@ -705,6 +740,7 @@ export function SettingsPage() {
               onChooseVideoDir={chooseVideoDir}
               onChooseCacheDir={chooseCacheDir}
               onChooseReportDir={chooseReportDir}
+              onResourceCompleted={showResourceCompleted}
             />
           ) : activeTab === 'analysis' ? (
             <AnalysisSettings
@@ -788,6 +824,7 @@ function BaseSettings({
   onChooseVideoDir,
   onChooseCacheDir,
   onChooseReportDir,
+  onResourceCompleted,
 }: {
   appInfo: AppInfo | null
   onChoosePythonPath: () => Promise<void>
@@ -795,6 +832,7 @@ function BaseSettings({
   onChooseVideoDir: () => Promise<void>
   onChooseCacheDir: () => Promise<void>
   onChooseReportDir: () => Promise<void>
+  onResourceCompleted: (message: string) => void
 }) {
   const settings = useSettingsStore()
   const [modelStatus, setModelStatus] = useState<ClipModelStatus | null>(null)
@@ -804,12 +842,15 @@ function BaseSettings({
   const modelOperationRef = useRef(0)
   const modelStatusRequestRef = useRef(0)
   const [modelError, setModelError] = useState(() => getDownloadTaskSnapshot('clip-model').error)
+  const [modelChecking, setModelChecking] = useState(false)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [runtimeLoading, setRuntimeLoading] = useState(false)
   const [mergeRuntimeStatus, setMergeRuntimeStatus] = useState<MergeRuntimeStatus | null>(null)
   const [mergeRuntimeLoading, setMergeRuntimeLoading] = useState(false)
   const [resourceDialog, setResourceDialog] = useState<'about' | 'runtime' | 'clip-model' | 'merge' | null>(null)
   const [aboutError, setAboutError] = useState('')
+  const runtimeCompleted = useCallback(() => onResourceCompleted('AI 运行环境重装/更新完成'), [onResourceCompleted])
+  const mergeRuntimeCompleted = useCallback(() => onResourceCompleted('视频合并环境重装/更新完成'), [onResourceCompleted])
 
   const handleOpenProjectPage = useCallback(async (url: string) => {
     setAboutError('')
@@ -928,14 +969,17 @@ function BaseSettings({
           if (!active || !isCurrentDownloadGeneration('clip-model', generation) || !finalStatus) return
           if (!downloadStatusHasSettled('clip-model', finalStatus, expected)) return
           const settledProgress = progressFromDownloadStatus(finalStatus)
+          const shouldNotify = expected === 'success' && getDownloadTaskSnapshot('clip-model').notifyCompletion === true
           setModelProgress(settledProgress.stage ? settledProgress : payload)
           setDownloadTaskSnapshot('clip-model', {
             active: false,
             progress: settledProgress.stage ? settledProgress : payload,
             error: '',
             terminal: expected,
+            notifyCompletion: false,
           })
           setModelInstalling(false)
+          if (shouldNotify) onResourceCompleted('离线 CLIP 模型重装/更新完成')
         })
       }
     })
@@ -950,19 +994,26 @@ function BaseSettings({
       active = false
       stop()
     }
-  }, [])
+  }, [onResourceCompleted])
 
   async function handleInstallClipModel() {
-    if (modelInstalling) return
-    const confirmed = window.confirm(
-      modelStatus?.installed
-        ? '将重新下载并替换本地离线 CLIP 模型，原模型会在安装成功后清理。是否继续？'
-        : '将从 GitHub Releases 下载离线 CLIP 模型，体积较大。是否继续？',
-    )
+    if (modelInstalling || modelChecking) return
+    setModelChecking(true)
+    setModelError('')
+    let updateCheck: ResourceUpdateCheck
+    try {
+      updateCheck = await checkClipModelUpdate(settings.networkProxy)
+    } catch (err) {
+      setModelError(normalizeBackendError(err))
+      setModelChecking(false)
+      return
+    }
+    setModelChecking(false)
+    const confirmed = window.confirm(clipModelUpdatePrompt(updateCheck))
     if (!confirmed) return
     const operation = modelOperationRef.current + 1
     modelOperationRef.current = operation
-    const generation = beginDownloadTask('clip-model')
+    const generation = beginDownloadTask('clip-model', true)
     modelStatusRequestRef.current += 1
     setModelInstalling(true)
     setDownloadTaskSnapshot('clip-model', { active: true, error: '', terminal: undefined })
@@ -994,8 +1045,10 @@ function BaseSettings({
         const settledProgress = progressFromDownloadStatus(finalStatus)
         const finalProgress = settledProgress.stage ? settledProgress : completedProgress
         setModelProgress(finalProgress)
-        setDownloadTaskSnapshot('clip-model', { active: false, progress: finalProgress, error: '', terminal: 'success' })
+        const shouldNotify = getDownloadTaskSnapshot('clip-model').notifyCompletion === true
+        setDownloadTaskSnapshot('clip-model', { active: false, progress: finalProgress, error: '', terminal: 'success', notifyCompletion: false })
         setModelInstalling(false)
+        if (shouldNotify) onResourceCompleted('离线 CLIP 模型重装/更新完成')
       }
     } catch (err) {
       if (operation !== modelOperationRef.current) return
@@ -1006,14 +1059,14 @@ function BaseSettings({
       if (operation !== modelOperationRef.current || !isCurrentDownloadGeneration('clip-model', generation)) return
       if (finalStatus && downloadStatusHasSettled('clip-model', finalStatus)) {
         const terminal = downloadStatusTerminal('clip-model', finalStatus) || 'failed'
-        setDownloadTaskSnapshot('clip-model', { active: false, error: terminal === 'cancelled' ? '' : message, terminal })
+        setDownloadTaskSnapshot('clip-model', { active: false, error: terminal === 'cancelled' ? '' : message, terminal, notifyCompletion: false })
         setModelInstalling(false)
       }
     }
   }
 
   async function handleCancelClipModel() {
-    if (!modelInstalling) return
+    if (!modelInstalling || !clipModelProgressCanCancel(modelProgress?.stage || '')) return
     modelOperationRef.current += 1
     modelStatusRequestRef.current += 1
     setModelError('')
@@ -1050,9 +1103,10 @@ function BaseSettings({
       }
       setModelInstalling(false)
       setModelProgress(cancelledProgress)
-      setDownloadTaskSnapshot('clip-model', { active: false, progress: cancelledProgress, error: '', terminal: 'cancelled' })
+      setDownloadTaskSnapshot('clip-model', { active: false, progress: cancelledProgress, error: '', terminal: 'cancelled', notifyCompletion: false })
     } catch (err) {
       const message = normalizeBackendError(err)
+      setDownloadTaskSnapshot('clip-model', { notifyCompletion: false })
       setModelError(message)
       setDownloadTaskSnapshot('clip-model', { error: message })
     }
@@ -1187,12 +1241,13 @@ function BaseSettings({
         </div>
       </SettingsResourceDialog>
       <SettingsResourceDialog open={resourceDialog === 'runtime'} title="AI 运行环境" icon={<PackageCheck size={21} />} onClose={closeResourceDialog}>
-        <RuntimeSettingsCard />
+        <RuntimeSettingsCard onCompleted={runtimeCompleted} />
       </SettingsResourceDialog>
       <SettingsResourceDialog open={resourceDialog === 'clip-model'} title="离线 CLIP 模型" icon={modelStatus?.installed ? <CheckCircle2 size={21} /> : <PackageCheck size={21} />} onClose={closeResourceDialog}>
         <ClipModelSettingsCard
           status={modelStatus}
           loading={modelLoading}
+          checking={modelChecking}
           installing={modelInstalling}
           progress={modelProgress}
           error={modelError}
@@ -1204,7 +1259,7 @@ function BaseSettings({
         />
       </SettingsResourceDialog>
       <SettingsResourceDialog open={resourceDialog === 'merge'} title="视频合并环境" icon={<Film size={21} />} onClose={closeResourceDialog}>
-        <MergeRuntimeSettingsCard />
+        <MergeRuntimeSettingsCard onCompleted={mergeRuntimeCompleted} />
       </SettingsResourceDialog>
     </div>
     </Translated>
@@ -1226,6 +1281,7 @@ function ResourceStatusBadge({ state }: { state: ResourceStatus }) {
 function ClipModelSettingsCard({
   status,
   loading,
+  checking,
   installing,
   progress,
   error,
@@ -1237,6 +1293,7 @@ function ClipModelSettingsCard({
 }: {
   status: ClipModelStatus | null
   loading: boolean
+  checking: boolean
   installing: boolean
   progress: UpdateDownloadProgress | null
   error: string
@@ -1246,6 +1303,7 @@ function ClipModelSettingsCard({
   onInstall: () => void
   onCancel: () => void
 }) {
+  const canCancel = installing && clipModelProgressCanCancel(progress?.stage || '')
   return (
     <div className="settings-about-card">
       <div className="about-grid compact">
@@ -1253,7 +1311,7 @@ function ClipModelSettingsCard({
         <div><span>模型大小</span><strong>{status?.sizeBytes ? formatBytes(status.sizeBytes) : '未检测到'}</strong></div>
       </div>
       {status?.modelDir ? <p className="update-install-path" title={status.modelDir}>模型目录：{status.modelDir}</p> : null}
-      <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{error || status?.message || '正在检测离线模型状态。'}</p>
+      <p className={error ? 'inline-error update-status-copy' : 'update-status-copy'}>{error || (checking ? '正在检查更新' : status?.message || '正在检测离线模型状态。')}</p>
       {missingFiles.length > 0 ? <p className="update-install-path">缺失文件：{missingFiles.join(', ')}</p> : null}
       {progress && (
         <div className="update-progress-block">
@@ -1263,16 +1321,17 @@ function ClipModelSettingsCard({
         </div>
       )}
       <div className="settings-path-actions">
-        <NeonButton variant="outline" type="button" onClick={onRefresh} disabled={loading || installing}>
+        <NeonButton variant="outline" type="button" onClick={onRefresh} disabled={loading || installing || checking}>
           <RefreshCw size={17} />刷新
         </NeonButton>
         <NeonButton
-          variant={installing ? 'outline' : 'primary'}
+          variant={installing || checking ? 'outline' : 'primary'}
           type="button"
-          onClick={installing ? onCancel : onInstall}
+          onClick={installing && canCancel ? onCancel : onInstall}
+          disabled={checking || (installing && !canCancel)}
         >
-          {installing ? <CircleStop size={17} /> : <Download size={17} />}
-          {installing ? '取消下载' : status?.installed ? '重装模型' : '安装模型'}
+          {checking ? <RefreshCw size={17} className="spin-slow" /> : installing && canCancel ? <CircleStop size={17} /> : installing ? <RefreshCw size={17} className="spin-slow" /> : <Download size={17} />}
+          {checking ? '正在检查更新' : installing && canCancel ? '取消下载' : installing ? '正在安装模型' : '重装/更新环境'}
         </NeonButton>
       </div>
     </div>

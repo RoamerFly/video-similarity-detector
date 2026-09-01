@@ -36,8 +36,8 @@ const CLOSE_BEHAVIOR_TRAY: u8 = 1;
 const CLOSE_BEHAVIOR_EXIT: u8 = 2;
 const RELEASES_LATEST_PAGE_URL: &str =
     "https://github.com/RoamerFly/video-similarity-detector/releases/latest";
-const CLIP_MODEL_DOWNLOAD_URL: &str =
-    "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download/clip-vit-base-patch32.zip";
+const RELEASE_DOWNLOAD_ROOT: &str =
+    "https://github.com/RoamerFly/video-similarity-detector/releases/latest/download";
 const PROJECT_REPOSITORY_URL: &str = "https://github.com/RoamerFly/video-similarity-detector";
 const PROJECT_ISSUES_URL: &str = "https://github.com/RoamerFly/video-similarity-detector/issues";
 const PROJECT_LICENSE_URL: &str =
@@ -48,6 +48,7 @@ const PROJECT_PAGE_URLS: &[&str] = &[
     PROJECT_LICENSE_URL,
 ];
 const CLIP_MODEL_DIR_NAME: &str = "clip-vit-base-patch32";
+#[cfg(test)]
 const CLIP_MODEL_FILE_HASHES: &[(&str, &str)] = &[
     (
         "config.json",
@@ -284,6 +285,25 @@ struct ClipModelStatus {
     message: String,
     required_files: Vec<String>,
     missing_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipModelManifest {
+    revision: String,
+    asset_name: String,
+    archive_sha256: String,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipModelInstallMetadata {
+    revision: String,
+    asset_name: String,
+    archive_sha256: String,
+    files: BTreeMap<String, String>,
+    installed_at: u128,
 }
 
 fn updater_target_for_build(build_flavor: &str) -> Option<String> {
@@ -1941,6 +1961,214 @@ fn get_clip_model_status(app: tauri::AppHandle) -> Result<ClipModelStatus, Strin
 }
 
 #[tauri::command]
+async fn check_clip_model_update(
+    app: tauri::AppHandle,
+    proxy_url: Option<String>,
+) -> Result<runtime_manager::ResourceUpdateCheck, String> {
+    let manifest = fetch_clip_model_manifest(proxy_url.as_deref()).await?;
+    validate_clip_model_manifest(&manifest)?;
+    let root = runtime_manager::asset_root(&app)?;
+    let managed = clip_model_dir(&root);
+    let legacy = clip_model_dir(&resolve_project_root(&app)?);
+    let model_dir = if is_complete_clip_model(&managed) {
+        managed
+    } else if is_complete_clip_model(&legacy) {
+        legacy
+    } else {
+        managed
+    };
+    let manifest_for_compare = manifest.clone();
+    let model_dir_for_compare = model_dir.clone();
+    let comparison = tauri::async_runtime::spawn_blocking(move || {
+        compare_clip_model_installation(&model_dir_for_compare, &manifest_for_compare)
+    })
+    .await
+    .map_err(|e| format!("检查离线 CLIP 模型任务异常: {e}"))??;
+
+    Ok(comparison)
+}
+
+async fn fetch_clip_model_manifest(proxy_url: Option<&str>) -> Result<ClipModelManifest, String> {
+    let resource_manifest = runtime_manager::fetch_resource_manifest(proxy_url).await?;
+    let clip = resource_manifest.clip_model;
+    Ok(ClipModelManifest {
+        revision: clip.revision,
+        asset_name: clip.asset_name,
+        archive_sha256: clip.archive_sha256,
+        files: clip.files,
+    })
+}
+
+fn validate_clip_model_manifest(manifest: &ClipModelManifest) -> Result<(), String> {
+    if manifest.revision.trim().is_empty() {
+        return Err("资源清单缺少 CLIP 模型 revision。".to_string());
+    }
+    if !is_safe_release_asset_name(&manifest.asset_name) {
+        return Err("资源清单包含不安全的 CLIP 模型资产名。".to_string());
+    }
+    let required = clip_model_required_files();
+    if manifest.files.len() != required.len()
+        || required
+            .iter()
+            .any(|name| !manifest.files.contains_key(name))
+    {
+        return Err("资源清单缺少 CLIP 模型文件哈希。".to_string());
+    }
+    for (name, hash) in &manifest.files {
+        if !required.iter().any(|required_name| required_name == name) || !is_sha256(hash) {
+            return Err(format!("资源清单包含无效的 CLIP 模型文件哈希：{name}"));
+        }
+    }
+    if !is_sha256(&manifest.archive_sha256) {
+        return Err("资源清单包含无效的 CLIP 模型压缩包哈希。".to_string());
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_safe_release_asset_name(asset_name: &str) -> bool {
+    !asset_name.is_empty()
+        && asset_name != "."
+        && asset_name != ".."
+        && !asset_name.contains('/')
+        && !asset_name.contains('\\')
+        && asset_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn clip_model_asset_url(asset_name: &str) -> Result<String, String> {
+    if !is_safe_release_asset_name(asset_name) {
+        return Err("CLIP 模型资产名不安全，已拒绝下载。".to_string());
+    }
+    let url = format!("{RELEASE_DOWNLOAD_ROOT}/{asset_name}");
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("CLIP 模型下载地址无效: {e}"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || parsed
+            .path()
+            .strip_prefix("/RoamerFly/video-similarity-detector/releases/latest/download/")
+            != Some(asset_name)
+    {
+        return Err("CLIP 模型下载地址不受信任。".to_string());
+    }
+    Ok(parsed.to_string())
+}
+
+fn compare_clip_model_installation(
+    model_dir: &Path,
+    manifest: &ClipModelManifest,
+) -> Result<runtime_manager::ResourceUpdateCheck, String> {
+    let remote_sha256 = Some(manifest.archive_sha256.clone());
+    if !model_dir.is_dir() {
+        return Ok(runtime_manager::ResourceUpdateCheck {
+            installed: false,
+            update_available: false,
+            comparison_available: false,
+            asset_name: manifest.asset_name.clone(),
+            installed_version: None,
+            remote_version: Some(manifest.revision.clone()),
+            local_sha256: None,
+            remote_sha256,
+            message: "离线 CLIP 模型尚未安装。".to_string(),
+        });
+    }
+    let missing = clip_model_missing_files(model_dir);
+    if !missing.is_empty() {
+        return Ok(runtime_manager::ResourceUpdateCheck {
+            installed: false,
+            update_available: false,
+            comparison_available: false,
+            asset_name: manifest.asset_name.clone(),
+            installed_version: None,
+            remote_version: Some(manifest.revision.clone()),
+            local_sha256: None,
+            remote_sha256,
+            message: format!("离线 CLIP 模型不完整，缺少：{}。", missing.join("、")),
+        });
+    }
+
+    let cancel = AtomicBool::new(false);
+    let mut local_files = BTreeMap::new();
+    for name in clip_model_required_files() {
+        let actual = sha256_clip_file_cancelable(&model_dir.join(&name), &cancel)?;
+        local_files.insert(name, actual);
+    }
+    let metadata = read_clip_model_metadata(model_dir);
+    let files_match = manifest.files.iter().all(|(name, expected)| {
+        local_files
+            .get(name)
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+    });
+    let revision_match = metadata
+        .as_ref()
+        .map(|value| value.revision == manifest.revision)
+        .unwrap_or(true);
+    let update_available = !files_match || !revision_match;
+    // Legacy installations can be compared reliably from their three model
+    // file hashes, but they do not have the original archive hash. Do not
+    // expose a synthetic fileset fingerprint as if it were comparable to the
+    // remote ZIP SHA-256.
+    let local_sha256 = metadata.as_ref().map(|value| value.archive_sha256.clone());
+    Ok(runtime_manager::ResourceUpdateCheck {
+        installed: true,
+        update_available,
+        comparison_available: true,
+        asset_name: manifest.asset_name.clone(),
+        installed_version: metadata.as_ref().map(|value| value.revision.clone()),
+        remote_version: Some(manifest.revision.clone()),
+        local_sha256,
+        remote_sha256,
+        message: if update_available {
+            "已检测到离线 CLIP 模型可更新。".to_string()
+        } else if metadata.is_some() {
+            "离线 CLIP 模型已是最新版本。".to_string()
+        } else {
+            "离线 CLIP 模型文件哈希与最新版本一致。".to_string()
+        },
+    })
+}
+
+fn read_clip_model_metadata(model_dir: &Path) -> Option<ClipModelInstallMetadata> {
+    let path = model_dir.join(".model.json");
+    let bytes = fs::read(path).ok()?;
+    let metadata = serde_json::from_slice(&bytes).ok()?;
+    Some(metadata)
+}
+
+fn verify_clip_archive_hash(
+    archive_path: &Path,
+    expected: &str,
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
+    let actual = sha256_clip_file_cancelable(archive_path, cancel)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+async fn verify_clip_archive_hash_async(
+    archive_path: &Path,
+    expected: &str,
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
+    let archive_path = archive_path.to_path_buf();
+    let expected = expected.to_string();
+    let cancelled = cancel.load(Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancel = AtomicBool::new(cancelled);
+        verify_clip_archive_hash(&archive_path, &expected, &cancel)
+    })
+    .await
+    .map_err(|e| format!("校验 CLIP 模型压缩包任务异常: {e}"))?
+}
+
+#[tauri::command]
 async fn install_clip_model(
     app: tauri::AppHandle,
     state: State<'_, ClipModelDownloadState>,
@@ -1984,6 +2212,8 @@ async fn install_clip_model_impl(
     proxy_url: Option<&str>,
 ) -> Result<(ClipModelStatus, bool), String> {
     let root = runtime_manager::asset_root(app)?;
+    let manifest = fetch_clip_model_manifest(proxy_url).await?;
+    validate_clip_model_manifest(&manifest)?;
     let model_root = root.join("models");
     fs::create_dir_all(&model_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
 
@@ -2003,8 +2233,23 @@ async fn install_clip_model_impl(
     let client = apply_reqwest_proxy(client, proxy_url)?
         .build()
         .map_err(|e| format!("初始化模型下载客户端失败: {e}"))?;
-    let (downloaded_bytes, total_bytes) =
-        download_clip_model_zip(app, state, &client, &zip_path).await?;
+    let asset_url = clip_model_asset_url(&manifest.asset_name)?;
+    let download_result = download_clip_model_zip(
+        app,
+        state,
+        &client,
+        &zip_path,
+        &asset_url,
+        &manifest.archive_sha256,
+    )
+    .await;
+    let (downloaded_bytes, total_bytes) = match download_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(error);
+        }
+    };
     if state.is_cancelled() {
         let _ = fs::remove_dir_all(&temp_root);
         return Err("离线 CLIP 模型安装已取消。".to_string());
@@ -2013,6 +2258,7 @@ async fn install_clip_model_impl(
     let root_for_extract = root.clone();
     let temp_for_extract = temp_root.clone();
     let zip_for_extract = zip_path.clone();
+    let manifest_for_extract = manifest.clone();
     let cancel_token = state.cancel_requested.clone();
     emit_model_progress(
         app,
@@ -2022,11 +2268,12 @@ async fn install_clip_model_impl(
         "正在解压并校验模型",
     );
     let install_result = tauri::async_runtime::spawn_blocking(move || {
-        install_clip_model_zip_cancelable(
+        install_clip_model_zip_cancelable_with_manifest(
             &root_for_extract,
             &temp_for_extract,
             &zip_for_extract,
             &cancel_token,
+            &manifest_for_extract,
         )
     })
     .await
@@ -2061,19 +2308,38 @@ async fn download_clip_model_zip(
     state: &ClipModelDownloadState,
     client: &reqwest::Client,
     zip_path: &Path,
+    asset_url: &str,
+    expected_archive_sha256: &str,
 ) -> Result<(u64, u64), String> {
     if zip_path.is_file() {
         let size = fs::metadata(zip_path).map(|meta| meta.len()).unwrap_or(0);
         if size > 0 {
             emit_model_progress(app, size, size, 70.0, "已找到模型下载缓存，正在校验");
-            return Ok((size, size));
+            if verify_clip_archive_hash_async(
+                zip_path,
+                expected_archive_sha256,
+                &state.cancel_requested,
+            )
+            .await?
+            {
+                return Ok((size, size));
+            }
+            let _ = fs::remove_file(zip_path);
+            let _ = fs::remove_file(zip_path.with_extension("zip.part"));
         }
     }
 
     emit_model_progress(app, 0, 0, 2.0, "正在连接 GitHub Releases 最新模型");
-    download_file_with_resume(app, state, client, CLIP_MODEL_DOWNLOAD_URL, zip_path)
+    let result = download_file_with_resume(app, state, client, asset_url, zip_path)
         .await
-        .map_err(|error| format!("模型下载失败：{error}"))
+        .map_err(|error| format!("模型下载失败：{error}"))?;
+    if !verify_clip_archive_hash_async(zip_path, expected_archive_sha256, &state.cancel_requested)
+        .await?
+    {
+        let _ = fs::remove_file(zip_path);
+        return Err("CLIP 模型压缩包 SHA-256 校验失败，已删除损坏下载。".to_string());
+    }
+    Ok(result)
 }
 
 async fn download_file_with_resume(
@@ -6883,15 +7149,18 @@ fn main() {
             open_release_page,
             open_project_page,
             get_clip_model_status,
+            check_clip_model_update,
             install_clip_model,
             cancel_clip_model_install,
             runtime_manager::get_runtime_status,
+            runtime_manager::check_runtime_update,
             runtime_manager::install_runtime,
             runtime_manager::migrate_legacy_runtime,
             runtime_manager::remove_legacy_runtime,
             runtime_manager::cancel_runtime_install,
             runtime_manager::get_runtime_download_status,
             runtime_manager::get_merge_runtime_status,
+            runtime_manager::check_merge_runtime_update,
             runtime_manager::install_merge_runtime,
             runtime_manager::cancel_merge_runtime_install,
             select_video_directory,
@@ -7648,7 +7917,11 @@ fn emit_log<R: tauri::Runtime>(app: &tauri::AppHandle<R>, stream: &str, line: &s
 fn file_fingerprint(path: &Path) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
-    let mut buffer = [0u8; 1024 * 1024];
+    // Keep the large transfer buffer on the heap.  This function runs from
+    // Tauri's blocking pool, whose worker stacks are intentionally small;
+    // placing a 1 MiB array here can overflow the stack before extraction
+    // even starts on Windows.
+    let mut buffer = vec![0u8; 1024 * 1024];
     let mut hash_a: u64 = 0xcbf29ce484222325;
     let mut hash_b: u64 = 0x9e3779b97f4a7c15;
     let mut length: u64 = 0;
@@ -8471,11 +8744,32 @@ fn clip_model_status_for_root(root: &Path) -> ClipModelStatus {
     }
 }
 
+#[cfg(test)]
 fn install_clip_model_zip_cancelable(
     root: &Path,
     temp_root: &Path,
     zip_path: &Path,
     cancel: &AtomicBool,
+) -> Result<bool, String> {
+    let files = CLIP_MODEL_FILE_HASHES
+        .iter()
+        .map(|(name, hash)| ((*name).to_string(), (*hash).to_string()))
+        .collect();
+    let manifest = ClipModelManifest {
+        revision: "legacy".to_string(),
+        asset_name: "clip-vit-base-patch32.zip".to_string(),
+        archive_sha256: String::new(),
+        files,
+    };
+    install_clip_model_zip_cancelable_with_manifest(root, temp_root, zip_path, cancel, &manifest)
+}
+
+fn install_clip_model_zip_cancelable_with_manifest(
+    root: &Path,
+    temp_root: &Path,
+    zip_path: &Path,
+    cancel: &AtomicBool,
+    manifest: &ClipModelManifest,
 ) -> Result<bool, String> {
     let extract_root = temp_root.join("extracted");
     if extract_root.exists() {
@@ -8518,7 +8812,8 @@ fn install_clip_model_zip_cancelable(
         let missing = clip_model_missing_files(&extracted_model).join(", ");
         return Err(format!("模型 zip 校验失败，缺少文件: {missing}"));
     }
-    verify_clip_model_hashes_cancelable(&extracted_model, cancel)?;
+    verify_clip_model_hashes_against_manifest(&extracted_model, cancel, manifest)?;
+    write_clip_model_metadata(&extracted_model, manifest)?;
 
     let models_root = root.join("models");
     fs::create_dir_all(&models_root).map_err(|e| format!("创建模型目录失败: {e}"))?;
@@ -8580,6 +8875,12 @@ where
                 "安装模型失败: {rename_error}; 复制回退失败: {copy_error}"
             ));
         }
+        if let Err(error) = check_clip_cancel(cancel) {
+            if let Err(restore_error) = restore_clip_model_backup(target, old) {
+                return Err(format!("{error}; {restore_error}"));
+            }
+            return Err(error);
+        }
         let _ = fs::remove_dir_all(extracted_model);
     }
 
@@ -8595,15 +8896,16 @@ where
     Ok(true)
 }
 
-fn verify_clip_model_hashes_cancelable(
+fn verify_clip_model_hashes_against_manifest(
     model_dir: &Path,
     cancel: &AtomicBool,
+    manifest: &ClipModelManifest,
 ) -> Result<(), String> {
-    for (name, expected) in CLIP_MODEL_FILE_HASHES {
+    for (name, expected) in &manifest.files {
         check_clip_cancel(cancel)?;
         let path = model_dir.join(name);
         let actual = sha256_clip_file_cancelable(&path, cancel)?;
-        if actual != *expected {
+        if !actual.eq_ignore_ascii_case(expected) {
             return Err(format!(
                 "模型文件校验失败：{name} 的 SHA-256 不匹配，请重新下载"
             ));
@@ -8612,13 +8914,25 @@ fn verify_clip_model_hashes_cancelable(
     Ok(())
 }
 
+fn write_clip_model_metadata(model_dir: &Path, manifest: &ClipModelManifest) -> Result<(), String> {
+    let metadata = ClipModelInstallMetadata {
+        revision: manifest.revision.clone(),
+        asset_name: manifest.asset_name.clone(),
+        archive_sha256: manifest.archive_sha256.clone(),
+        files: manifest.files.clone(),
+        installed_at: timestamp_millis(),
+    };
+    write_json_atomic(&model_dir.join(".model.json"), &metadata)
+}
+
 fn sha256_clip_file_cancelable(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     use sha2::{Digest, Sha256};
 
     let mut file =
         File::open(path).map_err(|e| format!("打开模型文件失败 {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Hashing model weights also runs on a small-stack blocking worker.
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         check_clip_cancel(cancel)?;
         let read = file
@@ -8689,7 +9003,9 @@ fn copy_clip_with_cancel<R: Read, W: Write>(
     destination: &mut W,
     cancel: &AtomicBool,
 ) -> Result<u64, String> {
-    let mut buffer = [0u8; 1024 * 1024];
+    // Keep the transfer buffer on the heap: this runs on Tauri's small-stack
+    // blocking workers while extracting large model weights.
+    let mut buffer = vec![0u8; 1024 * 1024];
     let mut copied = 0u64;
     loop {
         check_clip_cancel(cancel)?;
@@ -8927,21 +9243,23 @@ fn bundled_python_candidates(app: &tauri::AppHandle, root: &Path) -> Vec<PathBuf
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_stale_merge_preview_dirs, compact_task_match_key,
-        estimated_windows_command_line_len, finalize_merge_outputs,
+        cleanup_stale_merge_preview_dirs, compact_task_match_key, compare_clip_model_installation,
+        copy_clip_with_cancel, estimated_windows_command_line_len, finalize_merge_outputs,
         install_clip_model_zip_cancelable, is_decord_seek_warning_line, is_h264_decoder_log_line,
-        is_trusted_project_page_url, merge_output_component_length, merge_output_name_fits_target,
-        merge_output_path_length, merge_output_path_limit, merge_output_timestamp,
-        move_merge_output_noreplace, next_merge_task_id, normalize_merge_output_format,
-        normalize_merge_output_stem, normalize_merge_progress_event, parse_analysis_video_context,
-        parse_analysis_video_quarantined, python_spawn_error_message, report_pairs_csv,
-        sha256_clip_file_cancelable, unique_merge_output_path,
-        update_report_entries_for_resolved_path, validate_export_path_chain, AnalysisVideoContext,
-        AnalysisVideoQuarantinedPayload, DecoderWarningAccumulator, MergeFinishedPayload,
-        PythonLaunchDiagnostics, ReportPairIdentity, UpdateCancelState, VideoMergeConfig,
-        CLIP_MODEL_DIR_NAME,
+        is_safe_release_asset_name, is_trusted_project_page_url, merge_output_component_length,
+        merge_output_name_fits_target, merge_output_path_length, merge_output_path_limit,
+        merge_output_timestamp, move_merge_output_noreplace, next_merge_task_id,
+        normalize_merge_output_format, normalize_merge_output_stem, normalize_merge_progress_event,
+        parse_analysis_video_context, parse_analysis_video_quarantined, python_spawn_error_message,
+        report_pairs_csv, sha256_clip_file_cancelable, unique_merge_output_path,
+        update_report_entries_for_resolved_path, validate_export_path_chain,
+        write_clip_model_metadata, write_json_atomic, AnalysisVideoContext,
+        AnalysisVideoQuarantinedPayload, ClipModelInstallMetadata, ClipModelManifest,
+        DecoderWarningAccumulator, MergeFinishedPayload, PythonLaunchDiagnostics,
+        ReportPairIdentity, UpdateCancelState, VideoMergeConfig, CLIP_MODEL_DIR_NAME,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::fs;
     #[cfg(target_os = "windows")]
     use std::path::Path;
@@ -9438,6 +9756,152 @@ mod tests {
             actual,
             "19bd855d84d42591cde6efd2332a169d4c12ea8d8dd16f84230b291078d92dee"
         );
+    }
+
+    #[test]
+    fn clip_copy_and_hash_work_on_a_small_stack() {
+        // Tauri's blocking pool uses small worker stacks on Windows. Keep
+        // this regression test deliberately below that budget so a future
+        // accidental stack allocation of the 1 MiB transfer buffer fails.
+        let handle = thread::Builder::new()
+            .name("clip-small-stack-regression".to_string())
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let source_bytes = vec![0x5au8; 2 * 1024 * 1024 + 17];
+                let mut source = std::io::Cursor::new(source_bytes.clone());
+                let mut copied = Vec::new();
+                let copied_bytes =
+                    copy_clip_with_cancel(&mut source, &mut copied, &AtomicBool::new(false))
+                        .expect("copy on a small stack");
+                assert_eq!(copied_bytes as usize, source_bytes.len());
+                assert_eq!(copied, source_bytes);
+
+                let path = std::env::temp_dir().join(format!(
+                    "video-similarity-small-stack-{}.bin",
+                    super::timestamp_millis()
+                ));
+                fs::write(&path, &source_bytes).expect("write hash fixture");
+                let hash = sha256_clip_file_cancelable(&path, &AtomicBool::new(false))
+                    .expect("hash on a small stack");
+                fs::remove_file(&path).expect("remove hash fixture");
+                assert_eq!(hash.len(), 64);
+            })
+            .expect("spawn small-stack regression thread");
+        handle.join().expect("small-stack regression thread");
+    }
+
+    #[test]
+    fn clip_update_comparison_hashes_legacy_install_and_detects_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-clip-compare-{}",
+            super::timestamp_millis()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let contents = [
+            ("config.json", b"config".as_slice()),
+            ("preprocessor_config.json", b"preprocessor".as_slice()),
+            ("pytorch_model.bin", b"weights".as_slice()),
+        ];
+        let mut files = BTreeMap::new();
+        for (name, bytes) in contents {
+            fs::write(root.join(name), bytes).unwrap();
+            files.insert(
+                name.to_string(),
+                sha256_clip_file_cancelable(&root.join(name), &AtomicBool::new(false)).unwrap(),
+            );
+        }
+        let files = files
+            .into_iter()
+            .map(|(name, hash)| (name, hash.to_ascii_uppercase()))
+            .collect();
+        let manifest = ClipModelManifest {
+            revision: "revision-a".to_string(),
+            asset_name: "clip-vit-base-patch32.zip".to_string(),
+            archive_sha256: "a".repeat(64),
+            files,
+        };
+
+        let legacy = compare_clip_model_installation(&root, &manifest).unwrap();
+        assert!(legacy.installed);
+        assert!(legacy.comparison_available);
+        assert!(!legacy.update_available);
+        assert!(legacy.installed_version.is_none());
+        assert!(legacy.local_sha256.is_none());
+
+        fs::write(root.join("config.json"), b"changed").unwrap();
+        let changed = compare_clip_model_installation(&root, &manifest).unwrap();
+        assert!(changed.installed);
+        assert!(changed.update_available);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clip_update_comparison_requires_revision_for_managed_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "video-similarity-clip-metadata-{}",
+            super::timestamp_millis()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let contents = [
+            ("config.json", b"config".as_slice()),
+            ("preprocessor_config.json", b"preprocessor".as_slice()),
+            ("pytorch_model.bin", b"weights".as_slice()),
+        ];
+        let mut files = BTreeMap::new();
+        for (name, bytes) in contents {
+            fs::write(root.join(name), bytes).unwrap();
+            files.insert(
+                name.to_string(),
+                sha256_clip_file_cancelable(&root.join(name), &AtomicBool::new(false)).unwrap(),
+            );
+        }
+        let manifest = ClipModelManifest {
+            revision: "revision-b".to_string(),
+            asset_name: "clip-vit-base-patch32.zip".to_string(),
+            archive_sha256: "b".repeat(64),
+            files: files.clone(),
+        };
+        write_clip_model_metadata(&root, &manifest).unwrap();
+        let written: ClipModelInstallMetadata =
+            serde_json::from_slice(&fs::read(root.join(".model.json")).unwrap()).unwrap();
+        assert_eq!(written.revision, manifest.revision);
+        assert_eq!(written.asset_name, manifest.asset_name);
+        assert_eq!(written.files, manifest.files);
+        let metadata = ClipModelInstallMetadata {
+            revision: "revision-a".to_string(),
+            asset_name: manifest.asset_name.clone(),
+            archive_sha256: "a".repeat(64),
+            files,
+            installed_at: 1,
+        };
+        write_json_atomic(&root.join(".model.json"), &metadata).unwrap();
+        let result = compare_clip_model_installation(&root, &manifest).unwrap();
+        assert!(result.installed);
+        assert!(result.comparison_available);
+        assert!(result.update_available);
+        assert_eq!(result.installed_version.as_deref(), Some("revision-a"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clip_model_asset_name_is_strictly_confined_to_release_basename() {
+        assert!(is_safe_release_asset_name("clip-vit-base-patch32.zip"));
+        assert!(is_safe_release_asset_name("model_v2.zip"));
+        for name in [
+            "../clip.zip",
+            "..\\clip.zip",
+            "clip/model.zip",
+            "clip model.zip",
+            "",
+            ".",
+            "..",
+        ] {
+            assert!(
+                !is_safe_release_asset_name(name),
+                "unsafe asset accepted: {name}"
+            );
+        }
     }
 
     #[test]
