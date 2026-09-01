@@ -5,7 +5,7 @@ import {
   mergeReports,
   reportKey,
   syntheticReportFromPaths,
-} from './ResultsPage'
+} from './resultsReportList'
 import type { ReportSummary } from '@/services/backend'
 
 function report(path: string, modifiedAt: string): ReportSummary {

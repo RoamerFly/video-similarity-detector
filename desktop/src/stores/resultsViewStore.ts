@@ -54,7 +54,8 @@ export const RESULTS_VIEW_STORAGE_VERSION = 5
 export function migrateResultsViewState(persistedState: unknown) {
   if (!persistedState || typeof persistedState !== 'object') return persistedState
   const state = persistedState as Partial<ResultsViewState>
-  const { reportOptions: _legacyReportOptions, ...next } = state
+  const next = { ...state }
+  delete next.reportOptions
   // v4: 结果总览默认每页显示更多行，配合紧凑分页节省空间。
   next.pageSize = 20
   if (!next.sortState || next.sortState.key === 'completedAt') {

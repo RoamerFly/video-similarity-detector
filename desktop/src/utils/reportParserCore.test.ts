@@ -69,7 +69,9 @@ describe('versioned report relation parsing', () => {
     })
     delete (legacy.video_pairs[0] as Record<string, unknown>).report_schema_version
     delete (legacy.video_pairs[0] as Record<string, unknown>).containment_scoring_version
-    const { report_schema_version: _schema, containment_scoring_version: _scoring, ...legacyReport } = legacy
+    const legacyReport = { ...legacy }
+    delete legacyReport.report_schema_version
+    delete legacyReport.containment_scoring_version
 
     const report = parseJsonValue(legacyReport, 'legacy.json')
 

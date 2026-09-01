@@ -70,6 +70,12 @@ import {
   type ReportWindow,
 } from '@/utils/reportParser'
 import { getRelationInfo, relationTone } from '@/utils/relation'
+import {
+  findReportForPaths,
+  mergeReports,
+  reportKey,
+  syntheticReportFromPaths,
+} from './resultsReportList'
 
 interface ReportCandidate {
   paths: {
@@ -1418,58 +1424,6 @@ function selectReportPaths(paths: { reportJson?: string; reportCsv?: string }, f
   return paths
 }
 
-export function mergeReports(reports: ReportSummary[]) {
-  const byKey = new Map<string, ReportSummary>()
-  for (const report of reports) {
-    if (!report.jsonPath && !report.csvPath) continue
-    const key = reportKey(report)
-    if (!key) continue
-    const current = byKey.get(key)
-    if (
-      !current
-      || (isSyntheticReport(current) && !isSyntheticReport(report))
-      || (!isSyntheticReport(report) && timeValue(report.modifiedAt) > timeValue(current.modifiedAt))
-    ) {
-      byKey.set(key, report)
-    }
-  }
-  return Array.from(byKey.values()).sort((left, right) => compareNullableNumber(timeValue(right.modifiedAt), timeValue(left.modifiedAt)))
-}
-
-export function reportKey(report: ReportSummary) {
-  return report.path || report.jsonPath || report.csvPath || report.htmlPath || report.id
-}
-
-function isSyntheticReport(report: ReportSummary) {
-  return report.id === 'latest-report' && report.sizeBytes === 0
-}
-
-function normalizedReportPath(path?: string) {
-  const normalized = path?.trim().replaceAll('\\', '/').replace(/\/+$/, '') || ''
-  // Windows drive and UNC paths are case-insensitive. Preserve case for
-  // POSIX paths so similarly shaped paths such as /reports/A and /reports/a
-  // remain distinct on macOS/Linux.
-  return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//')
-    ? normalized.toLowerCase()
-    : normalized
-}
-
-function reportContainsPath(report: ReportSummary, path?: string) {
-  const target = normalizedReportPath(path)
-  if (!target) return false
-  return [report.path, report.jsonPath, report.csvPath, report.htmlPath]
-    .some((candidate) => normalizedReportPath(candidate) === target)
-}
-
-export function findReportForPaths(
-  reports: ReportSummary[],
-  paths: { reportJson?: string; reportCsv?: string },
-) {
-  return reports.find((report) => (
-    reportContainsPath(report, paths.reportJson) || reportContainsPath(report, paths.reportCsv)
-  )) ?? null
-}
-
 function reportOptionLabel(report: ReportSummary) {
   const time = formatDateTime(report.modifiedAt || report.createdAt)
   const suffix = report.pairCount > 0 ? ` · ${report.pairCount} 对` : ''
@@ -1484,33 +1438,6 @@ function reportOptionTitle(report?: ReportSummary) {
     `格式：${report.formats.join(' / ') || '-'}`,
     `修改时间：${formatDateTime(report.modifiedAt || report.createdAt)}`,
   ].join('\n')
-}
-
-export function syntheticReportFromPaths(paths: { reportJson?: string; reportCsv?: string }, id: string): ReportSummary {
-  const path = paths.reportJson || paths.reportCsv || ''
-  const now = new Date().toISOString()
-  return {
-    id,
-    path,
-    jsonPath: paths.reportJson,
-    csvPath: paths.reportCsv,
-    htmlPath: undefined,
-    name: reportNameFromPath(path),
-    createdAt: now,
-    modifiedAt: now,
-    sizeBytes: 0,
-    videoCount: 0,
-    pairCount: 0,
-    warningCount: 0,
-    status: '最近分析',
-    formats: ['JSON', 'CSV'].filter((_, index) => [paths.reportJson, paths.reportCsv][index]),
-  }
-}
-
-function reportNameFromPath(path?: string) {
-  if (!path) return '最近分析报告'
-  const name = fileName(path)
-  return name.replace(/\.(json|csv|html)$/i, '') || name
 }
 
 async function existingReportPaths(paths: { reportJson?: string; reportCsv?: string }) {
