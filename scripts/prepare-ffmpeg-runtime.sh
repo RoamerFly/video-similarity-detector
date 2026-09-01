@@ -34,9 +34,10 @@ mkdir -p "$ENV_DIR"
 
 case "$PLATFORM" in
     linux-x64)
-        # 固定到不可变的日期 tag（BtbN 的滚动 "latest" 会随 FFmpeg 升版移除旧资产导致 404）
-        archive_name="ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz"
-        base_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-17-13-05"
+        # BtbN daily 构建会被清理，固定日期 tag 可能失效；使用 latest release 中稳定的 n8.1
+        # 资产名，并从同一 latest release 下载 checksums.sha256 做校验。
+        archive_name="ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz"
+        base_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
         archive="$TEMP_DIR/$archive_name"
         download "$base_url/$archive_name" "$archive"
         download "$base_url/checksums.sha256" "$TEMP_DIR/checksums.sha256"
