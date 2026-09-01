@@ -195,7 +195,7 @@ export function AnalysisExportStatus({
           <span>{expanded ? '分析状态与日志' : compactLabel}</span>
           {expanded && <strong title={stage}>{stage}</strong>}
           {expanded && <b>{progress.toFixed(2)}%</b>}
-          {expanded && (runningStatus === 'running' || runningStatus === 'paused') && (
+          {(runningStatus === 'running' || runningStatus === 'paused') && (
             <button
               type="button"
               className="analysis-capsule-action"
