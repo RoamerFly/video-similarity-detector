@@ -32,7 +32,12 @@ import {
   Toggle,
 } from '@/components/DesignSystem'
 import { CacheCleanupDialog } from '@/components/CacheCleanupDialog'
-import { RuntimeSettingsCard } from '@/components/RuntimeSettingsCard'
+import {
+  ResourceInstallChoiceDialog,
+  resourceInstallChoiceState,
+  RuntimeSettingsCard,
+  type ResourceInstallChoice,
+} from '@/components/RuntimeSettingsCard'
 import { MergeRuntimeSettingsCard } from '@/components/MergeRuntimeSettingsCard'
 import { Translated } from '@/i18n/Translated'
 import { useI18n } from '@/i18n/useI18n'
@@ -852,6 +857,8 @@ function BaseSettings({
   const modelStatusRequestRef = useRef(0)
   const [modelError, setModelError] = useState(() => getDownloadTaskSnapshot('clip-model').error)
   const [modelChecking, setModelChecking] = useState(false)
+  const modelInstallStartRef = useRef(false)
+  const [pendingModelUpdateCheck, setPendingModelUpdateCheck] = useState<ResourceUpdateCheck | null>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [runtimeLoading, setRuntimeLoading] = useState(false)
   const [mergeRuntimeStatus, setMergeRuntimeStatus] = useState<MergeRuntimeStatus | null>(null)
@@ -988,6 +995,7 @@ function BaseSettings({
             notifyCompletion: false,
           })
           setModelInstalling(false)
+          modelInstallStartRef.current = false
           if (shouldNotify) onResourceCompleted('离线 CLIP 模型重装/更新完成')
         })
       }
@@ -1006,7 +1014,7 @@ function BaseSettings({
   }, [onResourceCompleted])
 
   async function handleInstallClipModel() {
-    if (modelInstalling || modelChecking) return
+    if (modelInstalling || modelChecking || pendingModelUpdateCheck) return
     setModelChecking(true)
     setModelError('')
     let updateCheck: ResourceUpdateCheck
@@ -1018,8 +1026,15 @@ function BaseSettings({
       return
     }
     setModelChecking(false)
-    const confirmed = window.confirm(clipModelUpdatePrompt(updateCheck, tm))
-    if (!confirmed) return
+    setPendingModelUpdateCheck(updateCheck)
+  }
+
+  async function handleInstallClipModelChoice(choice: ResourceInstallChoice) {
+    const updateCheck = pendingModelUpdateCheck
+    if (!updateCheck || modelInstalling || modelChecking || modelInstallStartRef.current) return
+    if (choice === 'update' && !resourceInstallChoiceState(updateCheck).canUpdate) return
+    modelInstallStartRef.current = true
+    setPendingModelUpdateCheck(null)
     const operation = modelOperationRef.current + 1
     modelOperationRef.current = operation
     const generation = beginDownloadTask('clip-model', true)
@@ -1057,6 +1072,7 @@ function BaseSettings({
         const shouldNotify = getDownloadTaskSnapshot('clip-model').notifyCompletion === true
         setDownloadTaskSnapshot('clip-model', { active: false, progress: finalProgress, error: '', terminal: 'success', notifyCompletion: false })
         setModelInstalling(false)
+        modelInstallStartRef.current = false
         if (shouldNotify) onResourceCompleted('离线 CLIP 模型重装/更新完成')
       }
     } catch (err) {
@@ -1070,6 +1086,7 @@ function BaseSettings({
         const terminal = downloadStatusTerminal('clip-model', finalStatus) || 'failed'
         setDownloadTaskSnapshot('clip-model', { active: false, error: terminal === 'cancelled' ? '' : message, terminal, notifyCompletion: false })
         setModelInstalling(false)
+        modelInstallStartRef.current = false
       }
     }
   }
@@ -1111,6 +1128,7 @@ function BaseSettings({
         return
       }
       setModelInstalling(false)
+      modelInstallStartRef.current = false
       setModelProgress(cancelledProgress)
       setDownloadTaskSnapshot('clip-model', { active: false, progress: cancelledProgress, error: '', terminal: 'cancelled', notifyCompletion: false })
     } catch (err) {
@@ -1265,6 +1283,14 @@ function BaseSettings({
           onRefresh={() => void refreshClipModelStatus()}
           onInstall={() => void handleInstallClipModel()}
           onCancel={() => void handleCancelClipModel()}
+        />
+        <ResourceInstallChoiceDialog
+          open={pendingModelUpdateCheck !== null}
+          title={tm('离线 CLIP 模型')}
+          summary={pendingModelUpdateCheck ? clipModelUpdatePrompt(pendingModelUpdateCheck, tm) : ''}
+          check={pendingModelUpdateCheck ?? { installed: false, updateAvailable: false, comparisonAvailable: false, assetName: '', message: '' }}
+          onClose={() => setPendingModelUpdateCheck(null)}
+          onChoose={(choice) => void handleInstallClipModelChoice(choice)}
         />
       </SettingsResourceDialog>
       <SettingsResourceDialog open={resourceDialog === 'merge'} title="视频合并环境" icon={<Film size={21} />} onClose={closeResourceDialog}>

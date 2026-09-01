@@ -3,6 +3,11 @@ import { CheckCircle2, CircleStop, Download, Film, RefreshCw } from 'lucide-reac
 
 import { NeonButton } from '@/components/DesignSystem'
 import {
+  ResourceInstallChoiceDialog,
+  resourceInstallChoiceState,
+  type ResourceInstallChoice,
+} from '@/components/RuntimeSettingsCard'
+import {
   cancelMergeRuntimeInstall,
   checkMergeRuntimeUpdate,
   formatBytes,
@@ -127,6 +132,8 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
   const [progress, setProgress] = useState<UpdateDownloadProgress | null>(mergeRuntimeDownloadSnapshot.progress)
   const [error, setError] = useState(mergeRuntimeDownloadSnapshot.error)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [pendingUpdateCheck, setPendingUpdateCheck] = useState<ResourceUpdateCheck | null>(null)
+  const installStartRef = useRef(false)
   const operationRef = useRef(0)
   const statusRequestRef = useRef(0)
 
@@ -198,6 +205,7 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
           mergeRuntimeDownloadSnapshot.progress = settledProgress.stage ? settledProgress : payload
           setProgress(settledProgress.stage ? settledProgress : payload)
           setInstalling(false)
+          installStartRef.current = false
           if (shouldNotify) onCompleted?.()
         })
       }
@@ -214,7 +222,7 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
   }, [onCompleted])
 
   async function handleInstall() {
-    if (installing || checkingUpdate) return
+    if (installing || checkingUpdate || pendingUpdateCheck) return
     setCheckingUpdate(true)
     setError('')
     let updateCheck: ResourceUpdateCheck
@@ -226,7 +234,15 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
       return
     }
     setCheckingUpdate(false)
-    if (!window.confirm(mergeRuntimeUpdatePrompt(updateCheck, t))) return
+    setPendingUpdateCheck(updateCheck)
+  }
+
+  async function handleInstallChoice(choice: ResourceInstallChoice) {
+    const updateCheck = pendingUpdateCheck
+    if (!updateCheck || installing || checkingUpdate || installStartRef.current) return
+    if (choice === 'update' && !resourceInstallChoiceState(updateCheck).canUpdate) return
+    installStartRef.current = true
+    setPendingUpdateCheck(null)
     const operation = operationRef.current + 1
     operationRef.current = operation
     const generation = beginMergeRuntimeTask(true)
@@ -265,6 +281,7 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
         mergeRuntimeDownloadSnapshot.terminal = 'success'
         mergeRuntimeDownloadSnapshot.notifyCompletion = false
         setInstalling(false)
+        installStartRef.current = false
         if (shouldNotify) onCompleted?.()
       }
     } catch (reason) {
@@ -279,6 +296,7 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
         mergeRuntimeDownloadSnapshot.active = false
         mergeRuntimeDownloadSnapshot.terminal = mergeRuntimeStatusTerminal(finalStatus) || 'failed'
         setInstalling(false)
+        installStartRef.current = false
       }
     }
   }
@@ -308,6 +326,7 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
       mergeRuntimeDownloadSnapshot.notifyCompletion = false
       mergeRuntimeDownloadSnapshot.progress = cancelledProgress
       setInstalling(false)
+      installStartRef.current = false
       setProgress(cancelledProgress)
     } catch (reason) {
       const message = normalizeBackendError(reason)
@@ -397,12 +416,20 @@ export function MergeRuntimeSettingsCard({ onCompleted }: { onCompleted?: () => 
             {t('正在安装环境')}
           </NeonButton>
         ) : (
-          <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate}>
+          <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate || pendingUpdateCheck !== null}>
             <Download size={17} />
             {t('重装/更新环境')}
           </NeonButton>
         )}
       </div>
+      <ResourceInstallChoiceDialog
+        open={pendingUpdateCheck !== null}
+        title={t('视频合并环境')}
+        summary={pendingUpdateCheck ? mergeRuntimeUpdatePrompt(pendingUpdateCheck, t) : ''}
+        check={pendingUpdateCheck ?? { installed: false, updateAvailable: false, comparisonAvailable: false, assetName: '', message: '' }}
+        onClose={() => setPendingUpdateCheck(null)}
+        onChoose={(choice) => void handleInstallChoice(choice)}
+      />
     </div>
   )
 }

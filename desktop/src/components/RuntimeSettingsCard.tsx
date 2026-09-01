@@ -32,6 +32,8 @@ interface RuntimeDownloadSnapshot {
 
 export type RuntimeTask = 'runtime' | 'runtime-migration' | 'runtime-cleanup'
 
+export type ResourceInstallChoice = 'install' | 'update' | 'reinstall'
+
 // The resource dialog unmounts this card when closed. Keep the task state
 // outside the dialog so reopening it cannot re-enable "安装环境" while the
 // backend download is still running.
@@ -156,6 +158,92 @@ export function runtimeUpdatePrompt(check: ResourceUpdateCheck, translate?: (val
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
+export function resourceInstallChoiceState(check: ResourceUpdateCheck) {
+  const canUpdate = check.installed && check.comparisonAvailable && check.updateAvailable
+  return {
+    canUpdate,
+    primaryChoice: check.installed ? (canUpdate ? 'update' : 'reinstall') : 'install',
+    reinstallLabel: check.installed ? '强制重装' : '安装环境',
+  } as const
+}
+
+/**
+ * A real in-app choice dialog shown after the remote resource comparison.
+ * Keeping it here lets the runtime, merge runtime, and CLIP cards share the
+ * same keyboard/accessible interaction without coupling their install state.
+ */
+export function ResourceInstallChoiceDialog({
+  open,
+  title,
+  summary,
+  check,
+  onClose,
+  onChoose,
+}: {
+  open: boolean
+  title: string
+  summary: string
+  check: ResourceUpdateCheck
+  onClose: () => void
+  onChoose: (choice: ResourceInstallChoice) => void
+}) {
+  const { t, tm } = useI18n()
+  if (!open) return null
+  const choiceState = resourceInstallChoiceState(check)
+  const comparisonMessage = check.installed
+    ? check.comparisonAvailable
+      ? check.updateAvailable ? '' : t('当前环境已是最新版')
+      : t('无法可靠比较当前环境与 GitHub 最新版。')
+    : ''
+  return (
+    <div
+      className="modal-backdrop cache-cleanup-backdrop settings-update-backdrop"
+      role="presentation"
+      style={{ zIndex: 10001 }}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <section
+        className="cache-cleanup-dialog settings-update-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
+        <div className="cache-cleanup-head settings-update-dialog-head">
+          <div>
+            <h3>{t('重装/更新环境')}</h3>
+            <p>{title}</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label={t('取消')}>×</button>
+        </div>
+        <div className="settings-update-card">
+          <p className="update-status-copy">{tm(summary)}</p>
+          {comparisonMessage ? <p className="update-status-copy">{comparisonMessage}</p> : null}
+          <div className="update-actions">
+            <NeonButton variant="outline" type="button" onClick={onClose}>{t('取消')}</NeonButton>
+            <NeonButton
+              type="button"
+              disabled={!choiceState.canUpdate}
+              onClick={() => onChoose('update')}
+            >
+              {t('立即更新')}
+            </NeonButton>
+            <NeonButton
+              variant={choiceState.canUpdate ? 'outline' : 'primary'}
+              type="button"
+              onClick={() => onChoose(choiceState.reinstallLabel === '安装环境' ? 'install' : 'reinstall')}
+            >
+              {t(choiceState.reinstallLabel)}
+            </NeonButton>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
 export function runtimeProgressCanCancel(stage: string) {
   return !/正在取消|解压|校验|验证|提交|切换|正在安装|收尾|已完成/.test(stage)
 }
@@ -170,6 +258,8 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
   const [error, setError] = useState(runtimeDownloadSnapshot.error)
   const [task, setTask] = useState<RuntimeTask | ''>(runtimeDownloadSnapshot.task)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [pendingUpdateCheck, setPendingUpdateCheck] = useState<ResourceUpdateCheck | null>(null)
+  const installStartRef = useRef(false)
   const operationRef = useRef(0)
 
   const refresh = useCallback(async () => {
@@ -246,6 +336,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
           runtimeDownloadSnapshot.progress = settledProgress.stage ? settledProgress : payload
           setProgress(settledProgress.stage ? settledProgress : payload)
           setInstalling(false)
+          installStartRef.current = false
           if (shouldNotify) onCompleted?.()
         })
       }
@@ -262,7 +353,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
   }, [onCompleted])
 
   async function handleInstall() {
-    if (installing || checkingUpdate) return
+    if (installing || checkingUpdate || pendingUpdateCheck) return
     setCheckingUpdate(true)
     setError('')
     let updateCheck: ResourceUpdateCheck
@@ -274,7 +365,15 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
       return
     }
     setCheckingUpdate(false)
-    if (!window.confirm(runtimeUpdatePrompt(updateCheck, t))) return
+    setPendingUpdateCheck(updateCheck)
+  }
+
+  async function handleInstallChoice(choice: ResourceInstallChoice) {
+    const updateCheck = pendingUpdateCheck
+    if (!updateCheck || installing || checkingUpdate || installStartRef.current) return
+    if (choice === 'update' && !resourceInstallChoiceState(updateCheck).canUpdate) return
+    installStartRef.current = true
+    setPendingUpdateCheck(null)
     const operation = operationRef.current + 1
     operationRef.current = operation
     const nextTask: RuntimeTask = 'runtime'
@@ -313,6 +412,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
         runtimeDownloadSnapshot.terminal = 'success'
         runtimeDownloadSnapshot.notifyCompletion = false
         setInstalling(false)
+        installStartRef.current = false
         if (shouldNotify) onCompleted?.()
       }
     } catch (reason) {
@@ -327,6 +427,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
         runtimeDownloadSnapshot.terminal = runtimeStatusTerminal(nextTask, finalStatus, false) || 'failed'
         runtimeDownloadSnapshot.notifyCompletion = false
         setInstalling(false)
+        installStartRef.current = false
       }
     }
   }
@@ -369,6 +470,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
       runtimeDownloadSnapshot.progress = cancelledProgress
       runtimeDownloadSnapshot.task = 'runtime'
       setInstalling(false)
+      installStartRef.current = false
       setProgress(cancelledProgress)
       setTask('runtime')
     } catch (reason) {
@@ -508,7 +610,7 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
             {busyLabel}
           </NeonButton>
         ) : (
-          <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate}>
+          <NeonButton type="button" onClick={() => void handleInstall()} disabled={checkingUpdate || pendingUpdateCheck !== null}>
             <Download size={17} />
             {t('重装/更新环境')}
           </NeonButton>
@@ -525,6 +627,14 @@ export function RuntimeSettingsCard({ onCompleted }: { onCompleted?: () => void 
           </NeonButton>
         )}
       </div>
+      <ResourceInstallChoiceDialog
+        open={pendingUpdateCheck !== null}
+        title={t('AI 运行环境')}
+        summary={pendingUpdateCheck ? runtimeUpdatePrompt(pendingUpdateCheck, t) : ''}
+        check={pendingUpdateCheck ?? { installed: false, updateAvailable: false, comparisonAvailable: false, assetName: '', message: '' }}
+        onClose={() => setPendingUpdateCheck(null)}
+        onChoose={(choice) => void handleInstallChoice(choice)}
+      />
     </div>
   )
 }

@@ -7,6 +7,7 @@ import {
   runtimeTaskFromStatus,
   runtimeProgressCanCancel,
   runtimeUpdatePrompt,
+  resourceInstallChoiceState,
 } from './RuntimeSettingsCard'
 
 describe('runtime environment task state', () => {
@@ -88,5 +89,36 @@ describe('runtime environment task state', () => {
     expect(runtimeProgressCanCancel('正在取消下载')).toBe(false)
     expect(runtimeProgressCanCancel('正在解压运行环境')).toBe(false)
     expect(runtimeProgressCanCancel('正在切换运行环境')).toBe(false)
+  })
+
+  it('only enables update after a positive resource comparison', () => {
+    expect(resourceInstallChoiceState({
+      installed: false,
+      updateAvailable: false,
+      comparisonAvailable: false,
+      assetName: 'runtime.zip',
+      message: '',
+    })).toEqual({ canUpdate: false, primaryChoice: 'install', reinstallLabel: '安装环境' })
+    expect(resourceInstallChoiceState({
+      installed: true,
+      updateAvailable: true,
+      comparisonAvailable: true,
+      assetName: 'runtime.zip',
+      message: '',
+    })).toEqual({ canUpdate: true, primaryChoice: 'update', reinstallLabel: '强制重装' })
+    expect(resourceInstallChoiceState({
+      installed: true,
+      updateAvailable: false,
+      comparisonAvailable: true,
+      assetName: 'runtime.zip',
+      message: '',
+    })).toEqual({ canUpdate: false, primaryChoice: 'reinstall', reinstallLabel: '强制重装' })
+    expect(resourceInstallChoiceState({
+      installed: true,
+      updateAvailable: true,
+      comparisonAvailable: false,
+      assetName: 'runtime.zip',
+      message: '',
+    })).toEqual({ canUpdate: false, primaryChoice: 'reinstall', reinstallLabel: '强制重装' })
   })
 })
