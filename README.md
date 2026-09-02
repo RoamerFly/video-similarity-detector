@@ -3,86 +3,219 @@
 </p>
 
 <p align="center">
-  <img src="icon.png" alt="Video Similarity Detector" width="112">
+  <img src="icon.png" alt="Video Similarity Detector" width="128">
 </p>
 
 <h1 align="center">视频相似度检测</h1>
 
-<p align="center">在本地查找相似视频、片段包含关系和重复文件，并提供视频整理与合并工具。</p>
+<p align="center">本地优先的视频相似度、片段包含关系、重复文件和视频整理工具。</p>
 
 <p align="center">
-  <a href="https://github.com/RoamerFly/video-similarity-detector/releases"><img src="https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat-square" alt="下载量"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e.svg" alt="MIT License"></a>
+  <a href="https://github.com/RoamerFly/video-similarity-detector/releases"><img src="https://img.shields.io/github/downloads/RoamerFly/video-similarity-detector/total?style=flat-square" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e.svg" alt="License"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2563eb" alt="Platform">
+  <img src="https://img.shields.io/badge/CUDA-optional-16a34a" alt="CUDA optional">
 </p>
 
-## 快速入口
+<p align="center">
+  <a href="#%E7%94%A8%E6%88%B7%E6%8C%87%E5%8D%97">用户指南</a> &nbsp;|&nbsp;
+  <a href="#%E4%B8%8B%E8%BD%BD%E4%B8%8E%E5%AE%89%E8%A3%85">下载</a> &nbsp;|&nbsp;
+  <a href="#%E5%9F%BA%E6%9C%AC%E4%BD%BF%E7%94%A8">使用</a> &nbsp;|&nbsp;
+  <a href="#%E7%95%8C%E9%9D%A2%E9%A2%84%E8%A7%88">界面</a> &nbsp;|&nbsp;
+  <a href="#%E5%BC%80%E5%8F%91%E8%80%85%E6%8C%87%E5%8D%97">开发</a> &nbsp;|&nbsp;
+  <a href="#%E8%AE%B8%E5%8F%AF%E8%AF%81">许可证</a>
+</p>
 
-- [下载最新版](https://github.com/RoamerFly/video-similarity-detector/releases)：选择与你的系统匹配的安装包或便携版。
-- [普通用户图形界面操作手册](https://roamerfly.github.io/video-similarity-detector/)：从安装、环境配置到分析、复核和视频合并的详细步骤。
-- [开发者 API 文档（GitHub Wiki）](https://github.com/RoamerFly/video-similarity-detector/wiki)：项目架构、API/CLI、识别逻辑、数据结构、构建和发布说明。
+## 用户指南
 
-## 主要功能
+### 文档入口
 
-- 扫描本地视频，识别相似视频、片段包含、部分重叠和完全重复文件。
-- 使用动态抽帧、CLIP 特征和相似度匹配，支持快速、普通、精确和完美匹配等模式。
-- 生成并查看 JSON、CSV、HTML 报告，支持筛选、排序、对比复核和任务断点恢复。
-- 提供多轨视频合并编辑器，支持视频、音频和文本片段的排列、剪辑与导出。
-- 默认在本机处理视频、模型、缓存和报告，不上传媒体内容。
+- [面向普通用户的图形界面操作手册](https://roamerfly.github.io/video-similarity-detector/)：从下载安装、首次配置到分析、查看结果和视频合并的逐步说明。
+- [面向开发者的 API 文档](https://github.com/RoamerFly/video-similarity-detector/wiki)：项目架构、Python API/CLI、桌面后端接口、任务与报告结构、构建测试和发布流程。
 
-## 安装与使用
+### 它能做什么
 
-1. 从 [Releases](https://github.com/RoamerFly/video-similarity-detector/releases) 下载对应系统的安装包。Windows 普通用户优先选择 CPU 版；只有具备兼容 NVIDIA 显卡和驱动时才选择 GPU 版。不想安装可以使用 portable 便携版。
-2. 首次启动后打开“设置”，确认视频目录、缓存目录和报告目录，并检查 AI 运行环境、离线 CLIP 模型和视频合并环境。
-3. 进入“分析任务”，扫描视频、选择分析模式并开始任务。分析完成后，在“结果总览”和“对比视图”中复核结果。
-4. 需要整理素材时，可在结果页面移动或删除视频，也可以进入“合并视频”编辑并导出新文件。
+- 扫描视频目录，找出相似视频、片段包含、部分重叠和完全重复文件。
+- 生成 JSON、CSV、HTML 报告，并在桌面应用中筛选、排序、复核和删除结果。
+- 支持动态抽帧、黑边裁剪、竖屏旋转、分辨率统一、CLIP 特征和 FAISS 检索。
+- 支持任务历史、断点恢复、分阶段继续、缓存清理、错误视频隔离和视频扫描范围过滤。
+- 支持多轨视频合并编辑，包含裁剪、旋转、拆分、跨轨拖放、音频和导出。
+- 默认本地处理视频、缓存和报告，不依赖远程分析服务。
 
-AI 相似度分析首次运行可能需要下载 Python/PyTorch 运行环境和 CLIP 模型；视频合并使用独立的 FFmpeg 环境。它们分别安装和更新，后续启动会复用本地环境。只检查完全相同的文件时，可使用“对比相同文件”模式，无需进行 CLIP 抽帧分析。
+### 下载与安装
 
-## 界面预览
+前往 [GitHub Releases](https://github.com/RoamerFly/video-similarity-detector/releases)，下载与你的系统和硬件对应的应用安装包：
 
-以下截图来自桌面应用实际界面。
+- Windows：普通用户选择 CPU 版；具备兼容 NVIDIA 显卡和驱动时可选择 GPU 版。
+- macOS：Apple Silicon（M 系列）选择 arm64 版，Intel 芯片选择 x64 版。
+- Linux：根据发行版选择 `.deb`、`.rpm` 或便携 `.tar.gz`。
+- 不想安装时，选择同平台的 `portable` 便携包，解压后即可运行。
 
-### 分析任务
+应用本体、AI 运行环境、离线 CLIP 模型和视频合并 FFmpeg 环境分开管理。首次使用时按需在设置页安装或更新；应用更新通常不会重复下载已经安装的环境和模型。视频合并环境由应用自动管理，一般不需要手动预装 FFmpeg。
+
+Windows 安装器支持自定义安装路径；便携版解压到任意目录后即可运行。
+
+### 离线模型
+
+AI 相似度分析使用 `openai/clip-vit-base-patch32`。模型与应用、运行环境分别保存，首次分析会自动下载约 600 MB 的模型，后续小更新不会重复下载。离线使用可从 Release 下载：
+
+```text
+clip-vit-base-patch32.zip
+```
+
+解压到程序同级目录，最终结构为：
+
+```text
+程序目录/
+└─ models/
+   └─ clip-vit-base-patch32/
+      ├─ config.json
+      ├─ preprocessor_config.json
+      └─ pytorch_model.bin
+```
+
+程序查找顺序：程序同级 `models/`、个人 Hugging Face 缓存、联网下载。应用内覆盖更新不会删除 `models/`。
+
+### 基本使用
+
+1. 打开应用，在“设置”中确认视频目录、缓存目录、报告目录和 CPU/GPU 环境。
+2. 如需只处理部分视频，在“视频扫描范围”中按大小、名称、时长、分辨率、帧率或格式过滤。
+3. 进入“分析任务”，扫描视频并新建任务。
+4. 在“历史任务”中启动、暂停、继续或分阶段处理。
+5. 在“结果总览”和“对比视图”中查看相似关系、匹配片段和算法帧。
+6. 需要整理文件时，可右键视频或多选视频后移动、删除或打开文件位置。
+
+### 界面预览
+
+以下图片来自桌面应用真实界面。
+
+#### 分析任务
 
 ![分析任务界面](docs/screenshots/analyze.png)
 
-### 结果总览
+#### 结果总览
 
 ![结果总览界面](docs/screenshots/results.png)
 
-### 对比视图
+#### 对比视图
 
 ![对比视图界面](docs/screenshots/compare.png)
 
-### 多轨合并编辑器
+#### 多轨合并编辑器
 
 ![多轨合并编辑器](docs/screenshots/merge.png)
 
-### 设置
+#### 设置
 
 ![设置界面](docs/screenshots/settings.png)
 
-## 开发者入口
+### 支持格式
 
-开发者请优先阅读 [GitHub Wiki](https://github.com/RoamerFly/video-similarity-detector/wiki)。源码中的识别逻辑补充说明见 [README_RECO.md](README_RECO.md)，设置与参数说明见 [README_SET.md](README_SET.md)。
+视频：`mp4, mkv, avi, mov, webm, flv, wmv`
 
-本地开发环境需要 Node.js/npm、Rust/Cargo 和 Python 3.10+：
+音频：`mp3, wav, flac, aac, m4a, ogg, opus, wma`
+
+浏览器内置播放器能否直接播放还取决于系统 WebView2 和具体编码；无法播放时可使用帧预览辅助复核。
+
+### 安全与隐私
+
+- 视频默认只在本机处理，不主动上传媒体内容。
+- 删除源视频是不可恢复操作，应用会在执行前请求确认。
+- 分析结果可能存在误判，不应作为版权、法律或平台执法的唯一依据。
+
+## 开发者指南
+
+### 环境
+
+- Node.js / npm
+- Rust 与 Cargo
+- Python 3.10+
+- Windows 构建可选 CUDA / NVIDIA 驱动
+
+安装前端依赖：
 
 ```powershell
 cd desktop
 npm install
-npm run dev
 ```
 
-Python 依赖安装：
+Python 环境：
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-## 隐私、许可证与免责声明
+### 常用命令
 
-- 视频默认只在本机处理，应用不会主动上传媒体内容。
-- 删除源视频不可恢复，请在操作前确认并做好备份。
-- 分析结果可能存在误判或漏判，不应作为版权、法律或平台执法的唯一依据。使用者应确保拥有处理相关媒体的合法权利，并遵守适用法律、平台规则及第三方许可证。
-- 本项目基于 [MIT License](LICENSE) 开源；第三方依赖、模型和媒体内容遵循各自许可证。
+```powershell
+# 前端开发
+cd desktop
+npm run dev
+
+# Tauri 开发
+npm run tauri:dev
+
+# 前端构建
+npm run build
+
+# Rust 检查与测试
+cd src-tauri
+cargo check
+cargo test
+
+# Python 语法检查示例
+cd ../..
+python -m py_compile scripts/batch_compare.py
+```
+
+### 打包
+
+```powershell
+cd desktop
+
+# Windows CPU
+.\build-windows.bat
+
+# Windows GPU
+.\build-windows-gpu.bat
+
+# Linux
+bash ./build-linux.sh
+
+# macOS
+bash ./build-macos.sh
+```
+
+输出目录通常位于 `desktop/dist_windows*`、`desktop/dist_linux`、`desktop/dist_macos`。
+
+### 项目结构
+
+```text
+video-containment-detector/
+├─ desktop/          # Tauri + React 桌面端
+├─ scripts/          # Python 命令行入口
+├─ video_sim/        # 抽帧、预处理、嵌入、匹配和报告逻辑
+├─ tests/            # Python 测试
+├─ docs/screenshots/ # 界面截图
+├─ README_RECO.md    # 识别逻辑说明
+├─ README_SET.md     # 设置与参数说明
+└─ requirements.txt
+```
+
+### 相关文档
+
+- [识别逻辑说明](README_RECO.md)
+- [设置与参数说明](README_SET.md)
+- [许可证](LICENSE)
+
+## 致谢
+
+本项目基于和使用了 [Tauri](https://tauri.app/)、[React](https://react.dev/)、[Vite](https://vite.dev/)、[Rust](https://www.rust-lang.org/)、[Python](https://www.python.org/)、[PyTorch](https://pytorch.org/)、[Transformers](https://huggingface.co/docs/transformers/index)、[OpenAI CLIP](https://github.com/openai/CLIP)、[FAISS](https://github.com/facebookresearch/faiss)、[OpenCV](https://opencv.org/)、[Decord](https://github.com/dmlc/decord)、[FFmpeg](https://ffmpeg.org/)、[Radix UI](https://www.radix-ui.com/)、[Lucide](https://lucide.dev/)、[Zustand](https://zustand-demo.pmnd.rs/)、[Playwright](https://playwright.dev/) 等开源项目。核心思路和早期实现参考了 [DewduSendanayake/Video-Similarity-Search](https://github.com/DewduSendanayake/Video-Similarity-Search.git)。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。第三方依赖、模型和媒体内容仍遵循各自许可证。
+
+## 免责声明
+
+本项目用于本地视频相似度分析、重复内容识别和媒体整理。分析结果可能存在误判，不应作为版权、法律或平台执法的唯一依据。使用者应确保拥有处理相关媒体的合法权利，并遵守适用法律、平台规则及第三方许可证。
