@@ -28,6 +28,11 @@
 
 ## 用户指南
 
+### 文档入口
+
+- [面向普通用户的图形界面操作手册](https://roamerfly.github.io/video-similarity-detector/)：从下载安装、首次配置到分析、查看结果和视频合并的逐步说明。
+- [面向开发者的 API 文档](https://github.com/RoamerFly/video-similarity-detector/wiki)：项目架构、Python API/CLI、桌面后端接口、任务与报告结构、构建测试和发布流程。
+
 ### 它能做什么
 
 - 扫描视频目录，找出相似视频、片段包含、部分重叠和完全重复文件。

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Video Similarity Detector 面向普通用户的视频相似度检测与视频合并操作手册。">
+  <meta name="theme-color" content="#07111f">
+  <title>视频相似度检测｜普通用户操作手册</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="#top" aria-label="返回手册首页">
+        <span class="brand-mark" aria-hidden="true">VS</span>
+        <span><strong>视频相似度检测</strong><small>普通用户操作手册</small></span>
+      </a>
+      <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-nav">目录</button>
+      <nav id="site-nav" class="site-nav" aria-label="主要导航">
+        <a href="#start">开始使用</a>
+        <a href="#analyze">分析任务</a>
+        <a href="#results">结果与对比</a>
+        <a href="#merge">合并视频</a>
+        <a href="#faq">排障</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero container">
+      <div class="hero-copy">
+        <p class="eyebrow">Video Similarity Detector · v1.3.1</p>
+        <h1>把重复、相似和片段包含关系找出来。</h1>
+        <p class="lead">这是一份写给第一次使用桌面应用的操作手册。按照“下载安装 → 准备环境 → 分析 → 复核 → 整理”的顺序操作，不需要了解 Python、CUDA 或命令行。</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#start">从这里开始</a>
+          <a class="button button-secondary" href="https://github.com/RoamerFly/video-similarity-detector/releases">下载最新版本</a>
+        </div>
+        <div class="trust-row"><span>本地优先</span><span>支持 Windows / macOS / Linux</span><span>视频默认不上传</span></div>
+      </div>
+      <div class="hero-card" aria-label="操作流程">
+        <div class="orb orb-one"></div><div class="orb orb-two"></div>
+        <p class="eyebrow">四步完成一次检查</p>
+        <ol class="flow-list">
+          <li><b>01</b><span><strong>准备</strong><small>安装程序，确认运行环境</small></span></li>
+          <li><b>02</b><span><strong>分析</strong><small>选择视频目录和识别模式</small></span></li>
+          <li><b>03</b><span><strong>复核</strong><small>查看报告、片段和对比画面</small></span></li>
+          <li><b>04</b><span><strong>整理</strong><small>合并、移动或删除视频</small></span></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="audience container" aria-label="文档分工">
+      <a class="audience-card audience-user" href="#start"><span class="card-kicker">GitHub Pages · 给普通用户</span><h2>图形界面操作手册</h2><p>从下载安装到结果复核，每一步都用应用界面完成。</p><span class="card-link">阅读本手册 →</span></a>
+      <a class="audience-card audience-dev" href="https://github.com/RoamerFly/video-similarity-detector/wiki"><span class="card-kicker">给开发者</span><h2>API 与项目技术文档</h2><p>接口、识别流程、参数和内部实现请查看 GitHub Wiki。</p><span class="card-link">前往 Wiki →</span></a>
+    </section>
+
+    <div class="page-layout container">
+      <aside class="toc" aria-label="本页目录">
+        <p class="toc-title">本页目录</p>
+        <a href="#start">1. 下载与首次启动</a>
+        <a href="#settings">2. 设置目录与环境</a>
+        <a href="#analyze">3. 创建分析任务</a>
+        <a href="#task-control">4. 暂停、继续与读取</a>
+        <a href="#results">5. 查看结果与对比</a>
+        <a href="#merge">6. 合并视频</a>
+        <a href="#maintenance">7. 更新与维护</a>
+        <a href="#faq">8. 常见问题</a>
+        <a class="wiki-link" href="https://github.com/RoamerFly/video-similarity-detector/wiki">开发者 API 文档 ↗</a>
+      </aside>
+
+      <article class="article">
+        <section id="start" class="guide-section">
+          <div class="section-heading"><span class="section-number">01</span><div><p class="eyebrow">Start here</p><h2>下载与首次启动</h2></div></div>
+          <p>打开 <a href="https://github.com/RoamerFly/video-similarity-detector/releases">Releases 下载页</a>，选择与你的系统匹配的安装包。Windows 普通用户优先选择 <code>CPU installer</code>；只有 NVIDIA 显卡、驱动和计算能力都符合发布说明时才选择 <code>GPU installer</code>。不想安装可以下载 <code>portable</code> 便携包并解压运行。</p>
+          <div class="notice notice-info"><strong>先记住这一点：</strong>应用、AI 运行环境、离线 CLIP 模型和视频合并环境是分开管理的。第一次分析时可能需要下载较大的 AI 环境和模型，请预留磁盘空间和网络时间；只合并视频时只需 FFmpeg 环境。</div>
+          <div class="steps-grid">
+            <div class="step"><b>1</b><h3>安装或解压</h3><p>安装版按向导选择目录；便携版请把整个文件夹一起保存，不要只复制 exe。</p></div>
+            <div class="step"><b>2</b><h3>启动应用</h3><p>首次启动可能需要等待环境检查。Windows SmartScreen 提示时，请确认文件来自项目 Releases。</p></div>
+            <div class="step"><b>3</b><h3>打开设置</h3><p>先完成目录和环境检查，再进入“分析任务”扫描视频。</p></div>
+          </div>
+        </section>
+
+        <section id="settings" class="guide-section">
+          <div class="section-heading"><span class="section-number">02</span><div><p class="eyebrow">Prepare once</p><h2>设置目录与环境</h2></div></div>
+          <p>第一次使用建议先进入左侧“设置”。应用会在启动时检查 Python、AI 环境、GPU 和 FFmpeg 状态；正常状态会显示为可用或已连接。</p>
+          <figure class="screenshot screenshot-wide"><img src="../screenshots/settings.png" alt="设置页面，显示 AI 运行环境、离线 CLIP 模型和视频合并环境" loading="lazy"><figcaption>设置页面：环境卡片、视频目录、缓存目录和报告目录。</figcaption></figure>
+          <div class="field-list">
+            <div><strong>视频目录</strong><span>要扫描的文件夹。程序会递归读取其中的常见视频格式。</span></div>
+            <div><strong>缓存目录</strong><span>保存抽帧、CLIP 特征和任务断点。空间不足时可在设置中清理，原视频不会被删除。</span></div>
+            <div><strong>报告目录</strong><span>保存 JSON、CSV、HTML 报告。建议放在稳定、可备份的磁盘位置。</span></div>
+            <div><strong>视频扫描范围</strong><span>可按文件名、大小、时长、分辨率、帧率和扩展名筛选，减少不需要的输入。</span></div>
+          </div>
+          <div class="notice notice-tip"><strong>内存建议：</strong>视频较多时不要把缓存目录放在内存盘。首次分析选择“普通”或“快速”确认流程，完美匹配会比较全部视频组合，耗时和内存占用明显更高。</div>
+        </section>
+
+        <section id="analyze" class="guide-section">
+          <div class="section-heading"><span class="section-number">03</span><div><p class="eyebrow">Detect similarity</p><h2>创建分析任务</h2></div></div>
+          <p>进入“分析任务”，扫描视频后点击“新建任务”。选择合适的模式，确认视频数量和配置，再开始运行。任务会自动保存，报告生成后可以从“结果总览”打开。</p>
+          <figure class="screenshot screenshot-wide"><img src="../screenshots/analyze.png" alt="分析任务页面，显示视频列表和分析配置" loading="lazy"><figcaption>分析任务页面：扫描结果、分析模式和任务控制。</figcaption></figure>
+          <div class="mode-table" role="table" aria-label="分析模式选择建议">
+            <div class="mode-row mode-head" role="row"><span>模式</span><span>适合谁</span><span>特点</span></div>
+            <div class="mode-row" role="row"><strong>极速 / 快速</strong><span>视频很多，先找明显重复</span><span>耗时较短，可能漏掉弱相似关系</span></div>
+            <div class="mode-row" role="row"><strong>普通</strong><span>日常使用的首选</span><span>速度、准确度和占用较平衡</span></div>
+            <div class="mode-row" role="row"><strong>精确</strong><span>需要更稳的识别结果</span><span>保留更多画面，耗时和缓存增加</span></div>
+            <div class="mode-row" role="row"><strong>完美匹配</strong><span>少量关键视频的最终核验</span><span>比较全部视频对，最慢且占用最高</span></div>
+            <div class="mode-row" role="row"><strong>对比相同文件</strong><span>寻找完全相同的文件</span><span>按文件内容指纹检查，不抽帧、不使用 CLIP</span></div>
+          </div>
+          <div class="callout-columns">
+            <div><h3>想找剪辑片段</h3><p>选择“视频相似度”模式。它会识别片段包含、近似重复和部分重叠，压缩、裁剪或轻微调色也可能被识别。</p></div>
+            <div><h3>只想删重复文件</h3><p>选择“对比相同文件”模式。它只判断文件内容是否完全相同，不能发现画面相似但编码不同的视频。</p></div>
+          </div>
+        </section>
+
+        <section id="task-control" class="guide-section">
+          <div class="section-heading"><span class="section-number">04</span><div><p class="eyebrow">Safe task control</p><h2>暂停、继续与读取任务</h2></div></div>
+          <p>分析过程中，左侧底部的“分析任务”胶囊会显示进度。点击“暂停任务”后，当前进度会保留；等待状态变为“已暂停”后，点击“继续任务”即可接着运行。</p>
+          <div class="timeline-card">
+            <div class="timeline-item"><span>运行中</span><p>任务正在抽帧、提取特征或比较视频。</p></div>
+            <div class="timeline-item"><span>正在暂停</span><p>程序正在安全停止当前步骤，请不要强制关闭窗口。</p></div>
+            <div class="timeline-item"><span>已暂停</span><p>进度和断点已保存，可以稍后继续。</p></div>
+            <div class="timeline-item"><span>继续任务</span><p>从已完成的阶段和缓存继续，不必从头开始。</p></div>
+          </div>
+          <div class="notice notice-warning"><strong>暂停后不要点“新建任务”。</strong>如果需要恢复当前任务，应使用“继续任务”或在“任务列表”中选择对应记录；新建任务会产生新的任务记录和配置。</div>
+          <h3>读取历史任务</h3>
+          <p>打开“任务列表”，选择目标记录并点击“读取任务”。应用会读取该任务保存的完整配置、视频列表和阶段进度；读取失败时会保留提示，不会伪装成读取成功。需要继续时，再点击“继续任务”。</p>
+        </section>
+
+        <section id="results" class="guide-section">
+          <div class="section-heading"><span class="section-number">05</span><div><p class="eyebrow">Review evidence</p><h2>查看结果与对比</h2></div></div>
+          <p>分析完成后进入“结果总览”。报告按配置和任务独立保存；切换不同任务或配置时，请在报告选择器中选中对应报告。双击一行结果可进入对比视图。</p>
+          <figure class="screenshot screenshot-wide"><img src="../screenshots/results.png" alt="结果总览页面，显示视频比较结果表格" loading="lazy"><figcaption>结果总览：按相似度、关系类型和报告筛选。</figcaption></figure>
+          <figure class="screenshot screenshot-wide"><img src="../screenshots/compare.png" alt="对比视图页面，显示两个视频的播放画面和匹配片段" loading="lazy"><figcaption>对比视图：同步查看两个视频、相似帧和时间窗口。</figcaption></figure>
+          <div class="check-list">
+            <p><span>01</span><strong>先看关系类型</strong>“片段包含”表示一边很可能是另一边的片段；“近似重复”表示两边大部分内容相近；“部分重叠”表示只有一段时间相似。</p>
+            <p><span>02</span><strong>再看匹配片段</strong>拖动或同步播放，确认相似画面是否真的对应，而不是同场景、同字幕或相似构图带来的误报。</p>
+            <p><span>03</span><strong>最后再整理文件</strong>确认保留版本后再移动或删除。删除源视频前应用会请求确认，但仍建议先备份重要素材。</p>
+          </div>
+        </section>
+
+        <section id="merge" class="guide-section">
+          <div class="section-heading"><span class="section-number">06</span><div><p class="eyebrow">Edit and export</p><h2>合并视频</h2></div></div>
+          <p>进入“合并视频”，可以把多个视频、音频和文本片段放到时间线上，调整顺序、裁剪区间、旋转方向和导出参数。此功能使用独立 FFmpeg 环境，与 AI 分析环境分开。</p>
+          <figure class="screenshot screenshot-wide"><img src="../screenshots/merge.png" alt="合并视频页面，显示视频线、音频线、文本线和导出按钮" loading="lazy"><figcaption>合并视频：视频线、音频线、文本线和导出状态。</figcaption></figure>
+          <ol class="numbered-list">
+            <li><strong>添加片段</strong>选择视频、音频或文本文件。多个源文件夹可以同时使用。</li>
+            <li><strong>编辑时间线</strong>拖动片段调整顺序，选择片段后修改属性；播放头可以预览当前位置。</li>
+            <li><strong>点击导出视频</strong>在弹窗中选择“使用源文件夹”或“浏览选择文件夹”，再填写导出名称和格式。</li>
+            <li><strong>等待导出完成</strong>左侧底部的“导出视频”胶囊会显示进度、暂停/继续按钮和日志；完成后可点击“前往输出文件夹”。</li>
+          </ol>
+          <div class="notice notice-tip"><strong>导出位置：</strong>使用源文件夹时，导出路径会从源视频文件夹中选择，默认建议第一个视频片段所在文件夹。不同目录的片段也可以合并，只要最终导出目录有效且有写入权限。</div>
+        </section>
+
+        <section id="maintenance" class="guide-section">
+          <div class="section-heading"><span class="section-number">07</span><div><p class="eyebrow">Keep it healthy</p><h2>更新与维护</h2></div></div>
+          <div class="maintenance-grid">
+            <div><h3>更新应用</h3><p>启动时程序会自动检查应用更新。发现新版本会弹窗提示；应用更新通常只替换界面和程序文件，视频、报告、缓存和环境会继续保留。</p></div>
+            <div><h3>更新运行环境</h3><p>在设置页对应卡片点击“重装/更新环境”。程序会先检查当前环境文件的版本和哈希，再让你选择更新或重装。模型和 FFmpeg 也有各自独立的卡片。</p></div>
+            <div><h3>清理缓存</h3><p>缓存用于断点和复用特征。空间紧张时可以清理旧缓存；清理不会删除原视频，报告是否删除取决于确认弹窗。</p></div>
+            <div><h3>备份报告</h3><p>定期备份报告目录中的 JSON、CSV 和 HTML 文件。不同分析配置会生成独立报告，建议不要只保留一份导出文件。</p></div>
+          </div>
+          <p class="small-note">如果只是更新应用界面，一般不需要重新安装 AI 环境、CLIP 模型或 FFmpeg。只有对应组件本身发生变化，或文件损坏、校验失败时，才需要在设置中更新/重装。</p>
+        </section>
+
+        <section id="faq" class="guide-section faq-section">
+          <div class="section-heading"><span class="section-number">08</span><div><p class="eyebrow">Troubleshooting</p><h2>常见问题</h2></div></div>
+          <details open><summary>第一次分析为什么要下载很多东西？</summary><p>视频相似度模式需要 Python/PyTorch/CUDA 运行环境和 CLIP 模型。它们按需下载并保存在程序目录附近，后续分析会复用。若只查完全相同的文件，可改用“对比相同文件”模式，不需要抽帧和 CLIP。</p></details>
+          <details><summary>完美匹配很慢或内存占用很高怎么办？</summary><p>完美匹配会比较全部视频组合。先用“普通”或“快速”筛选，再对少量疑似视频使用“精确/完美匹配”；同时减少一次任务中的视频数量，确保缓存目录有足够空间。</p></details>
+          <details><summary>结果数量和上一次不一样，报告好像被覆盖了？</summary><p>不同任务和不同分析配置应使用独立任务记录及报告。请到“任务列表”读取正确任务，再在结果页的报告选择器中确认当前报告；不要只根据文件名判断报告归属。</p></details>
+          <details><summary>暂停后继续为什么失败？</summary><p>请等待状态完整变为“已暂停”后再继续，不要强制关闭应用或重复点击。若旧进程仍在安全退出，稍候再点；检查任务列表中是否仍有完整的运行配置。</p></details>
+          <details><summary>合并视频提示输出目录无效怎么办？</summary><p>重新打开导出弹窗，在“导出文件夹路径”下拉框中选择一个实际存在且可写的目录；多个源文件夹时不要手动输入不存在的路径。必要时使用“浏览选择文件夹”打开系统目录选择器。</p></details>
+          <details><summary>GPU 没有检测到，还能分析吗？</summary><p>可以。设置页将设备切换为 CPU 即可运行，只是速度通常较慢。GPU 模式需要兼容的 NVIDIA 显卡、驱动和 GPU 运行环境；不确定时优先使用 CPU 版本。</p></details>
+          <details><summary>应用无法播放某个视频怎么办？</summary><p>播放器支持的编码取决于系统 WebView2 和视频编码。即使预览无法播放，分析仍可能成功；可以使用结果中的帧预览和时间戳复核。</p></details>
+          <div class="help-box"><strong>仍然无法解决？</strong><p>请记录应用版本、操作系统、分析模式、错误提示和日志中最后几行，再到 <a href="https://github.com/RoamerFly/video-similarity-detector/issues">GitHub Issues</a> 提交问题。不要上传包含私人视频路径或敏感信息的报告。</p></div>
+        </section>
+
+        <footer class="article-footer"><p>本手册面向图形界面用户。需要 API、识别逻辑和开发说明，请访问 <a href="https://github.com/RoamerFly/video-similarity-detector/wiki">GitHub Wiki</a>。</p><a href="#top">回到顶部 ↑</a></footer>
+      </article>
+    </div>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>

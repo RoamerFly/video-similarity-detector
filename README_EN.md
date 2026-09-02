@@ -28,6 +28,11 @@
 
 ## For Users
 
+### Documentation
+
+- [GUI manual for end users](https://roamerfly.github.io/video-similarity-detector/): step-by-step installation, setup, analysis, results, and video merge instructions.
+- [API documentation for developers](https://github.com/RoamerFly/video-similarity-detector/wiki): architecture, Python API/CLI, desktop backend commands, task and report schemas, builds, tests, and releases.
+
 ### What It Does
 
 - Scans a video folder and finds similar videos, contained segments, partial overlaps, and exact duplicate files.
