@@ -2055,7 +2055,7 @@ export function MergePage() {
     setExportDirectoryMode(suggestedSourceDirectory ? 'source' : 'browse')
     setExportSourceDirectory(suggestedSourceDirectory)
     setExportDirectoryDraft(suggestedSourceDirectory || merge.settings.outputDir)
-    setExportNameDraft(outputNameStem(merge.settings.outputName) || 'merged_video')
+    setExportNameDraft('merged_video')
     setExportFormatDraft('mp4')
     setExportValidation(null)
     setValidatedExportKey('')
@@ -2132,7 +2132,6 @@ export function MergePage() {
     }
     if (!canConfirmExport(outputDirectory, outputName, exportValidating, currentExportValidation)) return
     merge.setSettings({ outputDir: outputDirectory })
-    merge.setSettings({ outputName })
     setExportDirectoryDialogOpen(false)
     void startMerge(outputDirectory, outputName, exportFormatDraft)
   }

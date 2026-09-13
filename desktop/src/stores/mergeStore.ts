@@ -567,7 +567,7 @@ export const useMergeStore = create<MergeState>()(
         videoTracks: state.videoTracks,
         audioTracks: state.audioTracks,
         textTracks: state.textTracks,
-        settings: state.settings,
+        settings: { ...state.settings, outputName: defaultSettings.outputName },
       }),
       merge: (persisted, current) => {
         const saved = persisted as Partial<MergeState> | undefined
@@ -583,7 +583,7 @@ export const useMergeStore = create<MergeState>()(
           items: (saved?.items ?? []).map((item) => normalizeVideoItem(item, videoTracks)),
           audioItems: (saved?.audioItems ?? []).map((item) => normalizeAudioItem(item, audioTracks)),
           textItems: (saved?.textItems ?? []).map((item) => normalizeTextItem(item, textTracks)),
-          settings: normalizeSettings(saved?.settings),
+          settings: normalizeSettings({ ...saved?.settings, outputName: defaultSettings.outputName }),
           canUndo: false,
           canRedo: false,
           undoStack: [],
