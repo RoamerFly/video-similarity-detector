@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware'
 
 export type MergeFitMode = 'contain' | 'cover' | 'stretch'
 export type MergeSplitMode = 'none' | 'duration' | 'count'
-export type MergeRotation = 0 | 90 | 180 | 270
+export type MergeRotation = number
 export type MergeCanvasBackground = 'black' | 'white'
 export type MergeVideoEncoder = 'h264' | 'h265'
 export type MergeRateControl = 'quality' | 'bitrate'
@@ -778,9 +778,7 @@ function validTrackId(tracks: MergeTrack[], requested: string | undefined, fallb
 }
 
 function normalizeRotation(rotation?: number): MergeRotation {
-  const normalized = ((Math.round(Number(rotation) || 0) % 360) + 360) % 360
-  if (normalized === 90 || normalized === 180 || normalized === 270) return normalized
-  return 0
+  return ((Math.round(Number(rotation) || 0) % 360) + 360) % 360
 }
 
 function clamp01(value: number) {

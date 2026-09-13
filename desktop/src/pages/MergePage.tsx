@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Music2,
   Pause,
+  PanelLeft,
   PanelRight,
   Plus,
   Redo2,
@@ -26,6 +27,8 @@ import {
   Toggle,
 } from '@/components/DesignSystem'
 import { MergeInspectorPanel } from '@/components/merge/MergeInspectorPanel'
+import { MergeRotationDialog } from '@/components/merge/MergeRotationDialog'
+import { MergeVideoOrderDialog, type MergeVideoOrderOption } from '@/components/merge/MergeVideoOrderDialog'
 import { MergeNumberField as NumberField } from '@/components/merge/MergeNumberField'
 import { MergeTimeline } from '@/components/merge/MergeTimeline'
 import { MergeTextPropertiesDialog } from '@/components/merge/MergeTextPropertiesDialog'
@@ -89,7 +92,6 @@ import {
   createTimelinePlaybackIndex,
   findLayoutAt,
   globalVideoTimelineGaps,
-  previousTrackLayout,
   timelineGapPositionUpdates,
   timelineExchangeOrder,
   timelineExchangeUpdates,
@@ -116,7 +118,6 @@ import {
 import {
   useMergeStore,
   type MergeQueueItem,
-  type MergeRotation,
   type MergeTextItem,
 } from '@/stores/mergeStore'
 import { useMergeRuntimeStore } from '@/stores/mergeRuntimeStore'
@@ -139,6 +140,12 @@ const commonResolutionOptions = [
 const mediaAttributeEpsilon = 0.001
 type MergeOutputFormat = 'mp4' | 'mkv' | 'mov'
 export type ExportDirectoryMode = 'source' | 'browse'
+
+type MergeVideoOrderRequest = {
+  mode: 'import' | 'timeline'
+  items: MergeVideoOrderOption[]
+  focusedId?: string
+}
 
 const mergeOutputFormats: Array<{ value: MergeOutputFormat; label: string }> = [
   { value: 'mp4', label: 'MP4（兼容性最佳）' },
@@ -173,6 +180,15 @@ export function canConfirmExport(
 ) {
   if (!directory.trim() || basicOutputNameError(name) || validating || !validation) return false
   return !validation.nameTooLong && (validation.valid || validation.nameConflict)
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- deterministic import ordering is covered by MergePage tests.
+export function compareVideoNamesAscii(left: { name: string, path: string }, right: { name: string, path: string }) {
+  if (left.name < right.name) return -1
+  if (left.name > right.name) return 1
+  if (left.path < right.path) return -1
+  if (left.path > right.path) return 1
+  return 0
 }
 
 function syncMediaAttributes(
@@ -271,7 +287,6 @@ export function MergePage() {
     pythonPath,
     onError: mergeRuntime.setError,
   })
-  const dropActive = useMergeFileDrop()
   const previewRef = useRef<HTMLVideoElement | null>(null)
   const previewVideoRefs = useRef(new Map<string, HTMLVideoElement>())
   const previewAudioRefs = useRef(new Map<string, HTMLAudioElement>())
@@ -323,6 +338,9 @@ export function MergePage() {
   const [viewportHeight, setViewportHeight] = useState(() => typeof window === 'undefined' ? 900 : window.innerHeight)
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [videoListOpen, setVideoListOpen] = useState(false)
+  const [videoOrderRequest, setVideoOrderRequest] = useState<MergeVideoOrderRequest | null>(null)
+  const [rotationClipId, setRotationClipId] = useState('')
   const [customResolutionSelected, setCustomResolutionSelected] = useState(false)
   const [draggedClipId, setDraggedClipId] = useState('')
   const [draggedAudioId, setDraggedAudioId] = useState('')
@@ -354,6 +372,19 @@ export function MergePage() {
   const [validatedExportKey, setValidatedExportKey] = useState('')
   const [exportValidating, setExportValidating] = useState(false)
   const exportValidationRequestRef = useRef(0)
+  const queueVideoImport = useCallback((paths: string[]) => {
+    const candidates = paths.map((path, index) => ({
+      id: `import-${index}-${path}`,
+      path,
+      name: fileName(path),
+    })).sort(compareVideoNamesAscii)
+    if (candidates.length <= 1) {
+      merge.addVideos(candidates.map(({ path, name }) => ({ path, name })))
+      return
+    }
+    setVideoOrderRequest({ mode: 'import', items: candidates })
+  }, [merge])
+  const dropActive = useMergeFileDrop(queueVideoImport)
   const cropSessionRef = useRef<{
     clipId: string
     cropEnabled: boolean
@@ -1075,7 +1106,7 @@ export function MergePage() {
   async function chooseVideos() {
     try {
       const paths = await selectVideoFiles()
-      merge.addVideos(paths.map((path) => ({ path, name: fileName(path) })))
+      queueVideoImport(paths)
     } catch (error) {
       mergeRuntime.setError(normalizeBackendError(error))
     }
@@ -1251,22 +1282,56 @@ export function MergePage() {
     setClipContextMenu(null)
   }
 
-  function moveClip(layout: ClipLayout, direction: -1 | 1) {
-    const trackLayouts = clipLayouts
-      .filter((candidate) => candidate.trackId === layout.trackId)
-      .sort((left, right) => left.start - right.start)
-    const index = trackLayouts.findIndex((candidate) => candidate.item.id === layout.item.id)
-    const target = trackLayouts[index + direction]
-    if (!target) return
+  function openVideoPositionDialog(focusedId: string) {
+    const trackOrder = new Map(merge.videoTracks.map((track, index) => [track.id, index]))
+    const itemOrder = new Map(merge.items.map((item, index) => [item.id, index]))
+    const orderedLayouts = [...clipLayouts].sort((left, right) => (
+      left.start - right.start
+      || (trackOrder.get(left.trackId) ?? 0) - (trackOrder.get(right.trackId) ?? 0)
+      || (itemOrder.get(left.item.id) ?? 0) - (itemOrder.get(right.item.id) ?? 0)
+    ))
+    setVideoOrderRequest({
+      mode: 'timeline',
+      focusedId,
+      items: orderedLayouts.map((layout) => ({
+        id: layout.item.id,
+        name: layout.item.name,
+        path: layout.item.path,
+        detail: `${formatPreciseTime(layout.start)} · ${merge.videoTracks.find((track) => track.id === layout.trackId)?.name ?? layout.trackId}`,
+      })),
+    })
+    setClipContextMenu(null)
+  }
+
+  function confirmVideoOrder(orderedIds: string[]) {
+    const request = videoOrderRequest
+    if (!request) return
+    if (request.mode === 'import') {
+      const lookup = new Map(request.items.map((item) => [item.id, item]))
+      merge.addVideos(orderedIds.flatMap((id) => {
+        const item = lookup.get(id)
+        return item ? [{ path: item.path, name: item.name }] : []
+      }))
+      setVideoOrderRequest(null)
+      return
+    }
+
+    const trackOrder = new Map(merge.videoTracks.map((track, index) => [track.id, index]))
+    const slots = [...clipLayouts].sort((left, right) => (
+      left.start - right.start
+      || (trackOrder.get(left.trackId) ?? 0) - (trackOrder.get(right.trackId) ?? 0)
+    ))
     merge.beginHistoryTransaction()
-    merge.reorderVideos([target.item.id, layout.item.id], false)
-    merge.updateVideo(layout.item.id, { startTime: target.start }, false)
-    merge.updateVideo(target.item.id, { startTime: layout.start }, false)
+    merge.reorderVideos(orderedIds, false)
+    merge.updateVideos(orderedIds.flatMap((id, index) => {
+      const slot = slots[index]
+      return slot ? [{ id, patch: { startTime: slot.start, trackId: slot.trackId } }] : []
+    }), false)
     merge.endHistoryTransaction()
+    if (request.focusedId) setSelectedClipId(request.focusedId)
     setSelectedAudioId('')
     setSelectedTextId('')
-    setSelectedClipId(layout.item.id)
-    setClipContextMenu(null)
+    setVideoOrderRequest(null)
   }
 
   const moveClipWithExchange = useCallback((id: string, resolvedStart: number, trackId: string, recordHistory = true, exchangeStart?: number, exchangeTargetId?: string | null) => {
@@ -1397,52 +1462,22 @@ export function MergePage() {
     setClipContextMenu(null)
   }
 
-  function rotateClipRight(item: MergeQueueItem) {
-    const nextRotation = ((item.rotation + 90) % 360) as MergeRotation
+  function applyClipRotation(item: MergeQueueItem, angle: number) {
+    const nextRotation = ((Math.round(angle) % 360) + 360) % 360
     const info = metadata[normalizePath(item.path)]
     if (!item.cropEnabled || !info?.readable) {
       merge.updateVideo(item.id, { rotation: nextRotation })
       return
     }
     const currentDimensions = rotatedDimensions(info.width, info.height, item.rotation)
+    const nextDimensions = rotatedDimensions(info.width, info.height, nextRotation)
     const crop = cropRectForDimensions(item, currentDimensions.width, currentDimensions.height)
     merge.updateVideo(item.id, {
       rotation: nextRotation,
-      cropX: currentDimensions.height - crop.y - crop.height,
-      cropY: crop.x,
-      cropWidth: crop.height,
-      cropHeight: crop.width,
-    })
-  }
-
-  function restoreClipRotation(item: MergeQueueItem) {
-    if (item.rotation === 0) return
-    const info = metadata[normalizePath(item.path)]
-    if (!item.cropEnabled || !info?.readable) {
-      merge.updateVideo(item.id, { rotation: 0 })
-      return
-    }
-
-    let rotation: MergeRotation = item.rotation
-    let dimensions = rotatedDimensions(info.width, info.height, rotation)
-    let crop = cropRectForDimensions(item, dimensions.width, dimensions.height)
-    while (rotation !== 0) {
-      crop = {
-        x: dimensions.height - crop.y - crop.height,
-        y: crop.x,
-        width: crop.height,
-        height: crop.width,
-      }
-      dimensions = { width: dimensions.height, height: dimensions.width }
-      rotation = ((rotation + 90) % 360) as MergeRotation
-    }
-
-    merge.updateVideo(item.id, {
-      rotation: 0,
-      cropX: crop.x,
-      cropY: crop.y,
-      cropWidth: crop.width,
-      cropHeight: crop.height,
+      cropX: Math.round(crop.x / Math.max(1, currentDimensions.width) * nextDimensions.width),
+      cropY: Math.round(crop.y / Math.max(1, currentDimensions.height) * nextDimensions.height),
+      cropWidth: Math.round(crop.width / Math.max(1, currentDimensions.width) * nextDimensions.width),
+      cropHeight: Math.round(crop.height / Math.max(1, currentDimensions.height) * nextDimensions.height),
     })
   }
 
@@ -2143,6 +2178,16 @@ export function MergePage() {
 	          <span>{merge.items.length} 个片段 · {formatDuration(totalDuration)}{probing ? ' · 读取媒体中' : ''}</span>
           <button
             type="button"
+            className={`editor-toolbar-utility ${videoListOpen ? 'active' : ''}`}
+            title={videoListOpen ? '收起视频列表面板' : '打开视频列表面板'}
+            aria-label={videoListOpen ? '收起视频列表面板' : '打开视频列表面板'}
+            aria-pressed={videoListOpen}
+            onClick={() => setVideoListOpen((open) => !open)}
+          >
+            <PanelLeft /><span>视频列表</span>
+          </button>
+          <button
+            type="button"
             className={`editor-toolbar-utility ${inspectorOpen ? 'active' : ''}`}
             title={inspectorOpen ? '收起属性与输出面板' : '打开属性与输出面板'}
             aria-label={inspectorOpen ? '收起属性与输出面板' : '打开属性与输出面板'}
@@ -2169,7 +2214,45 @@ export function MergePage() {
         </div>
       </GlassPanel>
 
-      <div className={`editor-main-grid ${inspectorOpen ? 'has-inspector' : ''}`}>
+      <div className={`editor-main-grid ${videoListOpen ? 'has-video-list' : ''} ${inspectorOpen ? 'has-inspector' : ''}`}>
+        <aside className={`editor-video-list-drawer ${videoListOpen ? 'is-open' : ''}`} aria-hidden={!videoListOpen}>
+          <div className="editor-inspector-drawer-head">
+            <span>视频列表</span>
+            <button type="button" title="收起视频列表面板" onClick={() => setVideoListOpen(false)}><PanelLeft /></button>
+          </div>
+          <div className="editor-video-list-items">
+            {clipLayouts.length > 0 ? clipLayouts.map((layout, index) => (
+              <button
+                type="button"
+                key={layout.item.id}
+                className={layout.item.id === effectiveSelectedClipId ? 'is-selected' : ''}
+                title={layout.item.path}
+                onClick={() => {
+                  setSelectedAudioId('')
+                  setSelectedTextId('')
+                  setSelectedClipId(layout.item.id)
+                  seekGlobal(layout.start)
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setSelectedAudioId('')
+                  setSelectedTextId('')
+                  setSelectedClipId(layout.item.id)
+                  setClipContextMenu({
+                    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 250)),
+                    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 390)),
+                    layout,
+                    time: layout.start,
+                  })
+                }}
+              >
+                <span>{index + 1}</span>
+                <div><strong>{layout.item.name}</strong><small>{formatPreciseTime(layout.start)} · {formatPreciseTime(layout.duration)}</small></div>
+              </button>
+            )) : <p>尚未导入视频</p>}
+          </div>
+        </aside>
         <GlassPanel
           ref={previewPanelRef}
           className={`editor-preview-panel frame-preview-card video-preview-card ${showOverlapToolbar ? 'has-overlap-layout' : ''}`}
@@ -2587,21 +2670,43 @@ export function MergePage() {
           </section>
         </div>
       )}
+      <MergeVideoOrderDialog
+        key={videoOrderRequest ? `${videoOrderRequest.mode}:${videoOrderRequest.items.map((item) => item.id).join('|')}` : 'closed'}
+        open={Boolean(videoOrderRequest)}
+        title={videoOrderRequest?.mode === 'import' ? '确认视频导入顺序' : '调整视频片段位置'}
+        description={videoOrderRequest?.mode === 'import'
+          ? '视频已按名称 ASCII 码从小到大排序。可拖动条目或使用箭头调整，确认后才会加入时间线。'
+          : '按当前时间线位置列出全部视频片段。调整顺序后，片段会交换对应的位置与轨道。'}
+        items={videoOrderRequest?.items ?? []}
+        focusedId={videoOrderRequest?.focusedId}
+        confirmLabel={videoOrderRequest?.mode === 'import' ? '按此顺序导入' : '应用位置顺序'}
+        onConfirm={confirmVideoOrder}
+        onClose={() => setVideoOrderRequest(null)}
+      />
+      <MergeRotationDialog
+        key={rotationClipId || 'closed'}
+        item={merge.items.find((item) => item.id === rotationClipId) ?? null}
+        onConfirm={(angle) => {
+          const item = merge.items.find((candidate) => candidate.id === rotationClipId)
+          if (item) applyClipRotation(item, angle)
+          setRotationClipId('')
+        }}
+        onClose={() => setRotationClipId('')}
+      />
       <MergeTimelineContextMenus
         track={trackContextMenu} clip={clipContextMenu} audio={audioContextMenu} text={textContextMenu}
         trackCount={{ video: merge.videoTracks.length, audio: merge.audioTracks.length, text: merge.textTracks.length }}
         clipRange={clipContextMenu ? `${formatPreciseTime(clipContextMenu.layout.item.trimStart)} - ${formatPreciseTime(clipSourceEnd(clipContextMenu.layout.item, metadata[normalizePath(clipContextMenu.layout.item.path)]))}` : ''}
         formatTime={formatPreciseTime}
         canSplit={Boolean(clipContextMenu && canSplitClipAt(clipContextMenu.layout, clipContextMenu.time, metadata))}
-        canRestoreRotation={Boolean(clipContextMenu?.layout.item.rotation)}
         canRestoreClip={Boolean(clipContextMenu && (clipContextMenu.layout.item.trimStart !== 0 || clipContextMenu.layout.item.trimEnd !== 0))}
         onTrackAddText={(track) => addTextAt(track.trackId, track.time ?? playheadRef.current)}
         onTrackAdd={(kind) => { if (kind === 'video') merge.addVideoTrack(); else if (kind === 'audio') merge.addAudioTrack(); else merge.addTextTrack(); setTrackContextMenu(null) }}
         onTrackRemove={(track) => { const removed = track.kind === 'video' ? merge.removeVideoTrack(track.trackId) : track.kind === 'audio' ? merge.removeAudioTrack(track.trackId) : merge.removeTextTrack(track.trackId); if (!removed) mergeRuntime.setError(`${trackKindLabel(track.kind)}至少保留一条。`); setTrackContextMenu(null) }}
         onClipSeek={(clip) => { seekGlobal(clip.time); setClipContextMenu(null) }} onClipPlay={(clip) => { seekGlobal(clip.layout.start, true); setClipContextMenu(null) }} onClipSplit={(clip) => splitClipAt(clip.layout, clip.time)} onClipExtractAudio={(clip) => extractClipAudio(clip.layout)}
-        onClipToggleMute={(clip) => { merge.updateVideo(clip.layout.item.id, { muted: !clip.layout.item.muted }); setClipContextMenu(null) }} onClipRotate={(clip) => { rotateClipRight(clip.layout.item); setClipContextMenu(null) }} onClipRestoreRotation={(clip) => { restoreClipRotation(clip.layout.item); setClipContextMenu(null) }}
+        onClipToggleMute={(clip) => { merge.updateVideo(clip.layout.item.id, { muted: !clip.layout.item.muted }); setClipContextMenu(null) }} onClipRotate={(clip) => { setRotationClipId(clip.layout.item.id); setClipContextMenu(null) }} onClipPosition={(clip) => openVideoPositionDialog(clip.layout.item.id)}
           onClipCrop={(clip) => { setSelectedAudioId(''); setSelectedClipId(clip.layout.item.id); seekGlobal(clip.layout.start); setClipContextMenu(null); window.requestAnimationFrame(() => openCropEditor()) }}
-        onClipDuplicate={(clip) => duplicateClip(clip.layout)} onClipMove={(clip, direction) => moveClip(clip.layout, direction)} canClipMove={(clip, direction) => Boolean(previousTrackLayout(clipLayouts, clip.layout, direction))} onClipRestore={(clip) => { merge.updateVideo(clip.layout.item.id, { trimStart: 0, trimEnd: 0 }); setClipContextMenu(null) }} onClipReveal={(clip) => { setClipContextMenu(null); void revealInFolder(clip.layout.item.path).catch((error) => mergeRuntime.setError(normalizeBackendError(error))) }} onClipRemove={(clip) => removeClip(clip.layout)}
+        onClipDuplicate={(clip) => duplicateClip(clip.layout)} onClipRestore={(clip) => { merge.updateVideo(clip.layout.item.id, { trimStart: 0, trimEnd: 0 }); setClipContextMenu(null) }} onClipReveal={(clip) => { setClipContextMenu(null); void revealInFolder(clip.layout.item.path).catch((error) => mergeRuntime.setError(normalizeBackendError(error))) }} onClipRemove={(clip) => removeClip(clip.layout)}
         onAudioSeek={(audio) => { seekGlobal(audio.layout.start); setAudioContextMenu(null) }} onAudioMoveToPlayhead={(audio) => { merge.updateAudio(audio.layout.item.id, { startTime: playheadRef.current }); setAudioContextMenu(null) }} onAudioMoveToStart={(audio) => { merge.updateAudio(audio.layout.item.id, { startTime: 0 }); setAudioContextMenu(null) }} onAudioEditProperties={(audio) => { setSelectedClipId(''); setSelectedTextId(''); setSelectedAudioId(audio.layout.item.id); setAudioContextMenu(null); setInspectorOpen(true) }} onAudioReveal={(audio) => { setAudioContextMenu(null); void revealInFolder(audio.layout.item.path).catch((error) => mergeRuntime.setError(normalizeBackendError(error))) }} onAudioRemove={(audio) => { merge.removeAudio(audio.layout.item.id); setSelectedAudioId(''); setAudioContextMenu(null) }}
         onTextSeek={(text) => { seekGlobal(text.text.startTime); setTextContextMenu(null) }} onTextMoveToPlayhead={(text) => { merge.updateText(text.text.id, { startTime: playheadRef.current }); setTextContextMenu(null) }} onTextEditProperties={(text) => { setTextContextMenu(null); setTextPropertiesId(text.text.id) }} onTextRemove={(text) => { merge.removeText(text.text.id); setSelectedTextId(''); setTextContextMenu(null) }}
       />

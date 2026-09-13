@@ -1691,6 +1691,10 @@ export function AnalyzePage() {
         busy={isBusy}
         historyReady={historyReady}
         onClose={() => setTaskLoadDialogOpen(false)}
+        onCreate={() => {
+          setTaskLoadDialogOpen(false)
+          void handleLoadTask(true)
+        }}
         onRefresh={() => void refreshHistoryTasks(true)}
         onConfirm={handleLoadExistingTask}
       />
@@ -1754,6 +1758,7 @@ function TaskLoadDialog({
   busy,
   historyReady,
   onClose,
+  onCreate,
   onRefresh,
   onConfirm,
 }: {
@@ -1764,6 +1769,7 @@ function TaskLoadDialog({
   busy: boolean
   historyReady: boolean
   onClose: () => void
+  onCreate: () => void
   onRefresh: () => void
   onConfirm: (task: AnalysisTaskRecord) => void
 }) {
@@ -1795,9 +1801,14 @@ function TaskLoadDialog({
             <h3>读取任务</h3>
             <p>从任务列表选择一个已有任务，读取后可在分析任务页面运行或查看状态。</p>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭读取任务" disabled={busy}>
-            <X size={18} />
-          </button>
+          <div className="task-load-head-actions">
+            <NeonButton variant="outline" type="button" onClick={onCreate} disabled={busy}>
+              <ListPlus size={16} />新建任务
+            </NeonButton>
+            <button type="button" onClick={onClose} aria-label="关闭读取任务" disabled={busy}>
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
         <div className="task-load-toolbar">

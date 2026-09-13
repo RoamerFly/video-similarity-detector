@@ -652,6 +652,32 @@ def unique_output_stem(output_dir: Path, stem: str, suffix: str = ".mp4") -> str
     return candidate
 
 
+def append_rotation_filter(filters: list[str], metadata: dict, item: dict) -> tuple[int, int, int]:
+    """Append a clockwise rotation and return its bounding-box dimensions."""
+    rotation = int(round(number(item.get("rotation")))) % 360
+    width = int(metadata["width"])
+    height = int(metadata["height"])
+    if rotation == 90:
+        filters.append("transpose=clock")
+        return rotation, height, width
+    if rotation == 180:
+        filters.extend(["hflip", "vflip"])
+        return rotation, width, height
+    if rotation == 270:
+        filters.append("transpose=cclock")
+        return rotation, height, width
+    if rotation == 0:
+        return rotation, width, height
+
+    radians = math.radians(rotation)
+    filters.append(
+        f"rotate={radians:.10f}:ow=rotw({radians:.10f}):oh=roth({radians:.10f}):c=black"
+    )
+    rotated_width = max(2, int(math.ceil(abs(width * math.cos(radians)) + abs(height * math.sin(radians)))))
+    rotated_height = max(2, int(math.ceil(abs(width * math.sin(radians)) + abs(height * math.cos(radians)))))
+    return rotation, rotated_width, rotated_height
+
+
 def build_video_filter(
     index: int,
     metadata: dict,
@@ -665,19 +691,9 @@ def build_video_filter(
     clip_duration = max(0.01, end - start)
     filters = [f"[{index}:v:0]trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS"]
 
-    rotation = int(number(item.get("rotation"))) % 360
-    if rotation == 90:
-        filters.append("transpose=clock")
-    elif rotation == 180:
-        filters.extend(["hflip", "vflip"])
-    elif rotation == 270:
-        filters.append("transpose=cclock")
-    else:
-        rotation = 0
+    _rotation, source_width, source_height = append_rotation_filter(filters, metadata, item)
 
     if item.get("cropEnabled"):
-        source_width = metadata["height"] if rotation in {90, 270} else metadata["width"]
-        source_height = metadata["width"] if rotation in {90, 270} else metadata["height"]
         crop_x = max(0, int(number(item.get("cropX"))))
         crop_y = max(0, int(number(item.get("cropY"))))
         crop_width = int(number(item.get("cropWidth"), source_width))
@@ -997,20 +1013,10 @@ def layout_cells(
 
 
 def append_rotation_and_crop(filters: list[str], metadata: dict, item: dict) -> None:
-    rotation = int(number(item.get("rotation"))) % 360
-    if rotation == 90:
-        filters.append("transpose=clock")
-    elif rotation == 180:
-        filters.extend(["hflip", "vflip"])
-    elif rotation == 270:
-        filters.append("transpose=cclock")
-    else:
-        rotation = 0
+    _rotation, source_width, source_height = append_rotation_filter(filters, metadata, item)
 
     if not item.get("cropEnabled"):
         return
-    source_width = metadata["height"] if rotation in {90, 270} else metadata["width"]
-    source_height = metadata["width"] if rotation in {90, 270} else metadata["height"]
     crop_x = max(0, int(number(item.get("cropX"))))
     crop_y = max(0, int(number(item.get("cropY"))))
     crop_width = int(number(item.get("cropWidth"), source_width))

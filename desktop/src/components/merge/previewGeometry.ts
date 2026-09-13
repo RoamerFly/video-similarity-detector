@@ -121,16 +121,28 @@ export function previewExportVideoStyle(
 }
 
 export function rotationMatrix(rotation: MergeRotation, rawWidth: number, rawHeight: number) {
-  if (rotation === 90) return { a: 0, b: 1, c: -1, d: 0, e: rawHeight, f: 0 }
-  if (rotation === 180) return { a: -1, b: 0, c: 0, d: -1, e: rawWidth, f: rawHeight }
-  if (rotation === 270) return { a: 0, b: -1, c: 1, d: 0, e: 0, f: rawWidth }
-  return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }
+  const radians = (((rotation % 360) + 360) % 360) * Math.PI / 180
+  const cosine = Math.cos(radians)
+  const sine = Math.sin(radians)
+  const corners = [
+    { x: 0, y: 0 },
+    { x: rawWidth * cosine, y: rawWidth * sine },
+    { x: -rawHeight * sine, y: rawHeight * cosine },
+    { x: rawWidth * cosine - rawHeight * sine, y: rawWidth * sine + rawHeight * cosine },
+  ]
+  const minX = Math.min(...corners.map((point) => point.x))
+  const minY = Math.min(...corners.map((point) => point.y))
+  return { a: cosine, b: sine, c: -sine, d: cosine, e: -minX, f: -minY }
 }
 
 export function rotatedDimensions(width: number, height: number, rotation: MergeRotation) {
-  return rotation === 90 || rotation === 270
-    ? { width: height, height: width }
-    : { width, height }
+  const radians = (((rotation % 360) + 360) % 360) * Math.PI / 180
+  const cosine = Math.abs(Math.cos(radians))
+  const sine = Math.abs(Math.sin(radians))
+  return {
+    width: Math.max(1, Math.round(width * cosine + height * sine)),
+    height: Math.max(1, Math.round(width * sine + height * cosine)),
+  }
 }
 
 export function evenDimension(value: number) {

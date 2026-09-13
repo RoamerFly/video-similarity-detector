@@ -242,6 +242,23 @@ def test_rotation_and_clip_crop_are_applied_before_output_scaling():
     assert filter_text.index("crop=800:1200:10:20") < filter_text.index("scale=1280:720")
 
 
+def test_arbitrary_rotation_uses_bounding_box_filter():
+    filters = []
+    rotation, width, height = merge_videos.append_rotation_filter(
+        filters,
+        {"width": 1920, "height": 1080},
+        {"rotation": 45},
+    )
+
+    assert rotation == 45
+    assert width == 2122
+    assert height == 2122
+    assert len(filters) == 1
+    assert filters[0].startswith("rotate=0.785398")
+    assert "ow=rotw(" in filters[0]
+    assert "oh=roth(" in filters[0]
+
+
 def test_each_clip_uses_its_own_transform_settings():
     metadata = {
         "duration": 4.0,

@@ -116,6 +116,7 @@ describe('merge preview geometry', () => {
   it('handles rotation dimensions and keeps output dimensions even', () => {
     expect(rotatedDimensions(1920, 1080, 90)).toEqual({ width: 1080, height: 1920 })
     expect(rotatedDimensions(1920, 1080, 180)).toEqual({ width: 1920, height: 1080 })
+    expect(rotatedDimensions(100, 100, 45)).toEqual({ width: 141, height: 141 })
     expect(evenDimension(1919)).toBe(1918)
     expect(evenDimension(1)).toBe(2)
   })

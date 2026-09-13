@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 
 import {
@@ -11,8 +11,13 @@ import { extension } from './mergeFormat'
 const audioExtensions = new Set(['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'wma'])
 const videoExtensions = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'])
 
-export function useMergeFileDrop() {
+export function useMergeFileDrop(onVideoPaths?: (paths: string[]) => void) {
   const [dropActive, setDropActive] = useState(false)
+  const onVideoPathsRef = useRef(onVideoPaths)
+
+  useEffect(() => {
+    onVideoPathsRef.current = onVideoPaths
+  }, [onVideoPaths])
 
   useEffect(() => {
     if (!hasTauriRuntime()) return undefined
@@ -34,7 +39,8 @@ export function useMergeFileDrop() {
       const videoPaths = event.payload.paths.filter((path) => videoExtensions.has(extension(path)))
       const store = useMergeStore.getState()
       if (videoPaths.length > 0) {
-        store.addVideos(videoPaths.map((path) => ({ path, name: fileName(path) })))
+        if (onVideoPathsRef.current) onVideoPathsRef.current(videoPaths)
+        else store.addVideos(videoPaths.map((path) => ({ path, name: fileName(path) })))
       }
       if (audioPaths.length > 0) store.addAudioFiles(audioPaths)
     }).then((unlisten) => {

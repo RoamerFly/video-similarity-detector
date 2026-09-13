@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   basicOutputNameError,
   canConfirmExport,
+  compareVideoNamesAscii,
   directoryFromPath,
   outputNameStem,
   resolveExportDirectory,
@@ -17,6 +18,18 @@ const valid = {
 }
 
 describe('merge export form validation', () => {
+  it('sorts imported videos by case-sensitive ASCII filename order', () => {
+    const videos = [
+      { name: 'b.mp4', path: 'C:/b.mp4' },
+      { name: 'A.mp4', path: 'C:/A.mp4' },
+      { name: 'a.mp4', path: 'C:/a.mp4' },
+      { name: '10.mp4', path: 'C:/10.mp4' },
+    ]
+    expect(videos.sort(compareVideoNamesAscii).map((item) => item.name)).toEqual([
+      '10.mp4', 'A.mp4', 'a.mp4', 'b.mp4',
+    ])
+  })
+
   it('derives a de-duplicated source folder list in clip order', () => {
     expect(sourceDirectoriesFromPaths([
       'D:/footage/first.mp4',
