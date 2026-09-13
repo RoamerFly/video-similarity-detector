@@ -508,12 +508,15 @@ def reset_task_stage_and_downstream(stage_id: str) -> None:
             "elapsedMs": 0,
             "message": "等待前置阶段完成",
         })
-    update_task_manifest(
-        stages=stages,
-        activeStage="",
-        progress=task_stage_progress(stages),
-        completedPairs=0 if stage_id in {"scan", "cache", "features", "candidate", "compare"} else ACTIVE_TASK_MANIFEST.get("completedPairs", 0),
-    )
+    patch = {
+        "stages": stages,
+        "activeStage": "",
+        "progress": task_stage_progress(stages),
+        "completedPairs": 0 if stage_id in {"scan", "cache", "features", "candidate", "compare"} else ACTIVE_TASK_MANIFEST.get("completedPairs", 0),
+    }
+    if stage_id == "scan":
+        patch["streamValidation"] = {}
+    update_task_manifest(**patch)
 
 
 def validate_stage_prerequisites(stage_id: str) -> None:
@@ -1115,6 +1118,7 @@ ACTIVE_TASK_MANIFEST: dict = {}
 TASK_MANIFEST_LOCK = RLock()
 TARGET_TASK_STAGE = ""
 ACTIVE_RESUME_WRITER = None
+STREAM_VALIDATION_CHECKPOINT_VERSION = 1
 
 
 def close_active_resume_writer() -> None:
@@ -1155,6 +1159,110 @@ def task_state_path(cache_dir: Path, task_id: str) -> Path:
     if not safe_task_id:
         safe_task_id = f"analysis-{int(time.time() * 1000)}"
     return cache_dir / "cache" / "tasks" / safe_task_id / "resume.state.json"
+
+
+def _checkpoint_path_key(path: Path) -> str:
+    """Return a stable per-platform key for a source video path."""
+
+    try:
+        resolved = str(path.resolve(strict=False))
+    except OSError:
+        resolved = str(path)
+    return _normalize_manifest_path(os.path.normcase(resolved))
+
+
+def stream_validation_signature(
+    *,
+    skip_stream_validation: bool,
+    error_tolerance: str,
+    severe_error_limit: int | None,
+    missing_picture_limit: int | None,
+    ffmpeg: str,
+) -> dict:
+    """Describe every input that can change the stream-validation result."""
+
+    executable = file_fingerprint(Path(ffmpeg)) if ffmpeg else {}
+    return {
+        "version": STREAM_VALIDATION_CHECKPOINT_VERSION,
+        "skipStreamValidation": bool(skip_stream_validation),
+        "errorTolerance": str(error_tolerance),
+        "severeErrorLimit": severe_error_limit,
+        "missingPictureLimit": missing_picture_limit,
+        "ffmpegPath": executable.get("path", ""),
+        "ffmpegSize": executable.get("size"),
+        "ffmpegMtimeNs": executable.get("mtime_ns"),
+    }
+
+
+def prepare_stream_validation_checkpoint(
+    existing: object,
+    signature: dict,
+    videos: list[Path],
+) -> dict:
+    """Keep only successful checkpoints for unchanged videos and settings."""
+
+    source = existing if isinstance(existing, dict) else {}
+    source_entries = source.get("videos") if source.get("signature") == signature else {}
+    if not isinstance(source_entries, dict):
+        source_entries = {}
+
+    retained: dict[str, dict] = {}
+    for video_path in videos:
+        key = _checkpoint_path_key(video_path)
+        entry = source_entries.get(key)
+        fingerprint = file_fingerprint(video_path)
+        if not isinstance(entry, dict):
+            continue
+        if (
+            entry.get("size") == fingerprint.get("size")
+            and entry.get("mtimeNs") == fingerprint.get("mtime_ns")
+            and isinstance(entry.get("frameCount"), int)
+            and entry["frameCount"] > 0
+        ):
+            retained[key] = entry
+
+    return {
+        "version": STREAM_VALIDATION_CHECKPOINT_VERSION,
+        "signature": signature,
+        "videos": retained,
+    }
+
+
+def reusable_stream_validation_entry(checkpoint: dict, video_path: Path) -> dict | None:
+    entries = checkpoint.get("videos") if isinstance(checkpoint, dict) else None
+    if not isinstance(entries, dict):
+        return None
+    entry = entries.get(_checkpoint_path_key(video_path))
+    if not isinstance(entry, dict):
+        return None
+    fingerprint = file_fingerprint(video_path)
+    if (
+        entry.get("size") != fingerprint.get("size")
+        or entry.get("mtimeNs") != fingerprint.get("mtime_ns")
+        or not isinstance(entry.get("frameCount"), int)
+        or entry["frameCount"] <= 0
+    ):
+        return None
+    return entry
+
+
+def checkpoint_stream_validation(
+    checkpoint: dict,
+    video_path: Path,
+    frame_count: int,
+) -> None:
+    """Persist one completed video immediately so cancellation loses no work."""
+
+    fingerprint = file_fingerprint(video_path)
+    entries = checkpoint.setdefault("videos", {})
+    entries[_checkpoint_path_key(video_path)] = {
+        "path": fingerprint.get("path", ""),
+        "size": fingerprint.get("size"),
+        "mtimeNs": fingerprint.get("mtime_ns"),
+        "frameCount": max(1, int(frame_count)),
+        "validatedAt": datetime.now().isoformat(),
+    }
+    update_task_manifest(streamValidation=checkpoint)
 
 
 def write_json_atomic(path: Path, payload: dict) -> None:
@@ -2077,34 +2185,70 @@ def main():
     else:
         ffmpeg = resolve_ffmpeg(project_root)
 
+    severe_error_limit = None if args.error_severe_limit < 0 else args.error_severe_limit
+    missing_picture_limit = None if args.error_missing_limit < 0 else args.error_missing_limit
+    validation_checkpoint = prepare_stream_validation_checkpoint(
+        ACTIVE_TASK_MANIFEST.get("streamValidation"),
+        stream_validation_signature(
+            skip_stream_validation=args.skip_stream_validation,
+            error_tolerance=args.error_tolerance,
+            severe_error_limit=severe_error_limit,
+            missing_picture_limit=missing_picture_limit,
+            ffmpeg=ffmpeg,
+        ),
+        scanned_videos,
+    )
+    if not reuse_completed_scan:
+        update_task_manifest(streamValidation=validation_checkpoint)
+    completed_validation_count = len(validation_checkpoint.get("videos", {}))
+
     for probe_index, video_path in enumerate(videos_to_validate, start=1):
         raise_if_cancelled(cancel_file)
+        reused_validation = reusable_stream_validation_entry(validation_checkpoint, video_path)
         emit_progress(
             "scan",
-            probe_index - 1,
+            completed_validation_count,
             original_video_count,
-            f"校验视频 {probe_index}/{original_video_count}：{video_path.name}",
-            probe_index - 1,
+            (
+                f"复用视频校验记录 {probe_index}/{original_video_count}：{video_path.name}"
+                if reused_validation is not None
+                else f"校验视频 {probe_index}/{original_video_count}：{video_path.name}"
+            ),
+            completed_validation_count,
             original_video_count,
-            "校验视频码流",
+            "读取已完成校验记录" if reused_validation is not None else "校验视频码流",
         )
+        if reused_validation is not None:
+            video_frame_counts[video_path] = int(reused_validation["frameCount"])
+            videos.append(video_path)
+            emit_progress(
+                "scan",
+                completed_validation_count,
+                original_video_count,
+                f"已复用校验记录 {probe_index}/{original_video_count}：{video_path.name}",
+                completed_validation_count,
+                original_video_count,
+                "视频校验进度已恢复",
+            )
+            continue
+
         validation_error = None
         if not args.skip_stream_validation:
             validation_error = validate_video_stream(
                 ffmpeg,
                 video_path,
                 args.error_tolerance,
-                None if args.error_severe_limit < 0 else args.error_severe_limit,
-                None if args.error_missing_limit < 0 else args.error_missing_limit,
+                severe_error_limit,
+                missing_picture_limit,
             )
         if validation_error:
             original_path = video_path.resolve()
             emit_progress(
                 "scan",
-                probe_index - 1,
+                completed_validation_count,
                 original_video_count,
                 f"正在隔离错误视频：{video_path.name}",
-                probe_index - 1,
+                completed_validation_count,
                 original_video_count,
                 "移动到 data/error_videos",
             )
@@ -2146,10 +2290,32 @@ def main():
                     file=sys.stderr,
                     flush=True,
                 )
+            completed_validation_count += 1
+            emit_progress(
+                "scan",
+                completed_validation_count,
+                original_video_count,
+                f"视频校验完成 {probe_index}/{original_video_count}：{video_path.name}",
+                completed_validation_count,
+                original_video_count,
+                "错误视频已移出比较列表",
+            )
             continue
 
-        video_frame_counts[video_path] = probe_video_frame_count(video_path, ffmpeg)
+        frame_count = probe_video_frame_count(video_path, ffmpeg)
+        video_frame_counts[video_path] = frame_count
         videos.append(video_path)
+        checkpoint_stream_validation(validation_checkpoint, video_path, frame_count)
+        completed_validation_count += 1
+        emit_progress(
+            "scan",
+            completed_validation_count,
+            original_video_count,
+            f"视频校验完成 {probe_index}/{original_video_count}：{video_path.name}",
+            completed_validation_count,
+            original_video_count,
+            "校验进度已保存",
+        )
 
     if len(videos) < 2:
         log(

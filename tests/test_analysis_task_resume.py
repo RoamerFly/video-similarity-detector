@@ -139,3 +139,68 @@ def test_stage_progress_and_redo_reset_downstream(tmp_path: Path):
     assert stages["features"]["status"] == "pending"
     assert stages["candidate"]["status"] == "pending"
     assert batch_compare.ACTIVE_TASK_MANIFEST["progress"] == 20.0
+
+
+def test_stream_validation_checkpoint_reuses_unchanged_video(tmp_path: Path):
+    video = tmp_path / "long-video.mp4"
+    video.write_bytes(b"video-content")
+    manifest_path = batch_compare.task_state_path(tmp_path, "validation-resume").parent / "task.json"
+    signature = batch_compare.stream_validation_signature(
+        skip_stream_validation=False,
+        error_tolerance="balanced",
+        severe_error_limit=None,
+        missing_picture_limit=None,
+        ffmpeg="",
+    )
+    checkpoint = batch_compare.prepare_stream_validation_checkpoint({}, signature, [video])
+    batch_compare.ACTIVE_TASK_MANIFEST_PATH = manifest_path
+    batch_compare.ACTIVE_TASK_MANIFEST = {"id": "validation-resume", "status": "running"}
+
+    batch_compare.checkpoint_stream_validation(checkpoint, video, 1234)
+
+    saved = json.loads(manifest_path.read_text(encoding="utf-8"))["streamValidation"]
+    resumed = batch_compare.prepare_stream_validation_checkpoint(saved, signature, [video])
+    entry = batch_compare.reusable_stream_validation_entry(resumed, video)
+    assert entry is not None
+    assert entry["frameCount"] == 1234
+
+
+def test_stream_validation_checkpoint_rejects_changed_video_or_policy(tmp_path: Path):
+    video = tmp_path / "changed-video.mp4"
+    video.write_bytes(b"first")
+    signature = batch_compare.stream_validation_signature(
+        skip_stream_validation=False,
+        error_tolerance="balanced",
+        severe_error_limit=None,
+        missing_picture_limit=None,
+        ffmpeg="",
+    )
+    checkpoint = batch_compare.prepare_stream_validation_checkpoint({}, signature, [video])
+    fingerprint = batch_compare.file_fingerprint(video)
+    checkpoint.setdefault("videos", {})[batch_compare._checkpoint_path_key(video)] = {
+        "path": fingerprint["path"],
+        "size": fingerprint["size"],
+        "mtimeNs": fingerprint["mtime_ns"],
+        "frameCount": 10,
+    }
+
+    video.write_bytes(b"second-and-different")
+    assert batch_compare.prepare_stream_validation_checkpoint(checkpoint, signature, [video])["videos"] == {}
+
+    changed_policy = {**signature, "errorTolerance": "strict"}
+    assert batch_compare.prepare_stream_validation_checkpoint(checkpoint, changed_policy, [video])["videos"] == {}
+
+
+def test_redo_scan_clears_stream_validation_checkpoint(tmp_path: Path):
+    manifest_path = batch_compare.task_state_path(tmp_path, "redo-validation").parent / "task.json"
+    batch_compare.ACTIVE_TASK_MANIFEST_PATH = manifest_path
+    batch_compare.ACTIVE_TASK_MANIFEST = {
+        "id": "redo-validation",
+        "status": "paused",
+        "stages": batch_compare.default_task_stages(),
+        "streamValidation": {"videos": {"old": {"frameCount": 1}}},
+    }
+
+    batch_compare.reset_task_stage_and_downstream("scan")
+
+    assert batch_compare.ACTIVE_TASK_MANIFEST["streamValidation"] == {}
