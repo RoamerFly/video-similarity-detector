@@ -100,8 +100,10 @@ import {
   type ClipLayout,
 } from '@/components/merge/timelineModel'
 import { Translated } from '@/i18n/Translated'
+import { translateText } from '@/i18n/messages'
 import { useI18n } from '@/i18n/useI18n'
 import {
+  authorizeMediaPath,
   cancelVideoMerge,
   fileName,
   localFileSrc,
@@ -226,7 +228,7 @@ function releasePreviewMedia(media: HTMLMediaElement) {
 }
 
 export function MergePage() {
-  const { t, tm } = useI18n()
+  const { language, t, tm } = useI18n()
   const merge = useMergeStore(useShallow((state) => ({
     addAudio: state.addAudio,
     addAudioFiles: state.addAudioFiles,
@@ -274,6 +276,7 @@ export function MergePage() {
     setProgress: state.setProgress,
     setRunning: state.setRunning,
   })))
+  const setMergeError = mergeRuntime.setError
   const {
     audioTracks: mergeAudioTracks,
     updateAudios: updateMergeAudios,
@@ -286,11 +289,35 @@ export function MergePage() {
     items: merge.items,
     projectRoot,
     pythonPath,
-    onError: mergeRuntime.setError,
+    onError: setMergeError,
   })
   const previewRef = useRef<HTMLVideoElement | null>(null)
   const previewVideoRefs = useRef(new Map<string, HTMLVideoElement>())
   const previewAudioRefs = useRef(new Map<string, HTMLAudioElement>())
+  const mediaPathKey = useMemo(() => [...new Set([
+    ...merge.items.map((item) => item.path),
+    ...merge.audioItems.map((item) => item.path),
+  ])].join('\u0000'), [merge.items, merge.audioItems])
+  const [authorizedMediaPaths, setAuthorizedMediaPaths] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    let alive = true
+    const paths = mediaPathKey ? mediaPathKey.split('\u0000') : []
+    for (const path of paths) {
+      void authorizeMediaPath(path)
+        .then((status) => {
+          if (!alive) return
+          if (!status.isFile) {
+            setMergeError(`${translateText('视频预览加载失败', language)}：${fileName(path)}`)
+            return
+          }
+          setAuthorizedMediaPaths((current) => new Set(current).add(path))
+        })
+        .catch((error) => {
+          if (alive) setMergeError(normalizeBackendError(error))
+        })
+    }
+    return () => { alive = false }
+  }, [mediaPathKey, setMergeError, language])
   const previewPanelRef = useRef<HTMLElement | null>(null)
   const previewScreenRef = useRef<HTMLDivElement | null>(null)
   const outputCanvasRef = useRef<HTMLDivElement | null>(null)
@@ -363,6 +390,21 @@ export function MergePage() {
   const [resolutionPreviewDuration, setResolutionPreviewDuration] = useState(5)
   const [resolutionPreviewClipIds, setResolutionPreviewClipIds] = useState<string[]>([])
   const [resolutionPreview, setResolutionPreview] = useState<{ path: string; start: number; duration: number; signature: string } | null>(null)
+  useEffect(() => {
+    const path = resolutionPreview?.path
+    if (!path) return undefined
+    let alive = true
+    void authorizeMediaPath(path)
+      .then((status) => {
+        if (!alive) return
+        if (status.isFile) setAuthorizedMediaPaths((current) => new Set(current).add(path))
+        else setMergeError(`${translateText('视频预览加载失败', language)}：${fileName(path)}`)
+      })
+      .catch((error) => {
+        if (alive) setMergeError(normalizeBackendError(error))
+      })
+    return () => { alive = false }
+  }, [resolutionPreview?.path, setMergeError, language])
   const [exportDirectoryDialogOpen, setExportDirectoryDialogOpen] = useState(false)
   const [exportDirectoryMode, setExportDirectoryMode] = useState<ExportDirectoryMode>('browse')
   const [exportSourceDirectory, setExportSourceDirectory] = useState('')
@@ -2313,6 +2355,7 @@ export function MergePage() {
             outputCanvasRef={outputCanvasRef}
             editDraft={previewEditDraft}
             previewVideoRefs={previewVideoRefs}
+            authorizedMediaPaths={authorizedMediaPaths}
             outputCanvasGeometry={outputCanvasGeometry}
             settings={merge.settings}
             previewLayouts={previewLayouts}
@@ -2606,7 +2649,7 @@ export function MergePage() {
                 previewAudioRefs.current.delete(audio.id)
               }
             }}
-            src={localFileSrc(audio.path)}
+            src={authorizedMediaPaths.has(audio.path) ? localFileSrc(audio.path) : undefined}
             crossOrigin="anonymous"
             preload="metadata"
             onLoadedMetadata={(event) => {

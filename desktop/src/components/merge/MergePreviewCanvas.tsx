@@ -40,6 +40,7 @@ interface MergePreviewCanvasProps {
   outputCanvasRef: MutableRef<HTMLDivElement | null>
   editDraft: PreviewEditDraft
   previewVideoRefs: MutableRef<Map<string, HTMLVideoElement>>
+  authorizedMediaPaths: ReadonlySet<string>
   outputCanvasGeometry: PreviewCanvasGeometry | null
   settings: Pick<MergeSettings, 'canvasBackground' | 'fitMode' | 'height' | 'width' | 'fps'>
   previewLayouts: ClipLayout[]
@@ -105,6 +106,7 @@ export function MergePreviewCanvas({
   outputCanvasRef,
   editDraft,
   previewVideoRefs,
+  authorizedMediaPaths,
   outputCanvasGeometry,
   settings,
   previewLayouts,
@@ -394,7 +396,7 @@ export function MergePreviewCanvas({
                     }
                   }}
                   data-clip-id={layout.item.id}
-                  src={localFileSrc(layout.item.path)}
+                  src={authorizedMediaPaths.has(layout.item.path) ? localFileSrc(layout.item.path) : undefined}
                   crossOrigin="anonymous"
                   style={previewExportVideoStyle(
                     layout.item,
@@ -405,7 +407,7 @@ export function MergePreviewCanvas({
                     cropEditing,
                   )}
                   muted={layout.item.muted}
-                  preload="auto"
+                  preload="metadata"
                   playsInline
                   onLoadedMetadata={() => {
                     if (layout.item.id === previewClip?.id) onPreviewMetadataLoaded()
@@ -527,7 +529,7 @@ export function MergePreviewCanvas({
             <video
               ref={computedPreviewRef}
               className="editor-preview-computed-video"
-              src={localFileSrc(resolutionPreview.path)}
+              src={authorizedMediaPaths.has(resolutionPreview.path) ? localFileSrc(resolutionPreview.path) : undefined}
               aria-label={`${t('已计算真实分辨率预览')}，${t('时长')} ${resolutionPreview.duration.toFixed(1)} ${t('秒')}`}
               style={{ left: 0, top: 0, width: outputCanvasGeometry.width, height: outputCanvasGeometry.height }}
               playsInline
