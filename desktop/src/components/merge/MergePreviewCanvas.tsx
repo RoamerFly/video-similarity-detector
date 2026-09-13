@@ -38,12 +38,12 @@ interface PixelRect {
 interface MergePreviewCanvasProps {
   previewScreenRef: MutableRef<HTMLDivElement | null>
   outputCanvasRef: MutableRef<HTMLDivElement | null>
-  previewRef: MutableRef<HTMLVideoElement | null>
   editDraft: PreviewEditDraft
   previewVideoRefs: MutableRef<Map<string, HTMLVideoElement>>
   outputCanvasGeometry: PreviewCanvasGeometry | null
   settings: Pick<MergeSettings, 'canvasBackground' | 'fitMode' | 'height' | 'width' | 'fps'>
   previewLayouts: ClipLayout[]
+  preloadLayouts: ClipLayout[]
   previewCells: PreviewCanvasGeometry[]
   metadata: Record<string, VideoMetadata>
   effectiveSelectedClipId: string
@@ -103,12 +103,12 @@ const resizeHandles: CropHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 export function MergePreviewCanvas({
   previewScreenRef,
   outputCanvasRef,
-  previewRef,
   editDraft,
   previewVideoRefs,
   outputCanvasGeometry,
   settings,
   previewLayouts,
+  preloadLayouts,
   previewCells,
   metadata,
   effectiveSelectedClipId,
@@ -320,6 +320,10 @@ export function MergePreviewCanvas({
     width: draftGroup.width * outputCanvasGeometry.width,
     height: draftGroup.height * outputCanvasGeometry.height,
   } : activeGroupPixelRect
+  const mediaLayouts = [
+    ...previewLayouts,
+    ...preloadLayouts.filter((layout) => !previewLayouts.some((visible) => visible.item.id === layout.item.id)),
+  ]
   return (
     <div ref={fullscreenRef} className={`editor-preview-fullscreen-shell ${fallbackFullscreen ? 'is-fullscreen-fallback' : ''}`}>
       <div
@@ -344,10 +348,12 @@ export function MergePreviewCanvas({
             background: settings.canvasBackground === 'white' ? '#fff' : '#000',
           } : undefined}
         >
-          {previewLayouts.length > 0 ? previewLayouts.map((layout, index) => {
+          {previewLayouts.length > 0 ? mediaLayouts.map((layout) => {
+            const index = previewLayouts.findIndex((visible) => visible.item.id === layout.item.id)
+            const preloading = index < 0
             const info = metadata[normalizePath(layout.item.path)]
-            const cell = previewCells[index]
-            const layoutDraft = draft?.layout?.[layout.item.id]
+            const cell = preloading ? undefined : previewCells[index]
+            const layoutDraft = preloading ? undefined : draft?.layout?.[layout.item.id]
             const displayedCell = cell && layoutDraft && outputCanvasGeometry ? {
               left: layoutDraft.x * outputCanvasGeometry.width,
               top: layoutDraft.y * outputCanvasGeometry.height,
@@ -364,27 +370,27 @@ export function MergePreviewCanvas({
                   effectiveSelectedClipId === layout.item.id ? 'selected' : '',
                   activeLayoutCount > 1 && !cropEditing ? 'draggable' : '',
                   layoutDraft ? 'preview-transforming' : '',
+                  preloading ? 'preview-preloading' : '',
                 ].filter(Boolean).join(' ')}
                 key={layout.item.id}
                 title={activeLayoutCount > 1
                   ? `${layout.item.name}${t('：拖动可调整画面位置')}`
                   : layout.item.name}
-                style={displayedCell ? {
+                aria-hidden={preloading || undefined}
+                style={preloading ? undefined : displayedCell ? {
                   left: displayedCell.left,
                   top: displayedCell.top,
                   width: displayedCell.width,
                   height: displayedCell.height,
                 } : undefined}
-                onPointerDown={(event) => onPreviewLayoutPointerDown(event, layout, index)}
+                onPointerDown={preloading ? undefined : (event) => onPreviewLayoutPointerDown(event, layout, index)}
               >
                 {!suspendMedia && <video
                   ref={(node) => {
                     if (node) {
                       previewVideoRefs.current.set(layout.item.id, node)
-                      if (layout.item.id === previewClip?.id) previewRef.current = node
                     } else {
                       previewVideoRefs.current.delete(layout.item.id)
-                      if (previewRef.current?.dataset.clipId === layout.item.id) previewRef.current = null
                     }
                   }}
                   data-clip-id={layout.item.id}
@@ -399,7 +405,7 @@ export function MergePreviewCanvas({
                     cropEditing,
                   )}
                   muted={layout.item.muted}
-                  preload="metadata"
+                  preload="auto"
                   playsInline
                   onLoadedMetadata={() => {
                     if (layout.item.id === previewClip?.id) onPreviewMetadataLoaded()

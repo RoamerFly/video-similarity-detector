@@ -67,6 +67,47 @@ export function activeLayoutsAt(layouts: ClipLayout[], time: number, trackIds: s
     ))
 }
 
+/**
+ * Select a small set of inactive clips around the playhead for preview
+ * preloading. Keeping the nearest clips mounted avoids creating a new media
+ * element at a cut while still bounding decoder and buffer usage.
+ */
+export function nearbyInactiveVideoLayouts(
+  layouts: ClipLayout[],
+  time: number,
+  activeIds: Iterable<string>,
+  limit = 3,
+) {
+  const active = new Set(activeIds)
+  const candidates = layouts
+    .filter((layout) => !active.has(layout.item.id))
+    .map((layout, index) => ({
+      layout,
+      index,
+      distance: layout.end <= time
+        ? time - layout.end
+        : layout.start >= time
+          ? layout.start - time
+          : 0,
+    }))
+  let next: (typeof candidates)[number] | undefined
+  let previous: (typeof candidates)[number] | undefined
+  for (const candidate of candidates) {
+    if (candidate.layout.start >= time && (!next || candidate.layout.start < next.layout.start)) next = candidate
+    if (candidate.layout.end <= time && (!previous || candidate.layout.end > previous.layout.end)) previous = candidate
+  }
+  const preferred = [next, previous].filter((candidate) => candidate !== undefined)
+  if (preferred.length >= limit) return preferred.slice(0, Math.max(0, limit)).map(({ layout }) => layout)
+  const remaining = candidates.filter((candidate) => !preferred.includes(candidate))
+    .sort((left, right) => (
+      left.distance - right.distance
+      || left.layout.start - right.layout.start
+      || left.index - right.index
+    ))
+  const selected = [...preferred, ...remaining]
+  return selected.slice(0, Math.max(0, limit)).map(({ layout }) => layout)
+}
+
 export function playbackStructureKey(
   layouts: ClipLayout[],
   textItems: MergeTextItem[],

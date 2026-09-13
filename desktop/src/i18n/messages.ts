@@ -1373,6 +1373,7 @@ const extraEnglishText: Record<string, string> = {
   // Compare page player / playback errors
   '同步播放不可用：左右两侧播放器尚未加载完成。请查看播放器错误详情并重试。': 'Sync playback unavailable: both players are still loading. Check the player errors and retry.',
   '同步播放失败': 'Sync playback failed',
+  '视频预览加载失败': 'Video preview failed to load',
   '至少一侧播放器未能开始播放。': 'at least one player failed to start.',
   '左侧播放器尚未加载完成': 'Left player not fully loaded',
   '右侧播放器尚未加载完成': 'Right player not fully loaded',

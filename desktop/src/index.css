@@ -6941,6 +6941,13 @@ select {
   contain: layout paint;
 }
 
+.editor-preview-item.preview-preloading {
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .editor-preview-item.selected {
   border-color: rgba(82, 213, 255, 0.9);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.48);

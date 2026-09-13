@@ -92,6 +92,7 @@ import {
   createTimelinePlaybackIndex,
   findLayoutAt,
   globalVideoTimelineGaps,
+  nearbyInactiveVideoLayouts,
   timelineGapPositionUpdates,
   timelineExchangeOrder,
   timelineExchangeUpdates,
@@ -607,6 +608,20 @@ export function MergePage() {
   const resolutionValue = customResolutionSelected ? 'custom' : matchedResolutionValue
   const visibleLayouts = activeLayouts.length > 0 ? activeLayouts : previewLayout ? [previewLayout] : []
   const previewLayouts = cropEditing && previewLayout ? [previewLayout] : visibleLayouts
+  const previewLayoutIds = previewLayouts.map((layout) => layout.item.id).join('\u0000')
+  const preloadLayouts = useMemo(
+    () => nearbyInactiveVideoLayouts(
+      clipLayouts,
+      structuralPlayhead,
+      previewLayoutIds.split('\u0000'),
+      2,
+    ),
+    [clipLayouts, previewLayoutIds, structuralPlayhead],
+  )
+  const preloadLayoutIds = useMemo(
+    () => new Set(preloadLayouts.map((layout) => layout.item.id)),
+    [preloadLayouts],
+  )
   const previewNormalizedCells = cropEditing
     ? previewLayouts.map(() => ({ x: 0, y: 0, width: 1, height: 1 }))
     : previewLayoutRects(previewLayouts.map((layout) => layout.item))
@@ -760,7 +775,7 @@ export function MergePage() {
       if (!active) {
         // Scrubbing can happen dozens of times per second. Only tear down a
         // decoder when its active interval actually ended.
-        if (previousVideoIds.has(id)) resetInactiveMedia(video)
+        if (previousVideoIds.has(id)) pauseMediaAtCurrentPosition(video)
         return
       }
       const targetVolume = active.item.muted ? 0 : (active.item.volume ?? 1)
@@ -813,7 +828,11 @@ export function MergePage() {
   const handlePreviewVideoReady = useEventCallback((layout: ClipLayout, video: HTMLVideoElement) => {
     const active = playbackIndex.activeVideosAt(playheadRef.current)
       .find((candidate) => candidate.item.id === layout.item.id)
-    if (!active) return
+    if (!active) {
+      // Decode the first trimmed frame before this clip becomes visible.
+      if (preloadLayoutIds.has(layout.item.id)) requestMediaSeek(video, layout.item.trimStart, 0.05)
+      return
+    }
     const target = targetMediaTime(active.item.trimStart, playheadRef.current, active.start)
     requestMediaSeek(video, target, 0.05)
     syncMediaAttributes(video, {
@@ -888,19 +907,25 @@ export function MergePage() {
     previewVideoRefs.current.forEach((video, id) => {
       const layout = activeVideoLayouts.get(id)
       if (!layout) {
-        resetInactiveMedia(video)
+        if (preloadLayoutIds.has(id)) {
+          pauseMediaAtCurrentPosition(video)
+          const preload = clipLayouts.find((candidate) => candidate.item.id === id)
+          if (preload && video.readyState >= 1) requestMediaSeek(video, preload.item.trimStart, 0.05)
+        } else resetInactiveMedia(video)
         return
       }
       const sync = () => {
         if (playbackGenerationRef.current !== generation) {
-          resetInactiveMedia(video)
+          if (preloadLayoutIds.has(id)) pauseMediaAtCurrentPosition(video)
+          else resetInactiveMedia(video)
           return
         }
         const currentLayout = new Map(
           playbackIndex.activeVideosAt(playheadRef.current).map((candidate) => [candidate.item.id, candidate]),
         ).get(id)
         if (!currentLayout) {
-          resetInactiveMedia(video)
+          if (preloadLayoutIds.has(id)) pauseMediaAtCurrentPosition(video)
+          else resetInactiveMedia(video)
           return
         }
         const target = targetMediaTime(currentLayout.item.trimStart, playheadRef.current, currentLayout.start)
@@ -959,21 +984,44 @@ export function MergePage() {
     activeVideoIdsRef.current = new Set(activeVideoLayouts.keys())
     activeAudioIdsRef.current = new Set(activeAudioLayouts.keys())
     return () => listeners.forEach((remove) => remove())
-  }, [activeAudioLayoutKey, activeLayoutKey, audioLayouts, playing, audioTrackIds, playbackIndex])
+  }, [activeAudioLayoutKey, activeLayoutKey, audioLayouts, playing, audioTrackIds, playbackIndex, preloadLayoutIds, clipLayouts])
 
   const handlePlaybackFrame = useEventCallback((next: number, timestamp: number) => {
+      const layouts = playbackIndex.activeVideosAt(next)
+      const structureKey = playbackIndex.structureKeyAt(next, layouts)
+      const failedLayout = layouts.find((layout) => previewVideoRefs.current.get(layout.item.id)?.error)
+      if (failedLayout) {
+        mergeRuntime.setError(`${t('视频预览加载失败')}：${failedLayout.item.name}`)
+        setPlaying(false)
+        return false
+      }
+      // The project clock must wait for the decoded frame at a cut. Otherwise
+      // the playhead runs on while the new clip is still blank or seeking.
+      const missingFrame = layouts.some((layout) => {
+        const video = previewVideoRefs.current.get(layout.item.id)
+        return !video || video.readyState < 2 || video.seeking
+      })
+      if (missingFrame) {
+        playheadRef.current = next
+        if (structureKey !== lastPlaybackStructureKeyRef.current) {
+          lastPlaybackStructureKeyRef.current = structureKey
+          setStructuralPlayhead(next)
+          if (layouts.length > 0 && !cropEditing) {
+            setSelectedClipId((current) => layouts.some((active) => active.item.id === current) ? current : layouts[0].item.id)
+          }
+        }
+        return false
+      }
       playheadRef.current = next
       playbackClock.setTime(next)
       // Query each active interval once per frame and reuse the result for
       // boundary detection and drift correction. The old implementation
       // repeated both interval searches in the same RAF tick.
-      const layouts = playbackIndex.activeVideosAt(next)
       const activeVideoLayouts = new Map(layouts.map((layout) => [layout.item.id, layout]))
       const activeAudios = playbackIndex.activeAudiosAt(next)
       const activeAudioLayouts = new Map(activeAudios.map((layout) => [layout.item.id, layout]))
       const previousVideoIds = activeVideoIdsRef.current
       const previousAudioIds = activeAudioIdsRef.current
-      const structureKey = playbackIndex.structureKeyAt(next, layouts)
       if (structureKey !== lastPlaybackStructureKeyRef.current) {
         lastPlaybackStructureKeyRef.current = structureKey
         setStructuralPlayhead(next)
@@ -991,7 +1039,9 @@ export function MergePage() {
       const nextAudioIds = new Set(activeAudioLayouts.keys())
       activeVideoIdsRef.current = nextVideoIds
       activeAudioIdsRef.current = nextAudioIds
-      if (timestamp - lastPlaybackSyncRef.current > 450) {
+      const boundaryChanged = [...nextVideoIds].some((id) => !previousVideoIds.has(id))
+        || [...previousVideoIds].some((id) => !nextVideoIds.has(id))
+      if (boundaryChanged || timestamp - lastPlaybackSyncRef.current > 450) {
         const candidateVideoIds = new Set([...previousVideoIds, ...nextVideoIds])
         candidateVideoIds.forEach((id) => {
           const video = previewVideoRefs.current.get(id)
@@ -1038,6 +1088,7 @@ export function MergePage() {
         })
         lastPlaybackSyncRef.current = timestamp
       }
+      return true
   })
 
   useEffect(() => {
@@ -2261,12 +2312,12 @@ export function MergePage() {
           <MergePreviewCanvas
             previewScreenRef={previewScreenRef}
             outputCanvasRef={outputCanvasRef}
-            previewRef={previewRef}
             editDraft={previewEditDraft}
             previewVideoRefs={previewVideoRefs}
             outputCanvasGeometry={outputCanvasGeometry}
             settings={merge.settings}
             previewLayouts={previewLayouts}
+            preloadLayouts={preloadLayouts}
             previewCells={previewCells}
             metadata={metadata}
             effectiveSelectedClipId={effectiveSelectedClipId}

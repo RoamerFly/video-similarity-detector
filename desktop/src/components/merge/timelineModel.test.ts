@@ -10,6 +10,7 @@ import {
   createTimelinePlaybackIndex,
   clipSourceEnd,
   nearestNonOverlappingStart,
+  nearbyInactiveVideoLayouts,
   playbackStructureKey,
   resolveTimelineDragStart,
   timelineLayoutsInRange,
@@ -113,6 +114,23 @@ describe('timeline layout behavior', () => {
     expect(activeLayoutsAt(layouts, 2, ['video-1']).map((layout) => layout.item.id)).toEqual(['second'])
     expect(playbackStructureKey(layouts, text, 1.5, ['video-1'])).toBe('first::title')
     expect(playbackStructureKey(layouts, text, 2, ['video-1'])).toBe('second::')
+  })
+
+  it('keeps only the nearest inactive clips available for preview preloading', () => {
+    const items = [
+      clip('previous', 'video-1', 2, 0),
+      clip('active', 'video-1', 2, 2),
+      clip('next', 'video-1', 2, 4),
+      clip('later', 'video-1', 2, 6),
+    ]
+    const layouts = buildClipLayouts(items, ['video-1'], metadata(items))
+
+    expect(nearbyInactiveVideoLayouts(layouts, 3, ['active'], 2).map((layout) => layout.item.id))
+      .toEqual(['next', 'previous'])
+    expect(nearbyInactiveVideoLayouts(layouts, 3.99, ['active'], 1).map((layout) => layout.item.id))
+      .toEqual(['next'])
+    expect(nearbyInactiveVideoLayouts(layouts, 3.99, ['active'], 2).map((layout) => layout.item.id))
+      .toContain('next')
   })
 
   it('snaps collisions on the same track but allows cross-track overlap', () => {

@@ -4,7 +4,7 @@ interface UsePlaybackRafOptions {
   playing: boolean
   duration: number
   getInitialTime: () => number
-  onFrame: (time: number, timestamp: number) => void
+  onFrame: (time: number, timestamp: number) => boolean | void
   onEnd: () => void
 }
 
@@ -19,16 +19,24 @@ export function usePlaybackRaf({ playing, duration, getInitialTime, onFrame, onE
 
   useEffect(() => {
     if (!playing) return undefined
-    const startedAt = performance.now()
+    let startedAt = performance.now()
     const initialTime = getInitialTime()
+    let acceptedTime = initialTime
     const tick = (timestamp: number) => {
       const time = initialTime + (timestamp - startedAt) / 1000
-      if (time >= duration) {
-        callbacksRef.current.onFrame(duration, timestamp)
-        callbacksRef.current.onEnd()
-        return
+      const boundedTime = Math.min(time, duration)
+      const accepted = callbacksRef.current.onFrame(boundedTime, timestamp)
+      if (accepted === false) {
+        // Rebase the monotonic clock while media decodes. Resuming from the
+        // last displayed frame prevents a blank clip from consuming time.
+        startedAt = timestamp - (acceptedTime - initialTime) * 1000
+      } else {
+        acceptedTime = boundedTime
+        if (boundedTime >= duration) {
+          callbacksRef.current.onEnd()
+          return
+        }
       }
-      callbacksRef.current.onFrame(time, timestamp)
       frameRef.current = window.requestAnimationFrame(tick)
     }
     frameRef.current = window.requestAnimationFrame(tick)
